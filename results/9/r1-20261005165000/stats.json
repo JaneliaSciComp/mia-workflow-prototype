@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/exm-drosophila-flyliconn-FlyID10-20250923_2ndGel_PBS_MES_B1_Atto488_40XW_002/crop-001_normalized.zarr",
+  "level": "s0",
+  "zarr_format": 2,
+  "reader": "zarr-python",
+  "shape": [
+    735,
+    2304,
+    2304
+  ],
+  "dtype": "uint16",
+  "chunks": [
+    52,
+    128,
+    128
+  ],
+  "total_chunks": 4860,
+  "chunks_read": 256,
+  "sampled_fraction": 0.05267489711934156,
+  "voxels_counted": 205570048,
+  "min": 95.0,
+  "max": 11373.0,
+  "mean": 286.3619139788302,
+  "std": 53.33501446919189,
+  "p01": 196.49200514414633,
+  "p50": 279.8212376194157,
+  "p99": 448.74642930083235,
+  "zero_fraction": 0.0,
+  "nonfinite": 0,
+  "outliers_low": 0,
+  "outliers_high": 0,
+  "elapsed_s": 10.82
+}
