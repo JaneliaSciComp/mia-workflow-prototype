@@ -24,7 +24,8 @@ async def test_lsf_histogram(rel, tmp_path):
     results = Path(os.environ.get("ZD_IT_RESULTS", PROJECT_DIR / ".it-results"))
     cfg = SimpleNamespace(lmd_root=LMD, results_dir=results, histogram=HistogramCfg(max_chunks=32),
                           cluster=ClusterCfg(profile="janelia_lsf",
-                                             resources={"cpus": 1, "memory": "4 GB", "walltime": "00:20", "queue": "local"}))
+                                             resources={"cpus": 1, "memory": "4 GB", "walltime": "00:20"},
+                                             project=os.environ.get("ZD_LSF_PROJECT")))
     c = Cluster(cfg)
     run_id = f"it-{tmp_path.name[-12:].strip('_')}"
     try:

@@ -76,6 +76,7 @@ class Cluster:
                 command=command, name=f"{issue}-{run_id}",  # executor prepends job_name_prefix
                 resources=ResourceSpec(cpus=r.get("cpus"), memory=r.get("memory"), walltime=r.get("walltime"),
                                        queue=r.get("queue"), work_dir=str(rd),
+                                       extra_args=["-P", self.cfg.cluster.project] if self.cfg.cluster.project else None,
                                        stdout_path=str(rd / "lsf.out"), stderr_path=str(rd / "lsf.err")),
                 prologue=prologue, env={"ZD_ISSUE": str(issue), "ZD_RUN_ID": run_id},
                 inherit_env=False, login_shell=True)

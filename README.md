@@ -77,5 +77,6 @@ pixi run pytest -m integration -s               # real bsub against two real vol
 ## Open items
 
 - [ ] Confirm `?raw=true` images render in the target repo (private-repo behaviour)
-- [ ] LSF queue for a 1 h / 4-CPU job (default `local`)
+- [x] LSF queue: none by default; `-W 01:00` auto-routes to `short` on the Janelia cluster
+- [ ] LSF billing project (`cluster.project`, passed as `bsub -P`); required for scicompsoft members
 - [ ] The job activates the env with `pixi shell-hook` from this checkout. The checkout must be on a filesystem compute nodes can see, and `pixi` must be on the login-shell PATH there

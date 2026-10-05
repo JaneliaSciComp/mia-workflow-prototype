@@ -48,7 +48,9 @@ class ClusterCfg(BaseModel):
     config_path: str = "./cluster_api.yaml"
     profile: str = "janelia_lsf"
     job_name_prefix: str = "zd"
-    resources: dict = {"cpus": 4, "memory": "16 GB", "walltime": "01:00", "queue": "local"}
+    # No queue: on the Janelia cluster, -W <= 60 auto-routes to `short` (best turnaround).
+    resources: dict = {"cpus": 4, "memory": "16 GB", "walltime": "01:00"}
+    project: str | None = None  # LSF billing project (bsub -P); required for scicompsoft members
 
 
 class HistogramCfg(BaseModel):
