@@ -20,6 +20,7 @@ from .config import load_config
 log = logging.getLogger("zarr_doctor")
 
 TRAIT_COLOR, STAGE_COLOR, META_COLOR = "d4c5f9", "0e8a16", "c5def5"
+QUERY_TIMEOUT = timedelta(seconds=10)  # queries block while no worker is up; fail instead of hanging
 
 
 def _setup_logging(cfg, name: str | None) -> None:
@@ -277,14 +278,14 @@ async def cmd_status(cfg, args) -> int:
 
     client, state = await _client(cfg), _state(cfg, readonly=True)
     if args.issue:
-        st = await client.get_workflow_handle(workflow_id(args.issue)).query(IssueWorkflow.status)
+        st = await client.get_workflow_handle(workflow_id(args.issue)).query(IssueWorkflow.status, rpc_timeout=QUERY_TIMEOUT)
         for k, v in vars(st).items():
             print(f"{k:10} {v}")
         return 0
     counts, busy = Counter(), []
     async for wf in client.list_workflows('WorkflowType="IssueWorkflow" AND ExecutionStatus="Running"'):
         try:
-            st = await client.get_workflow_handle(wf.id).query(IssueWorkflow.status)
+            st = await client.get_workflow_handle(wf.id).query(IssueWorkflow.status, rpc_timeout=QUERY_TIMEOUT)
         except Exception as e:
             counts["query-failed"] += 1
             log.warning("query %s failed: %s", wf.id, e)
@@ -315,7 +316,7 @@ async def cmd_janitor(cfg, args) -> int:
             continue
         issue, run_id = int(m.group(1)), m.group(2)
         try:
-            st = await client.get_workflow_handle(workflow_id(issue)).query(IssueWorkflow.status)
+            st = await client.get_workflow_handle(workflow_id(issue)).query(IssueWorkflow.status, rpc_timeout=QUERY_TIMEOUT)
             live = st.run_id == run_id and st.state in ("ACKED", "SUBMITTED", "RUNNING")
         except Exception:
             live = False  # no running workflow

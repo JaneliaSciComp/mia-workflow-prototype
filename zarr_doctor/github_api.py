@@ -41,6 +41,8 @@ class GitHub:
         self._creates_per_hour = creates_per_hour
         self._last_write = 0.0
         self._creates: collections.deque[float] = collections.deque()
+        # Contents API PUTs to one branch race (409 "is at X but expected Y"); serialize them in-process.
+        self._commit_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(base_url=api_url, timeout=30, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
 
@@ -205,8 +207,9 @@ class GitHub:
 
     async def upsert_file(self, path: str, content: bytes, branch: str, message: str) -> bool:
         """Commit `content` at `path` unless the file already exists there. Returns True if committed."""
-        if await self.file_exists(path, branch):
-            return False
-        await self.request("PUT", f"/repos/{self.repo}/contents/{path}", json={
-            "message": message, "branch": branch, "content": base64.b64encode(content).decode()})
-        return True
+        async with self._commit_lock:
+            if await self.file_exists(path, branch):
+                return False
+            await self.request("PUT", f"/repos/{self.repo}/contents/{path}", json={
+                "message": message, "branch": branch, "content": base64.b64encode(content).decode()})
+            return True
