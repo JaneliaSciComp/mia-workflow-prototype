@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/exm-drosophila-flyliconn-matt-phDye19-Gel2-OpticLobes-60x/crop-001_fullvol.zarr",
+  "level": "s0",
+  "zarr_format": 3,
+  "reader": "zarr-python",
+  "shape": [
+    1001,
+    2304,
+    2304
+  ],
+  "dtype": "float32",
+  "chunks": [
+    128,
+    128,
+    128
+  ],
+  "total_chunks": 2592,
+  "chunks_read": 256,
+  "sampled_fraction": 0.09876543209876543,
+  "voxels_counted": 524812288,
+  "min": 9.999999974752427e-07,
+  "max": 239121.5,
+  "mean": 948.1203562476085,
+  "std": 638.6740135048846,
+  "p01": 567.4175165177465,
+  "p50": 870.2236262972027,
+  "p99": 2070.1675295151276,
+  "zero_fraction": 0.0,
+  "nonfinite": 0,
+  "outliers_low": 265750,
+  "outliers_high": 524788,
+  "elapsed_s": 21.456
+}
