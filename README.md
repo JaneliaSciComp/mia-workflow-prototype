@@ -73,6 +73,11 @@ pixi run pytest -m integration -s               # real bsub against two real vol
 - **Result comment.** Besides the embedded `?raw=true` image, the result comment always includes a 40-column ASCII
   histogram inside `<details>`, so it stays useful if the image doesn't render.
 - Non-uint8 percentiles are interpolated from the histogram, so they're accurate to one bin width.
+- **Concurrent publishes.** Contents API commits to one branch race each other, and GitHub returns 409 "is at X but
+  expected Y". Temporal's retry recovered every time, but commits are now serialized inside the worker.
+- **Real-cluster runs (2026-10-05).** The four runs triggered by `zd:run` (v3 uint8 ×2, v2 uint16, v3 float32) each
+  started within one poll and finished in about 20 s in the `short` queue. Killing and restarting the worker
+  mid-run caused no resubmission. A renamed `LMD_ROOT` produced `zd:failed` with the job's one-line error.
 
 ## Open items
 
