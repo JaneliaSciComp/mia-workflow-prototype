@@ -27,8 +27,10 @@ packages = ["zarr_doctor"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 markers = ["integration: needs the real cluster or GitHub (deselected by default)"]
 addopts = "-m 'not integration'"
+pythonpath = ["tests"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
