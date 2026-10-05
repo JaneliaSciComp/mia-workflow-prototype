@@ -21,7 +21,7 @@ cluster:
   profile: janelia_lsf                # or: local (runs jobs as subprocesses on this host)
   job_name_prefix: zd
   resources: {cpus: 4, memory: "16 GB", walltime: "01:00"}   # add queue: <name> to force one; -W <= 60 auto-routes to `short`
-  project: null                       # LSF billing project (bsub -P); scicompsoft members must set it
+  project: null                       # LSF billing project (bsub -P); $LSF_BILLING_GROUP overrides; scicompsoft members must set it
 histogram:
   level: s0
   max_chunks: 256

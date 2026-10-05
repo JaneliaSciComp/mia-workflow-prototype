@@ -12,12 +12,13 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-# Env vars that override YAML keys (spec uses $LMD_ROOT, $RESULTS_DIR, $STATE_DIR, $TEMPORAL_ADDRESS).
+# Env vars that override YAML keys.
 _ENV_OVERRIDES = {
     "LMD_ROOT": ("lmd_root",),
     "RESULTS_DIR": ("results_dir",),
     "STATE_DIR": ("state_dir",),
     "TEMPORAL_ADDRESS": ("temporal", "address"),
+    "LSF_BILLING_GROUP": ("cluster", "project"),
 }
 
 

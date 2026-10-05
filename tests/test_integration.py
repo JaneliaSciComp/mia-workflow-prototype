@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from zarr_doctor.cluster import Cluster
-from zarr_doctor.config import PROJECT_DIR, ClusterCfg, HistogramCfg
+from zarr_doctor.config import PROJECT_DIR, ClusterCfg, HistogramCfg, load_dotenv
 
 pytestmark = pytest.mark.integration
+load_dotenv()  # LSF_BILLING_GROUP, RESULTS_DIR
 
 LMD = Path(os.environ.get("LMD_ROOT", "/groups/miaai/miaai/lmd-v0.0.1"))
 VOLUMES = [
@@ -21,11 +22,11 @@ VOLUMES = [
 
 @pytest.mark.parametrize("rel", VOLUMES)
 async def test_lsf_histogram(rel, tmp_path):
-    results = Path(os.environ.get("ZD_IT_RESULTS", PROJECT_DIR / ".it-results"))
+    results = Path(os.environ["RESULTS_DIR"]) / "integration-tests" if os.environ.get("RESULTS_DIR") else PROJECT_DIR / ".it-results"
     cfg = SimpleNamespace(lmd_root=LMD, results_dir=results, histogram=HistogramCfg(max_chunks=32),
                           cluster=ClusterCfg(profile="janelia_lsf",
                                              resources={"cpus": 1, "memory": "4 GB", "walltime": "00:20"},
-                                             project=os.environ.get("ZD_LSF_PROJECT")))
+                                             project=os.environ.get("LSF_BILLING_GROUP")))
     c = Cluster(cfg)
     run_id = f"it-{tmp_path.name[-12:].strip('_')}"
     try:
