@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/em-celegans-MitoVerse-conrad23-whole-organism/crop-001_c_elegans.zarr",
+  "level": "s0",
+  "zarr_format": 3,
+  "reader": "zarr-python",
+  "shape": [
+    256,
+    256,
+    256
+  ],
+  "dtype": "uint8",
+  "chunks": [
+    128,
+    128,
+    128
+  ],
+  "total_chunks": 8,
+  "chunks_read": 8,
+  "sampled_fraction": 1.0,
+  "voxels_counted": 16777216,
+  "min": 7.0,
+  "max": 250.0,
+  "mean": 152.04812955856323,
+  "std": 28.668139409602233,
+  "p01": 52,
+  "p50": 160,
+  "p99": 198,
+  "zero_fraction": 0.0,
+  "nonfinite": 0,
+  "outliers_low": 0,
+  "outliers_high": 0,
+  "elapsed_s": 0.952
+}
