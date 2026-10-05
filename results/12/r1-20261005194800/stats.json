@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/em-drosophila-FANC-vnc/crop-001.zarr",
+  "level": "s0",
+  "zarr_format": 3,
+  "reader": "zarr-python",
+  "shape": [
+    15348,
+    15348,
+    1466
+  ],
+  "dtype": "uint8",
+  "chunks": [
+    128,
+    128,
+    128
+  ],
+  "total_chunks": 172800,
+  "chunks_read": 256,
+  "sampled_fraction": 0.0014814814814814814,
+  "voxels_counted": 536477696,
+  "min": 0.0,
+  "max": 255.0,
+  "mean": 140.1515967813879,
+  "std": 65.88335730640154,
+  "p01": 3,
+  "p50": 148,
+  "p99": 247,
+  "zero_fraction": 0.00677619037493033,
+  "nonfinite": 0,
+  "outliers_low": 0,
+  "outliers_high": 0,
+  "elapsed_s": 7.252
+}
