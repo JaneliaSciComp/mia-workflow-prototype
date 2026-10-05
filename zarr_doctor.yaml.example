@@ -1,0 +1,29 @@
+# Copy to zarr_doctor.yaml (git-ignored). Secrets come from the environment / .env only.
+lmd_root: /groups/miaai/miaai/lmd-v0.0.1          # read-only; $LMD_ROOT overrides
+results_dir: /nrs/scicompsoft/zarr-doctor/results # shared FS visible to compute nodes; $RESULTS_DIR overrides
+state_dir: ~/.local/state/zarr-doctor             # SQLite + logs; $STATE_DIR overrides
+github:
+  repo: krokicki/mia-workflow-prototype
+  token_env: GITHUB_TOKEN
+  results_branch: zarr-doctor-results
+trigger:
+  mode: label                         # project | label (label: no Projects v2 permissions needed)
+  project_number: null                # required for project mode (org or user project number)
+  status_field: Status
+  statuses: {discovered: Discovered, run: Run, running: Running, done: Done, failed: Failed}
+temporal:
+  address: localhost:7233             # $TEMPORAL_ADDRESS overrides
+  namespace: default
+  task_queue: zarr-doctor
+  poll_every_minutes: 2
+cluster:
+  config_path: ./cluster_api.yaml     # py-cluster-api config (relative to the repo)
+  profile: janelia_lsf                # or: local (runs jobs as subprocesses on this host)
+  job_name_prefix: zd
+  resources: {cpus: 4, memory: "16 GB", walltime: "01:00", queue: local}
+histogram:
+  level: s0
+  max_chunks: 256
+discovery:
+  max_new_default: 10
+  creates_per_second: 1
