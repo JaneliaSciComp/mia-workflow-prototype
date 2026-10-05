@@ -13,6 +13,7 @@ import json
 import math
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,13 @@ def open_level(zarr_path: Path, level: str):
 
         _TS.chunks = chunks
         return _TS(), "tensorstore", 3 if driver == "zarr3" else 2
+
+
+def _dtype_name(dt) -> str:
+    try:
+        return np.dtype(dt).name  # ">u2" -> "uint16"
+    except TypeError:
+        return str(dt)  # e.g. bfloat16
 
 
 def sample_chunks(grid: tuple[int, ...], max_chunks: int, seed: int) -> list[int]:
@@ -183,7 +191,7 @@ def run(zarr_path: Path, out: Path, level: str = "s0", max_chunks: int = 256, se
     total = math.prod(grid)
     stats = {
         "zarr": str(zarr_path), "level": level, "zarr_format": zarr_format, "reader": reader,
-        "shape": list(arr.shape), "dtype": str(arr.dtype), "chunks": list(arr.chunks),
+        "shape": list(arr.shape), "dtype": _dtype_name(arr.dtype), "chunks": list(arr.chunks),
         "total_chunks": total, "chunks_read": len(indices), "sampled_fraction": len(indices) / total,
         **{k: v for k, v in h.items() if k not in ("edges", "counts")},
         "elapsed_s": round(time.monotonic() - t0, 3),
@@ -205,6 +213,8 @@ def main(argv=None) -> int:
     p.add_argument("--max-chunks", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
+    # zarr's spec-compliance warnings about legacy metadata would bury real errors in lsf.err
+    warnings.filterwarnings("ignore", module=r"zarr\..*")
     try:
         stats = run(a.zarr, a.out, a.level, a.max_chunks, a.seed)
     except Exception as e:  # one-line error for the failure comment's log tail

@@ -165,7 +165,7 @@ async def test_cancel_during_running(env):
     await run_scenario(env, m, body)
     assert ("cluster_cancel", "4242") in m.calls
     assert "publish" not in m.names()
-    assert m.calls[-1][1].error == "cancelled"
+    assert m.calls[-1][1].error == "cancelled" and m.calls[-1][1].outcome.job_id == "4242"
 
 
 async def test_workflow_cancellation_still_reports(env):

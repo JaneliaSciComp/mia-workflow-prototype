@@ -132,6 +132,8 @@ class IssueWorkflow:
     async def _fail(self, stage: str, error: str, outcome: JobOutcome | None, kill_job: bool) -> None:
         self.state, self.last_error = "FAILED-REPORTED", error
         run_id, job_id, handle = self.run_id, self.job_id, self._await_handle
+        if outcome is None and job_id:
+            outcome = JobOutcome(job_id, "killed" if kill_job else "unknown")
 
         async def cleanup() -> None:
             if handle and not handle.done():

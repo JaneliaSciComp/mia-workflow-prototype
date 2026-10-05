@@ -98,7 +98,7 @@ Files: [`stats.json`]({base}/stats.json) · [`histogram.json`]({base}/histogram.
 
 def render_failure(cfg, a: FailureInput, log_tail: str) -> str:
     o = a.outcome
-    job = f" · **LSF job:** `{o.job_id}` · **exit:** {o.exit_code} · **runtime:** {_dur(o.runtime_s)}" if o else ""
+    job = f" · **LSF job:** `{o.job_id}` · **exit:** {'—' if o.exit_code is None else o.exit_code} · **runtime:** {_dur(o.runtime_s)}" if o else ""
     retry = ("Move the issue back to **Run** to retry. Status set to **Failed**." if cfg.trigger.mode == "project"
              else "Add the `zd:run` label to retry. Label set to `zd:failed`.")
     return f"""### Zarr Doctor — run `{a.run_id}` failed
