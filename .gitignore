@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 zarr_doctor.yaml
 .env
+.it-results/
