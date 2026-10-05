@@ -1,0 +1,14 @@
+# py-cluster-api config. zarr-doctor selects the profile via cluster.profile and
+# always overrides job_name_prefix from zarr_doctor.yaml.
+executor: local
+poll_interval: 10
+job_name_prefix: zd
+
+profiles:
+  janelia_lsf:
+    executor: lsf
+    poll_interval: 30
+    zombie_timeout_minutes: 30
+  local:
+    executor: local
+    poll_interval: 2
