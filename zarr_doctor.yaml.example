@@ -11,11 +11,10 @@ trigger:
   project_number: null                # required for project mode (org or user project number)
   status_field: Status
   statuses: {discovered: Discovered, run: Run, running: Running, done: Done, failed: Failed}
-temporal:
-  address: localhost:7233             # $TEMPORAL_ADDRESS overrides
-  namespace: default
-  task_queue: zarr-doctor
+prefect:
+  api_url: http://127.0.0.1:4200/api  # Prefect server; $PREFECT_API_URL overrides
   poll_every_minutes: 2
+  concurrency: 20                     # max concurrent flow runs (each is a subprocess of `zarr-doctor worker`)
 cluster:
   config_path: ./cluster_api.yaml     # py-cluster-api config (relative to the repo)
   profile: janelia_lsf                # or: local (runs jobs as subprocesses on this host)

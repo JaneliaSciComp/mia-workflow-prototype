@@ -1,6 +1,6 @@
 """Value histogram of one zarr volume's raw/<level>, over a deterministic chunk sample.
 
-Runs on a compute node. No Temporal/GitHub dependencies; only numpy, zarr, matplotlib
+Runs on a compute node. No orchestrator/GitHub dependencies; only numpy, zarr, matplotlib
 (tensorstore if installed, as a fallback reader).
 
     python -m zarr_doctor.jobs.histogram --zarr /abs/crop.zarr --out DIR [--level s0] [--max-chunks 256] [--seed 0]

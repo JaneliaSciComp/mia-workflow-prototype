@@ -63,21 +63,18 @@ class FakeGH:
 
 async def test_discover_idempotent(lmd_root, tmp_path):
     cfg = SimpleNamespace(lmd_root=lmd_root)
-    state, gh, signals, stages = State(tmp_path), FakeGH(), [], []
-
-    async def signal(n, path, fp):
-        signals.append(n)
+    state, gh, stages = State(tmp_path), FakeGH(), []
 
     async def set_stage(n, stage):
         stages.append((n, stage))
 
-    s1 = await discovery.discover(cfg, gh=gh, state=state, signal=signal, set_stage=set_stage, max_new=2, out=lambda _: None)
+    s1 = await discovery.discover(cfg, gh=gh, state=state, set_stage=set_stage, max_new=2, out=lambda _: None)
     assert (s1.found, s1.created, s1.deferred, s1.skipped) == (3, 2, 1, 1)
-    s2 = await discovery.discover(cfg, gh=gh, state=state, signal=signal, set_stage=set_stage, max_new=10, out=lambda _: None)
+    s2 = await discovery.discover(cfg, gh=gh, state=state, set_stage=set_stage, max_new=10, out=lambda _: None)
     assert (s2.existing, s2.created) == (2, 1)
-    s3 = await discovery.discover(cfg, gh=gh, state=state, signal=signal, max_new=10, out=lambda _: None)
+    s3 = await discovery.discover(cfg, gh=gh, state=state, max_new=10, out=lambda _: None)
     assert (s3.existing, s3.created) == (3, 0)
-    assert len(gh.issues) == 3 and signals == [100, 101, 102] and stages[0] == (100, "discovered")
+    assert len(gh.issues) == 3 and [n for n, _ in stages] == [100, 101, 102] and stages[0] == (100, "discovered")
 
 
 async def test_discover_dedupes_against_github_and_detects_change(lmd_root, tmp_path):

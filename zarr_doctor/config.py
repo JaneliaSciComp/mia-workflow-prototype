@@ -17,7 +17,7 @@ _ENV_OVERRIDES = {
     "LMD_ROOT": ("lmd_root",),
     "RESULTS_DIR": ("results_dir",),
     "STATE_DIR": ("state_dir",),
-    "TEMPORAL_ADDRESS": ("temporal", "address"),
+    "PREFECT_API_URL": ("prefect", "api_url"),
     "LSF_BILLING_GROUP": ("cluster", "project"),
 }
 
@@ -38,11 +38,10 @@ class TriggerCfg(BaseModel):
     }
 
 
-class TemporalCfg(BaseModel):
-    address: str = "localhost:7233"
-    namespace: str = "default"
-    task_queue: str = "zarr-doctor"
+class PrefectCfg(BaseModel):
+    api_url: str = "http://127.0.0.1:4200/api"
     poll_every_minutes: int = 2
+    concurrency: int = 20  # max concurrent flow runs on the serving process (each is a subprocess)
 
 
 class ClusterCfg(BaseModel):
@@ -70,7 +69,7 @@ class Config(BaseModel):
     state_dir: Path = Path("~/.local/state/zarr-doctor")
     github: GitHubCfg = GitHubCfg()
     trigger: TriggerCfg = TriggerCfg()
-    temporal: TemporalCfg = TemporalCfg()
+    prefect: PrefectCfg = PrefectCfg()
     cluster: ClusterCfg = ClusterCfg()
     histogram: HistogramCfg = HistogramCfg()
     discovery: DiscoveryCfg = DiscoveryCfg()
@@ -124,6 +123,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
                 d = d.setdefault(k, {})
             d[keys[-1]] = os.environ[env]
     try:
-        return Config(**data)
+        cfg = Config(**data)
     except ValidationError as e:
         sys.exit(f"zarr-doctor: invalid config {path}:\n{e}")
+    # Prefect reads its API location from the environment; flow-run subprocesses inherit it.
+    os.environ["PREFECT_API_URL"] = cfg.prefect.api_url
+    return cfg

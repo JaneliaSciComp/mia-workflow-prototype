@@ -1,10 +1,10 @@
 [project]
 name = "zarr-doctor"
 version = "0.1.0"
-description = "Zarr Doctor PoC: GitHub issue per zarr volume, LSF histogram jobs, Temporal orchestration"
+description = "Zarr Doctor PoC: GitHub issue per zarr volume, LSF histogram jobs, Prefect orchestration"
 requires-python = ">=3.11"
 dependencies = [
-    "temporalio>=1.7",
+    "prefect>=3.4",
     "httpx>=0.27",
     "pydantic>=2",
     "pyyaml",
@@ -44,10 +44,11 @@ zarr = ">=3"
 pyyaml = "*"
 pydantic = ">=2"
 httpx = "*"
+prefect = ">=3.4"
+greenlet = "*"  # needed by the Prefect server (SQLAlchemy asyncio)
 
 [tool.pixi.pypi-dependencies]
 zarr-doctor = { path = ".", editable = true }
-temporalio = ">=1.7"
 py-cluster-api = ">=0.8"
 
 [tool.pixi.feature.test.dependencies]

@@ -10,8 +10,6 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
-
 import numpy as np
 
 from . import __version__
@@ -206,12 +204,9 @@ class Summary:
     errors: int = 0
 
 
-Signal = Callable[[int, str, str], Awaitable[None]]
-
-
-async def discover(cfg, *, gh=None, state, set_stage=None, signal: Signal | None = None,
-                   max_new: int = 10, dry_run: bool = False, pattern: str | None = None, out=print) -> Summary:
-    """See spec §5. In dry-run mode gh/set_stage/signal are unused and nothing is written."""
+async def discover(cfg, *, gh=None, state, set_stage=None, max_new: int = 10, dry_run: bool = False,
+                   pattern: str | None = None, out=print) -> Summary:
+    """See spec §5. In dry-run mode gh/set_stage are unused and nothing is written."""
     s = Summary()
     if not dry_run:
         # One paged pass over the repo's issues reconciles SQLite with GitHub (covers first run and cache misses).
@@ -260,6 +255,4 @@ async def discover(cfg, *, gh=None, state, set_stage=None, signal: Signal | None
         out(f"created #{issue} {rel}")
         if set_stage:
             await set_stage(issue, "discovered")
-        if signal:
-            await signal(issue, rel, fp)
     return s
