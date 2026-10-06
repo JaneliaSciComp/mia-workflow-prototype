@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/em-celegans-funceworm-jrc-3fold-2/crop-001.zarr",
+  "level": "s0",
+  "zarr_format": 3,
+  "reader": "zarr-python",
+  "shape": [
+    5828,
+    5208,
+    8886
+  ],
+  "dtype": "uint8",
+  "chunks": [
+    128,
+    128,
+    128
+  ],
+  "total_chunks": 132020,
+  "chunks_read": 256,
+  "sampled_fraction": 0.0019391001363429784,
+  "voxels_counted": 522190848,
+  "min": 0.0,
+  "max": 229.0,
+  "mean": 127.10717199509402,
+  "std": 31.486010346884292,
+  "p01": 41,
+  "p50": 134,
+  "p99": 176,
+  "zero_fraction": 0.0014847138799337976,
+  "nonfinite": 0,
+  "outliers_low": 0,
+  "outliers_high": 0,
+  "elapsed_s": 6.711
+}
