@@ -1,0 +1,33 @@
+{
+  "zarr": "/groups/miaai/miaai/lmd-v0.0.1/data/em-drosophila-flyem-hemibrain/crop-001_EllipsoidBody_x24000_y23000_z17000.zarr",
+  "level": "s0",
+  "zarr_format": 3,
+  "reader": "zarr-python",
+  "shape": [
+    5000,
+    5000,
+    5000
+  ],
+  "dtype": "uint8",
+  "chunks": [
+    128,
+    128,
+    128
+  ],
+  "total_chunks": 64000,
+  "chunks_read": 256,
+  "sampled_fraction": 0.004,
+  "voxels_counted": 399122432,
+  "min": 0.0,
+  "max": 255.0,
+  "mean": 129.6136484080153,
+  "std": 67.82895893050862,
+  "p01": 7,
+  "p50": 130,
+  "p99": 250,
+  "zero_fraction": 0.0026107427607576813,
+  "nonfinite": 0,
+  "outliers_low": 0,
+  "outliers_high": 0,
+  "elapsed_s": 7.342
+}
