@@ -17,8 +17,11 @@ fi
 
 # PREFECT_HOME holds the server's SQLite database. The UI and API share one port; binding 0.0.0.0 makes the UI
 # reachable at http://$(hostname -f):$PORT — and the (unauthenticated) API with it.
+# PREFECT_UI_API_URL: the URL the browser uses for API calls; default would be 127.0.0.1 (the viewer's own machine).
+# PREFECT_CLI_PROMPT=false: otherwise `server start` can stop at an interactive "profile URL mismatch" prompt.
+UI_API_URL="http://$(hostname -f):$PORT/api"
 tmux new-session -d -s "$SESSION" -n server \
-  "PREFECT_HOME='$STATE_DIR/prefect' pixi run prefect server start --host 0.0.0.0 --port $PORT 2>&1 | tee -a '$LOGS/prefect-server.log'"
+  "PREFECT_HOME='$STATE_DIR/prefect' PREFECT_API_URL='$API_URL' PREFECT_UI_API_URL='$UI_API_URL' PREFECT_CLI_PROMPT=false pixi run prefect server start --host 0.0.0.0 --port $PORT 2>&1 | tee -a '$LOGS/prefect-server.log'"
 until curl -sf "$API_URL/health" >/dev/null; do sleep 1; done
 
 pixi run zarr-doctor setup
