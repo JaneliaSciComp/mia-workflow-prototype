@@ -167,12 +167,16 @@ async def cmd_discover(cfg, args) -> int:
 async def cmd_worker(cfg, args) -> int:
     from prefect import aserve
     from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
+    from prefect.deployments.runner import EntrypointType
 
     from .flows import DEPLOYMENT, histogram_run, poll_github
 
-    run_dep = await histogram_run.ato_deployment(DEPLOYMENT, tags=["zarr-doctor"])
+    # MODULE_PATH: flow-run processes import `zarr_doctor.flows` as a package module (file-path entrypoints
+    # can't resolve its relative imports).
+    common = {"tags": ["zarr-doctor"], "entrypoint_type": EntrypointType.MODULE_PATH}
+    run_dep = await histogram_run.ato_deployment(DEPLOYMENT, **common)
     poll_dep = await poll_github.ato_deployment(
-        DEPLOYMENT, tags=["zarr-doctor"], interval=timedelta(minutes=cfg.prefect.poll_every_minutes),
+        DEPLOYMENT, **common, interval=timedelta(minutes=cfg.prefect.poll_every_minutes),
         # overlap policy: never two polls at once; a tick that collides is cancelled, not queued
         concurrency_limit=ConcurrencyLimitConfig(limit=1, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW))
     log.info("serving %s and %s against %s (limit %d)", histogram_run.name, poll_github.name, cfg.prefect.api_url,

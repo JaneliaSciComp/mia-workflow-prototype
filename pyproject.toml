@@ -46,6 +46,7 @@ pydantic = ">=2"
 httpx = "*"
 prefect = ">=3.4"
 greenlet = "*"  # needed by the Prefect server (SQLAlchemy asyncio)
+sqlalchemy = ">=2.0,<2.1"  # Prefect 3.8 scheduler breaks on SQLAlchemy 2.1 ("Cannot evaluate bulk DML statement")
 
 [tool.pixi.pypi-dependencies]
 zarr-doctor = { path = ".", editable = true }
