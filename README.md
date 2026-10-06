@@ -82,6 +82,13 @@ pixi run pytest -m integration -s               # real bsub against two real vol
     created. SQLAlchemy is pinned below 2.1.
   - Deployments use module-path entrypoints (`zarr_doctor.flows:…`), because file-path entrypoints can't resolve
     the package's relative imports.
+  - The server's SQLite database must be on **local disk**. On NFS (`/groups`) it failed within minutes with
+    `database is locked`, then a full connection pool, then HTTP 500s. `run-all.sh` puts it in
+    `/scratch/$USER/zarr-doctor/prefect` (override with `PREFECT_HOME`). `/scratch` is cleaned periodically, so
+    production should use Postgres. Temporal's dev-server SQLite on the same NFS mount ran fine for a day.
+  - `prefect server start` can stop at an interactive "profile URL mismatch" prompt, and the UI tells browsers to
+    use `127.0.0.1` for the API. `run-all.sh` sets `PREFECT_CLI_PROMPT=false` and
+    `PREFECT_UI_API_URL=http://<fqdn>:4200/api`.
 - **Store specifics.** Most v3 volumes are sharded (512³ shards of 128³ chunks). "chunks" and the
   `chunks-not-128` trait use the *inner* chunk shape. Label groups carry `label_class` rather than `class`, and either
   one counts toward vocab completeness.

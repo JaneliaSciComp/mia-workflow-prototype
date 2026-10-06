@@ -96,6 +96,7 @@ idempotent, but that becomes a requirement as soon as a step isn't.
 | Overlap | 6 policies; we use `SKIP` | concurrency limit + collision strategy `ENQUEUE` or `CANCEL_NEW`; we use limit 1 + `CANCEL_NEW` |
 | Created where | `zarr-doctor schedule apply` (separate API object) | Part of the deployment registered by `serve` (`interval=`) |
 | Gotcha we hit | With no worker, a started poll can't finish and later ticks are skipped (`SkippedOverlap: 5`) | conda-forge Prefect 3.8 + SQLAlchemy 2.1: the server's scheduler fails on every loop, so no runs are created, and nothing fails visibly except the server log. Pinned SQLAlchemy below 2.1. |
+| Storage gotcha | Dev-server SQLite on NFS (`/groups`): fine (single writer) | Server SQLite on NFS: `database is locked` → full pool → HTTP 500s within minutes. Needs local disk (`/scratch`) or Postgres. |
 
 ### 1.6 Workers and processes
 
