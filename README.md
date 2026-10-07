@@ -2,7 +2,7 @@
 
 One GitHub issue per zarr volume in the LMD store. Moving an issue to **Run** submits an LSF job that
 histograms the volume, and the PNG and stats are posted back to the issue. Orchestration uses Temporal,
-with one durable workflow per issue. There's no LLM. Spec: [`notes/zarr-doctor-spec.md`](notes/zarr-doctor-spec.md).
+with one durable workflow per issue. There's no LLM. Spec: [`notes/zarr-doctor-spec.md`](notes/zarr-doctor-spec.md). Code walkthrough: [`notes/temporal-guide.md`](notes/temporal-guide.md).
 
 ## Setup
 

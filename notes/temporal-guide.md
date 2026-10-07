@@ -1,10 +1,11 @@
 # A guided tour of zarr-doctor, and of Temporal
 
-This guide is for an experienced engineer who hasn't used Temporal. It has three parts:
+This guide is for an experienced engineer who hasn't used Temporal. It has four parts:
 
-1. **Temporal concepts**, explained in detail and mapped to where each one shows up in this code base.
-2. **A code tour**: links in a teaching order. Each link says what the code is, what to look for, and what it depends on.
-3. **Hands-on labs**: things to run against the live system and the test suite so you see each concept happen.
+1. **One run, start to finish**: what happens when an issue is moved to Run, and which code runs in what order.
+2. **Temporal concepts**, explained in detail and mapped to where each one shows up in this code base.
+3. **A code tour**: links in a teaching order. Each link says what the code is, what to look for, and what it depends on.
+4. **Hands-on labs**: things to run against the live system and the test suite so you see each concept happen.
 
 > All code links are **permalinks to commit `74aed15`**, so their line ranges stay accurate as `main` moves.
 > To see the latest version, press `y`/`Esc` on GitHub or swap the SHA for `main` in the URL.
@@ -33,9 +34,152 @@ the LSF job.
 
 ---
 
-## 1. Temporal concepts
+## 1. One run, start to finish
 
-### 1.1 The server stores state; your workers run all the code
+This section follows a single histogram run through the code in the order things happen. Read it first; the
+concepts in §2 then have something to attach to. Each link points at the function where a step *starts*. Helpers
+defined next to it in the same file (such as `_act`, `find_run_hits`, `render_result`) are named but not linked.
+
+### 1.0 Before anything runs
+
+[`scripts/run-all.sh`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/run-all.sh) starts the Temporal dev server, then the worker, then applies the
+poll Schedule.
+
+- **The worker.** [`cmd_worker`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L210) connects a Temporal client, builds the three
+  shared clients (GitHub, SQLite state, LSF through `Cluster`), wraps them in an
+  [`Activities`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L122-L128) object, and starts two `Worker`s: one on the `zarr-doctor`
+  queue serving both workflow classes and the short activities, one on `zarr-doctor-await` serving only `await_job`.
+  From here on the process long-polls the server for work.
+- **The Schedule.** [`cmd_schedule`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L235) creates (or updates) the server-side Schedule
+  `zarr-doctor-poll`. It starts a `PollWorkflow` every `poll_every_minutes` (2 by default) and skips a tick while the
+  previous poll is still running.
+- **The issues.** `zarr-doctor discover` is a plain CLI, not a workflow. [`cmd_discover`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L149-L181)
+  calls [`discover`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L212-L265), which walks `$LMD_ROOT/data`, reads each volume's zarr
+  JSON (never chunk data), and creates one GitHub issue per new volume with a hidden
+  `<!-- zarr-doctor: path=… fingerprint=… -->` marker in the body. After each creation it calls
+  [`signal_discovered`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L28-L31), which signal-with-starts that issue's `IssueWorkflow`.
+  So before any run, there is already one `IssueWorkflow` per issue, each parked in `IDLE`.
+
+### 1.1 You move an issue to Run
+
+Add the `zd:run` label (label mode) or set the project Status to **Run** (project mode). Nothing in our code reacts
+to this directly, because GitHub never calls us. The next poll notices.
+
+### 1.2 The poll, every 2 minutes
+
+1. The Schedule fires. The server starts a [`PollWorkflow`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L159-L165) execution with
+   ID `zarr-doctor-poll-run` and puts a workflow task on the `zarr-doctor` queue.
+2. The worker runs it. The workflow does one thing: execute the `poll_github` activity with no retries, because
+   the next tick is the retry.
+3. [`poll_github`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L178-L192) runs on the worker. `find_run_hits` asks GitHub which
+   issues are in the Run stage: in project mode through
+   [`projects.issues_with_status`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L54-L66), in label mode by listing open issues with
+   `zd:run`. For each hit, `path_for_issue` looks up the volume path, first in SQLite
+   ([`State.path_for_issue`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/state.py#L45-L47)), else from the marker in the issue body. Then
+   `signal_run` calls `client.start_workflow(..., id="zarr-doctor/issue-N", start_signal="run")`: start the
+   issue's workflow if it doesn't exist, then deliver the `run` signal, atomically. Finally it writes `last_poll_at`
+   to SQLite.
+
+`zarr-doctor poll-once` does the same lookup without signalling. `zarr-doctor run --issue N`
+([`cmd_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L265)) skips the poll and calls `signal_run` directly.
+
+### 1.3 The issue workflow wakes up
+
+The `run` signal lands in [`IssueWorkflow`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L37-L88):
+
+1. If the workflow is new, `__init__` receives the `IssueInput`, then the signal handler runs, then `execute`
+   starts. If it already exists, it is sitting in `execute` at `wait_condition(lambda: bool(self.pending))`.
+2. `on_run` appends the request to `self.pending`, unless a run is in progress or already queued, in which case the
+   signal is ignored. That is why moving an issue to Run twice, or two polls seeing the same issue, can't start two
+   runs.
+3. `wait_condition` sees `pending` is non-empty. `execute` pops the request and calls `_run_once`.
+
+### 1.4 One run: `_run_once`
+
+[`_run_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130) is the whole run, top to bottom. It's workflow code, so it does
+no I/O itself. Each step schedules an activity by name (through `_act`, which sets the timeout and retry count) and
+waits for the recorded result. The implementations are methods on `Activities` and run on the worker.
+
+1. **Ack.** State becomes `ACKED` and `run_id` becomes `r<n>-<timestamp>`, using `workflow.now()` so replay gets the
+   same value. The workflow schedules `ack_run`.
+   [`ack_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L133-L137) moves the issue to the running stage
+   ([`projects.set_stage`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L79-L92): swap `zd:*` labels, or set the project field) and
+   posts a "Run … started" comment through [`GitHub.comment_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L183-L189), which
+   first checks for a comment carrying this run's marker so a retry can't post twice.
+   *On GitHub:* `zd:running`, one "started" comment.
+
+2. **Submit.** The workflow schedules `submit_histogram_job` and, from its result, records `job_id` and moves to
+   `SUBMITTED`.
+   [`submit_histogram_job`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L139-L142) calls
+   [`Cluster.submit`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L56-L88), which has three layers of "did I already do this?": if
+   `$RESULTS_DIR/<issue>/<run>/job_id` exists, return it; else look for a live LSF job named `zd-<issue>-<run>`; else
+   `bsub` (via `py-cluster-api`) a job that cd's into this checkout, activates the pixi env and runs
+   `python -m zarr_doctor.jobs.histogram`. It then writes the `job_id` file. The activity returns the job id and the
+   configured walltime, so the workflow never reads config.
+
+3. **Wait.** The workflow uses `start_activity` (not `execute_activity`) for `await_job`, so it gets a handle. The
+   activity goes to the `zarr-doctor-await` queue with `start_to_close = walltime + 15 min`, a 2-minute heartbeat
+   timeout and 3 attempts. State becomes `RUNNING` and the workflow blocks on
+   `wait_condition(handle.done() or self.cancel_requested)`.
+   [`await_job`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L144-L148) calls [`Cluster.wait`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L90-L112):
+   a `JobMonitor` polls `bjobs`, and every poll calls `activity.heartbeat`. If this worker didn't submit the job
+   (a restart), `executor.track(job_id)` adopts it first. It returns a `JobOutcome` (status, exit code, runtime, peak
+   memory).
+   *Meanwhile, on a compute node:* [`jobs/histogram.py`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/jobs/histogram.py#L185-L224) opens
+   `raw/<level>`, samples up to 256 chunks deterministically, computes stats and a histogram, and writes
+   `stats.json`, `histogram.json` and `histogram.png` into the run directory. It imports nothing from Temporal or
+   GitHub.
+
+4. **Check.** If `outcome.status` isn't `done`, the workflow raises `_RunFailed` and goes to §1.5.
+
+5. **Publish.** State becomes `PUBLISHING`; the workflow schedules `publish_results`.
+   [`publish_results`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L155-L166) creates the results branch if missing
+   ([`ensure_branch`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L193-L203)), commits the three files
+   ([`upsert_file`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L208-L215), skipping any that already exist), then
+   `comment_once` posts the result comment rendered by `render_result`.
+   *On GitHub:* commits on `zarr-doctor-results`, the histogram comment.
+
+6. **Finish.** [`finish_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L168-L170) calls `set_stage(…, "done")`.
+   *On GitHub:* `zd:done`.
+
+7. **Idle.** State returns to `IDLE` and control returns to `execute`, which checks whether it should
+   `continue_as_new` and then waits for the next signal.
+
+Every activity is idempotent, so a retry (worker died, GitHub 502) repeats the step without duplicating its effect:
+comments are guarded by markers, files by existence, the LSF job by the `job_id` file and the job name.
+
+### 1.5 When it goes wrong
+
+Any `ActivityError` (retries exhausted) or `_RunFailed` drops `_run_once` into `_fail`
+([workflows.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L132-L156)). State becomes `FAILED-REPORTED` and a shielded cleanup
+runs: cancel the `await_job` handle if it's still in flight; if this is a cancellation, run the `cluster_cancel`
+activity (`bkill`); then run [`report_failure`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L172-L176), which grabs the last 40
+lines of `lsf.err` ([`Cluster.log_tail`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L117-L123)), posts a failure comment with the
+stage, error and log tail (again through `comment_once`), and calls `set_stage(…, "failed")`. State then returns to
+`IDLE`, so moving the issue back to Run reruns it.
+
+**Cancel.** `zarr-doctor cancel --issue N` ([`cmd_cancel`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L268-L273)) sends the `cancel`
+signal. `on_cancel` sets `cancel_requested`, the `wait_condition` in step 3 wakes, `_run_once` raises
+`_RunFailed("cancelled")`, and `_fail` takes the path above with `kill_job=True`.
+
+**Worker dies mid-run.** Nothing in the workflow changes. The in-flight activity attempt fails (heartbeat timeout
+for `await_job`, or "worker is shutting down"), the server re-dispatches it to the next worker, and the new worker's
+`Cluster.wait` adopts the existing LSF job via `track()`. Lab 7 does this on purpose.
+
+### 1.6 Watching it happen
+
+- `zarr-doctor status --issue N` ([`cmd_status`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L276-L300)) runs the `status` query
+  against the live workflow: state, run id, job id, last error.
+- The Temporal UI (`:8233`) → Workflows → `zarr-doctor/issue-N` → Event History shows each step above as
+  `ActivityTaskScheduled` / `Started` / `Completed` events with inputs and results.
+- `$STATE_DIR/logs/worker.log` has the activity-side log lines; `$RESULTS_DIR/<issue>/<run>/lsf.{out,err}` has
+  the job's.
+
+---
+
+## 2. Temporal concepts
+
+### 2.1 The server stores state; your workers run all the code
 
 The **Temporal server** is a database plus a set of queues. It stores each workflow's **event history**, holds
 **task queues**, and fires **timers** and **Schedules**. It never runs your code.
@@ -45,7 +189,7 @@ over gRPC and **long-poll** task queues. With no worker polling, nothing is lost
 the queue until a worker appears. This explains a lot of behaviour you'll see below. For example, `zarr-doctor
 status` hangs (we added a timeout) when no worker is up, because answering a query requires running workflow code.
 
-### 1.2 Workflows: durable functions built on event sourcing
+### 2.2 Workflows: durable functions built on event sourcing
 
 A **workflow** is an ordinary `async` function, `IssueWorkflow.execute`, that can run for months and survive
 crashes of any process. It's identified by:
@@ -73,7 +217,7 @@ milliseconds. **Activity tasks** are separate: they're how the real work gets do
 applies the new events, and a full replay only happens on a different worker or after the cache evicts it. Replay is
 still what makes recovery correct, so your code must always be replay-safe.
 
-### 1.3 Determinism is the one hard rule
+### 2.3 Determinism is the one hard rule
 
 Replay only works if workflow code makes **the same decisions in the same order** every time it runs against the
 same history. So workflow code must not:
@@ -90,7 +234,7 @@ nondeterministic calls are blocked. `workflow.unsafe.imports_passed_through()` t
 (our plain dataclasses) are safe to share instead of re-importing. If you break the rule, the worker raises a
 **nondeterminism error** (`TMPRL1100`). Lab 5 makes you trigger one on purpose.
 
-### 1.4 Activities: where side effects happen
+### 2.4 Activities: where side effects happen
 
 An **activity** is a normal function, with no rules, that does the real work: HTTP calls, `bsub`, file I/O. The
 workflow schedules it with `workflow.execute_activity(...)`, and the result is recorded in history.
@@ -114,7 +258,7 @@ workflow schedules it with `workflow.execute_activity(...)`, and the result is r
   an activity only learns it was cancelled through a heartbeat response. `await_job` heartbeats on every LSF poll.
   The SDK throttles how often heartbeats are actually sent.
 
-### 1.5 Task queues and workers
+### 2.5 Task queues and workers
 
 A **task queue** is a named queue on the server. Workflows and activities are scheduled onto queues by name, and
 workers poll the queues they serve. Queues are how you route work. We use two:
@@ -127,7 +271,7 @@ workers poll the queues they serve. Queues are how you route work. We use two:
 Both are served by one process here. On another cluster you could run the `-await` worker somewhere else without
 changing workflow code. The same mechanism can later put "cluster-only" activities on workers that run as LSF jobs.
 
-### 1.6 Messages: signals, queries (and updates)
+### 2.6 Messages: signals, queries (and updates)
 
 - **Signal**: an asynchronous, durable message *into* a running workflow, recorded as `WorkflowExecutionSignaled`.
   The handler mutates workflow state. Ours are `run`, `cancel` and `discovered`.
@@ -138,7 +282,7 @@ changing workflow code. The same mechanism can later put "cluster-only" activiti
   exists. In Python it's `client.start_workflow(..., start_signal=...)`.
 - **Update**: a newer request/response message, not used here.
 
-### 1.7 Waiting, timers and cancellation
+### 2.7 Waiting, timers and cancellation
 
 - `await workflow.wait_condition(lambda: ...)` blocks until the predicate becomes true. It's re-checked after
   every workflow task (for example, after a signal). That's how `IssueWorkflow` sleeps for weeks between runs at zero
@@ -148,20 +292,20 @@ changing workflow code. The same mechanism can later put "cluster-only" activiti
   next `await`. You can catch it to clean up and then re-raise. `asyncio.shield` keeps the cleanup itself from being
   cancelled.
 
-### 1.8 Long-lived workflows: continue-as-new
+### 2.8 Long-lived workflows: continue-as-new
 
 Histories have hard limits (about 50k events or 50 MB) and replay cost grows with length. A workflow that lives
 forever periodically calls **`continue_as_new(args)`**: the current run closes and a new run starts with the same
 Workflow ID, fresh history and whatever state you pass forward. `workflow.info().is_continue_as_new_suggested()`
 tells you when the server thinks it's time.
 
-### 1.9 Schedules
+### 2.9 Schedules
 
 A **Schedule** is a server-side cron that starts a workflow. It has an overlap policy (we use `SKIP`: don't start a
 new poll while the previous one is still running) and a catch-up window. The Schedule fires even with no worker up,
 but the workflow it starts still needs a worker to make progress. Lab 2 shows the consequence.
 
-### 1.10 Changing code safely: versioning and replay testing
+### 2.10 Changing code safely: versioning and replay testing
 
 You can freely change activity code. Workflow code that changes the **sequence of commands** breaks every
 in-flight execution on its next replay. Two tools help:
@@ -172,7 +316,7 @@ in-flight execution on its next replay. Two tools help:
   [`scripts/replay_history.py`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)
   does this for a history exported from the live server.
 
-### 1.11 Testing
+### 2.11 Testing
 
 `WorkflowEnvironment.start_time_skipping()` starts a local test server whose clock can **jump forward**. While the
 test awaits a workflow result (`handle.result()`) or calls `env.sleep()`, and nothing else is running, the server
@@ -181,7 +325,7 @@ fast-forwards to the next timer, so a workflow that sleeps for a week finishes i
 Activities are plain functions, so tests register **fake activities with the same names** and drive the real
 workflow code against a real server.
 
-### 1.12 Concept → code map
+### 2.12 Concept → code map
 
 | concept | where |
 |---|---|
@@ -200,7 +344,7 @@ workflow code against a real server.
 
 ---
 
-## 2. Code tour
+## 3. Code tour
 
 Read in this order. Each step builds on the previous one.
 
@@ -239,7 +383,7 @@ Read in this order. Each step builds on the previous one.
 
 5. **[workflows.py L1–L35: imports and helpers](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L1-L35)**
    *What:* module setup for workflow code.
-   *Look for:* `workflow.unsafe.imports_passed_through()` (§1.3). There are no imports of `httpx`, `zarr` or
+   *Look for:* `workflow.unsafe.imports_passed_through()` (§2.3). There are no imports of `httpx`, `zarr` or
    `cluster_api`, and none of `activities.py`: activities are called **by name** (strings), so the workflow module
    stays pure. Also `workflow_id()`, the business-key ID, and `RUN_STARTED_LOG`, which Lab 5 and the replay test use.
    *Depends on:* `temporalio.workflow`, `temporalio.common.RetryPolicy`, `temporalio.exceptions.ActivityError`, `models`.
@@ -257,7 +401,7 @@ Read in this order. Each step builds on the previous one.
 7. **[workflows.py L76–L93: the main loop and activity options](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L76-L93)**
    *What:* a workflow that never ends. It waits for a signal, does a run, and repeats.
    *Look for:*
-   - `wait_condition(lambda: bool(self.pending))`: a durable wait (§1.7). 20 workflows sit here right now holding
+   - `wait_condition(lambda: bool(self.pending))`: a durable wait (§2.7). 20 workflows sit here right now holding
      zero threads.
    - The continue-as-new check: run count, `is_continue_as_new_suggested()`, history length. Note
      `wait_condition(workflow.all_handlers_finished)` before it, so no signal handler is cut off mid-flight.
@@ -267,7 +411,7 @@ Read in this order. Each step builds on the previous one.
 8. **[workflows.py L95–L130: one run, step by step](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130)**
    *What:* the spec §7 state machine. ACKED → SUBMITTED → RUNNING → PUBLISHING → IDLE.
    *Look for:*
-   - `run_id` is built from `workflow.now()`, not `datetime.now()`. That's determinism (§1.3).
+   - `run_id` is built from `workflow.now()`, not `datetime.now()`. That's determinism (§2.3).
    - `execute_activity` vs `start_activity`. The latter returns a handle, so the workflow can wait on *either*
      "job finished" *or* "cancel signal arrived" (L115).
    - `await_job` is routed to the `-await` task queue with `heartbeat_timeout=2 min` and a `start_to_close`
@@ -294,7 +438,7 @@ Read in this order. Each step builds on the previous one.
 11. **[activities.py L22–L48: signal-with-start and poll helpers](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L22-L48)**
     *What:* how the outside world (the poller, the CLI, discovery) talks to issue workflows.
     *Look for:* `client.start_workflow(..., id=workflow_id(issue), start_signal="run", ...)`. That's
-    signal-with-start (§1.6): it starts the workflow if needed, then signals it, atomically. Because Workflow IDs are
+    signal-with-start (§2.6): it starts the workflow if needed, then signals it, atomically. Because Workflow IDs are
     unique, polling the same issue 10 times can't create 10 workflows.
     *Depends on:* `temporalio.client.Client` (passed in), `projects` (find Run-stage issues), `state` (path lookup),
     `discovery.MARKER_RE`.
@@ -304,7 +448,7 @@ Read in this order. Each step builds on the previous one.
     *Look for:*
     - `@activity.defn(name=...)`: these names are the strings the workflow uses.
     - `await_job` passes `activity.heartbeat` as the per-poll callback, so every LSF status check becomes a
-      heartbeat (§1.4).
+      heartbeat (§2.4).
     - `ack_run` uses `comment_once` with a marker, so a retried ack never posts twice.
     - `all()` omits `await_job` because it's registered on the other queue (see step 15).
     *Depends on:* `temporalio.activity`, `cluster.Cluster`, `github_api.GitHub`, `projects.set_stage`.
@@ -325,7 +469,7 @@ Read in this order. Each step builds on the previous one.
     *Depends on:* `temporalio.client`.
 
 15. **[cli.py L184–L211: the worker process](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L211)**
-    *What:* two `Worker` objects in one process, one per task queue (§1.5).
+    *What:* two `Worker` objects in one process, one per task queue (§2.5).
     *Look for:*
     - `workflows=[...]` registers workflow types and `activities=[...]` registers activity functions.
     - `max_concurrent_activities` is the backpressure knob.
@@ -334,7 +478,7 @@ Read in this order. Each step builds on the previous one.
     *Depends on:* `temporalio.worker.Worker`, `activities.Activities`, `cluster.Cluster`, `github_api`, `state`.
 
 16. **[cli.py L213–L236: the Schedule](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L236)**
-    *What:* creating or updating the server-side cron (§1.9).
+    *What:* creating or updating the server-side cron (§2.9).
     *Look for:* `ScheduleActionStartWorkflow`, `ScheduleIntervalSpec(every=...)`, `ScheduleOverlapPolicy.SKIP`, and
     create-or-update via `ScheduleAlreadyRunningError`, which makes `schedule apply` idempotent.
     *Depends on:* `temporalio.client` schedule types, `workflows.PollWorkflow`.
@@ -342,7 +486,7 @@ Read in this order. Each step builds on the previous one.
 17. **[cli.py L253–L301: run, cancel, status](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L301)**
     *What:* operator commands built from signals, queries and **visibility** (`client.list_workflows(query)`, which
     lists or filters executions server-side).
-    *Look for:* `rpc_timeout=QUERY_TIMEOUT` on queries. A query blocks while no worker is up (§1.1).
+    *Look for:* `rpc_timeout=QUERY_TIMEOUT` on queries. A query blocks while no worker is up (§2.1).
     *Depends on:* `temporalio.client`, `workflows`, `activities.signal_run`.
 
 ### Stage F: the cluster side
@@ -431,7 +575,7 @@ Read in this order. Each step builds on the previous one.
 ### Stage I: tests (the best way to see the workflow move)
 
 28. **[tests/test_workflows.py L20–L98: test harness](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_workflows.py#L20-L98)**
-    *What:* the time-skipping test server (§1.11), fake activities registered **under the real names**, and two
+    *What:* the time-skipping test server (§2.11), fake activities registered **under the real names**, and two
     real `Worker`s on per-test task queues.
     *Look for:* `Mocks.await_act` can block (`self.block`) while heartbeating, which is how tests hold a run in
     RUNNING to send it signals. `wait_for` polls the `status` query.
@@ -446,7 +590,7 @@ Read in this order. Each step builds on the previous one.
 
 30. **[tests/test_replay.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_replay.py)** and
     **[scripts/replay_history.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)**
-    *What:* determinism checks (§1.10). The test records a history, changes a log line (not a command), and replays.
+    *What:* determinism checks (§2.10). The test records a history, changes a log line (not a command), and replays.
     The script replays a history you export from the live server.
     *Look for:* `Replayer(...).replay_workflow(history)`. The unsandboxed runner in the test lets the monkeypatched
     module constant reach the workflow.
@@ -472,7 +616,7 @@ Read in this order. Each step builds on the previous one.
 
 ---
 
-## 3. Hands-on labs
+## 4. Hands-on labs
 
 Run these from the repo root on the host where the system is running (currently `e06u05`). `T` below is the
 Temporal CLI:
@@ -521,7 +665,7 @@ $T task-queue describe --task-queue zarr-doctor                # backlog + which
 
 In `schedule describe`, look for `SkippedOverlap` (it was 5). While the worker was down, a poll workflow started by
 the Schedule couldn't finish, because no worker ran its tasks. Each later tick saw it still running and, under
-`SKIP`, didn't start another (§1.9). In `task-queue describe`, the `Pollers` section is the server's view of live
+`SKIP`, didn't start another (§2.9). In `task-queue describe`, the `Pollers` section is the server's view of live
 workers (`pid@host`).
 
 ### Lab 3: the Web UI
@@ -620,7 +764,7 @@ pixi run zarr-doctor cancel --issue 4
 
 This follows `on_cancel` → `wait_condition` wakes → `handle.cancel()` → `cluster_cancel` (`bkill`) →
 `report_failure`. Check the issue for a "failed … cancelled" comment and `zd:failed`, and check `bjobs -a` for the
-killed job. For the whole-workflow version (§1.7), see `test_workflow_cancellation_still_reports`. Don't cancel the
+killed job. For the whole-workflow version (§2.7), see `test_workflow_cancellation_still_reports`. Don't cancel the
 live workflows themselves: they're meant to live forever, and the next poll would recreate them anyway.
 
 ---
