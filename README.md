@@ -2,7 +2,7 @@
 
 One GitHub issue per zarr volume in the LMD store. Moving an issue to **Run** submits an LSF job that
 histograms the volume, and the PNG and stats are posted back to the issue. There's no LLM.
-Spec: [`notes/zarr-doctor-spec.md`](notes/zarr-doctor-spec.md).
+Spec: [`notes/zarr-doctor-spec.md`](notes/zarr-doctor-spec.md). Code walkthrough: [`notes/prefect-guide.md`](notes/prefect-guide.md).
 
 > **This is the `prefect` branch:** the same service with orchestration on **Prefect 3** instead of Temporal
 > (`main`). Each run request is one flow run tagged `issue:<n>`. For the differences, see
