@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run autodev under tmux: Temporal dev server and csub broker on the host, the worker inside agentic-sandbox.
 # Identity = the account running this + autodev.yaml: the same script serves a personal test instance and
-# the service account. Attach: tmux attach -t <deployment>    Stop: tmux kill-session -t <deployment>
+# the service account. Manage: pixi run ad up|down|restart|ps|attach|logs
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD

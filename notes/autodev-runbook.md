@@ -43,6 +43,9 @@ Trust boundaries:
    the sandbox. Re-run `pixi run autodev check`: now every row `ok`.
 6. Open a small issue ("add a `--version` flag"), add `autodev-<you>:go`, watch `tmux attach -t autodev-<you>`.
 
+Manage the deployment (name and paths come from `autodev.yaml`): `pixi run ad ps` (status), `ad logs [worker|temporal|broker]`
+(`-n N`, `-f` to follow), `ad attach`, `ad down`, `ad restart`, `ad up` (runs `scripts/autodev-up.sh`).
+
 Files: host-only things (Temporal CLI binary, `temporal.db`, temporal/broker logs) live in `<state_dir>-host`,
 which the sandbox never binds; worker logs are in `<state_dir>/logs`.
 
