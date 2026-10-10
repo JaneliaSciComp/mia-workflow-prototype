@@ -7,6 +7,12 @@ from autodev_helpers import agent_commit, make_origin, run_git
 URL = "https://github.com/o/r.git"
 
 
+@pytest.fixture(autouse=True)
+def hermetic_git(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def setup(tmp_path):
     origin = make_origin(tmp_path)
@@ -60,17 +66,59 @@ def test_workspace_is_independent_of_mirror(setup):
     assert not (ws / "repo" / ".git" / "objects" / "info" / "alternates").exists()
 
 
-def test_workspace_hooks_never_run(setup, tmp_path):
+PUB = ("autodev/issue-7", "refs/autodev/7/k-r1")
+
+
+def _publish(m, ws, base, protected=(".github/",)):
+    return m.publish(ws / "result.bundle", base, PUB[0], PUB[1], list(protected), force=True)
+
+
+def _assert_refused(origin, m, ws, base, exc=ProtectedPathError):
+    with pytest.raises(exc):
+        _publish(m, ws, base)
+    with pytest.raises(Exception):
+        run_git("rev-parse", "--verify", "refs/heads/autodev/issue-7", cwd=origin)
+    with pytest.raises(Exception):
+        run_git("rev-parse", "--verify", PUB[1], cwd=m.path)
+
+
+def test_rename_out_of_protected_dir_refused(setup):
     origin, m, ws, base = setup
-    sentinel = tmp_path / "pwned"
-    hook = f"#!/bin/sh\ntouch {sentinel}\n"
-    for name in ("pre-push", "post-checkout", "reference-transaction", "post-merge"):
-        h = ws / "repo" / ".git" / "hooks" / name
-        h.write_text(hook)
-        h.chmod(0o755)
-    run_git("config", "core.hooksPath", str(ws / "repo" / ".git" / "hooks"), cwd=ws / "repo")
+    repo = ws / "repo"
+    run_git("mv", ".github/workflows/ci.yml", "ci.yml", cwd=repo)
+    run_git("commit", "-qm", "mv", cwd=repo)
+    run_git("bundle", "create", "-q", str(ws / "result.bundle"), f"{base}..HEAD", cwd=repo)
+    _assert_refused(origin, m, ws, base)
+
+
+@pytest.mark.parametrize("name", ['a"b.yml', "a\tb.yml", "caf\u00e9.yml"])
+def test_odd_protected_names_refused(setup, name):
+    origin, m, ws, base = setup
+    agent_commit(ws / "repo", f".github/workflows/{name}", "x\n", base)
+    _assert_refused(origin, m, ws, base)
+
+
+def test_symlink_bundle_refused(setup, tmp_path):
+    origin, m, ws, base = setup
     agent_commit(ws / "repo", "f.txt", "y", base)
-    sentinel.unlink(missing_ok=True)  # agent_commit itself ran the agent's own hooks inside the "job"
+    real = tmp_path / "real.bundle"
+    (ws / "result.bundle").rename(real)
+    (ws / "result.bundle").symlink_to(real)
+    _assert_refused(origin, m, ws, base, GitError)
+
+
+def test_gitfile_bundle_refused(setup):
+    origin, m, ws, base = setup
+    (ws / "result.bundle").write_text(f"gitdir: {ws / 'repo' / '.git'}\n")
+    _assert_refused(origin, m, ws, base, GitError)
+
+
+def test_token_never_on_disk_or_in_errors(tmp_path):
+    origin = make_origin(tmp_path)
+    m = Mirror(tmp_path / "state" / "mirror.git", str(origin), tokens=lambda: "sekrit-token")
     m.sync()
-    m.publish(ws / "result.bundle", base, "autodev/issue-7", "refs/autodev/7/k-r1", [], force=True)
-    assert not sentinel.exists()
+    assert "sekrit-token" not in (m.path / "config").read_text()
+    bad = Mirror(tmp_path / "state2" / "mirror.git", str(tmp_path / "nope.git"), tokens=lambda: "sekrit-token")
+    with pytest.raises(GitError) as e:
+        bad.sync()
+    assert "sekrit-token" not in str(e.value)

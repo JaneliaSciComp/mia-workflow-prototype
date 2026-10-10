@@ -7,6 +7,7 @@ import base64
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -63,19 +64,40 @@ class Mirror:
     def publish(self, bundle: Path, base_sha: str, branch: str, ref: str, protected: list[str],
                 force: bool) -> str | None:
         """Import the agent's bundle and push it to `branch`. Returns the new head, or None if no commits."""
-        if not Path(bundle).is_file():
+        bundle = Path(bundle)
+        if not bundle.exists() and not bundle.is_symlink():
             return None
-        git("fetch", "-q", str(bundle), f"+HEAD:{ref}", cwd=self.path)
-        new = git("rev-parse", ref, cwd=self.path)
-        if new == base_sha:
-            return None
+        # The bundle is agent-controlled: only a real bundle file is fetched, and only from a worker-owned copy
+        # (a gitfile or symlink would make git run upload-pack inside the agent's repo).
+        if bundle.is_symlink() or not bundle.is_file():
+            raise GitError("agent result is not a regular file")
+        with bundle.open("rb") as f:
+            header = f.readline().rstrip(b"\n")
+            if header not in (b"# v2 git bundle", b"# v3 git bundle"):
+                raise GitError("agent result is not a git bundle")
+            f.seek(0)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, suffix=".bundle") as tmp:
+                shutil.copyfileobj(f, tmp)
+                tmp.flush()
+                git("-c", "transfer.fsckObjects=true", "fetch", "-q", tmp.name, f"+HEAD:{ref}", cwd=self.path)
         try:
-            git("merge-base", "--is-ancestor", base_sha, new, cwd=self.path)
+            new = git("rev-parse", ref, cwd=self.path)
+            if new == base_sha:
+                git("update-ref", "-d", ref, cwd=self.path)
+                return None
+            try:
+                git("merge-base", "--is-ancestor", base_sha, new, cwd=self.path)
+            except GitError:
+                raise GitError(f"agent commits do not descend from {base_sha[:12]}") from None
+            # Plumbing, NUL-separated, no rename detection: names are never quoted and both sides of a rename show.
+            out = git("diff-tree", "-r", "-z", "--no-renames", "--name-only", base_sha, new, cwd=self.path)
+            changed = [p for p in out.split("\0") if p]
+            if bad := [p for p in changed if any(p == pre.rstrip("/") or p.startswith(pre) for pre in protected)]:
+                raise ProtectedPathError(f"agent changed protected paths: {', '.join(bad[:10])!r}")
         except GitError:
-            raise GitError(f"agent commits do not descend from {base_sha[:12]}") from None
-        changed = git("diff", "--name-only", base_sha, new, cwd=self.path).splitlines()
-        if bad := [p for p in changed if any(p.startswith(pre) for pre in protected)]:
-            raise ProtectedPathError(f"agent changed protected paths: {', '.join(bad[:10])}")
+            git("update-ref", "-d", ref, cwd=self.path)
+            raise
         git("push", "-q", "origin", f"{'+' if force else ''}{new}:refs/heads/{branch}", cwd=self.path,
             token=self.tokens())
         git("update-ref", f"refs/heads/{branch}", new, cwd=self.path)
