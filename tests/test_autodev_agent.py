@@ -252,3 +252,11 @@ async def test_submit_refuses_a_key_that_is_not_8_hex(tmp_path, key):
     with pytest.raises(ApplicationError) as e:
         await Activities(j.cfg, None, None, j, "bot").submit_agent(SubmitInput(7, key, 1, Workspace(str(tmp_path), "a", "b")))
     assert e.value.non_retryable and not (tmp_path / "state" / "jobs").exists()
+
+
+async def test_job_name_leaves_out_the_deployment(tmp_path):
+    # csub rejects job names containing the submitter's username, and personal deployments are autodev-<user>
+    fake = FakeCsub()
+    j = AgentJobs(make_cfg(tmp_path, deployment="autodev-someuser"), client_factory=lambda: fake)
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev-someuser/issue-7"))
+    assert fake.submitted[0]["name"] == "autodev-7-r1" and fake.submitted[0]["session"] == "autodev-someuser"

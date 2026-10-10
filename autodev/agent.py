@@ -137,7 +137,7 @@ class AgentJobs:
         f = self._id_file(issue, key, rnd)
         if f.exists():
             return JobRef(f.read_text().strip(), a.walltime_min)
-        name = f"{self.cfg.deployment}-{issue}-r{rnd}"
+        name = f"autodev-{issue}-r{rnd}"  # csub rejects names containing the username (autodev-<you>); session = deployment
         found = [s for s in await asyncio.to_thread(self.client.status) if os.path.realpath(getattr(s, "cwd", None) or "/nonexistent") == os.path.realpath(ws.dir)]
         if found:  # same round dir (unique per issue/key/round): submitted, then the worker died before writing the id file
             job_id = found[0].job_id
