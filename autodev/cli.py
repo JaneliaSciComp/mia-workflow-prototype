@@ -12,7 +12,11 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import STAGES, load_config
+from . import ops
+from .config import PROJECT_DIR, STAGES, load_config
+
+OPS = {"up": ops.cmd_up, "down": ops.cmd_down, "restart": ops.cmd_restart, "ps": ops.cmd_ps,
+       "attach": ops.cmd_attach, "logs": ops.cmd_logs}
 
 log = logging.getLogger("autodev")
 
@@ -183,8 +187,20 @@ def main(argv=None) -> int:
     sub.add_parser("worker", help="run the Temporal worker")
     s = sub.add_parser("schedule", help="manage the poll Schedule")
     s.add_argument("action", choices=["apply"])
+    sub.add_parser("up", help="start this deployment (tmux: Temporal, broker, worker)")
+    sub.add_parser("down", help="stop this deployment's tmux session")
+    sub.add_parser("restart", help="down, then up")
+    sub.add_parser("ps", help="show whether this deployment is running")
+    sub.add_parser("attach", help="attach to the deployment's tmux session")
+    s = sub.add_parser("logs", help="tail a log (default: worker)")
+    s.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
+    s.add_argument("-n", "--lines", type=int, default=50)
+    s.add_argument("--no-follow", action="store_true", help="print the last lines and exit")
     args = p.parse_args(argv)
     cfg = load_config(args.config)
+    if args.cmd in OPS:
+        args.config_path = Path(args.config or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml").resolve()
+        return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     cmd = {"check": cmd_check, "init-labels": cmd_init_labels, "worker": cmd_worker, "schedule": cmd_schedule}[args.cmd]
     return asyncio.run(cmd(cfg, args))

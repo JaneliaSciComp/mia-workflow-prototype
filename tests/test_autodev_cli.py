@@ -14,7 +14,7 @@ def test_help_lists_commands(capsys):
         main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("check", "init-labels", "worker", "schedule"):
+    for cmd in ("check", "init-labels", "worker", "schedule", "up", "down", "logs"):
         assert cmd in out
 
 
