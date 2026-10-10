@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 from datetime import timedelta
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import STAGES, load_config
@@ -47,6 +48,15 @@ async def _client(cfg):
                                                  http_connect_proxy_config=proxy), 10)
 
 
+def _csub_problems(cfg, p) -> list[str]:
+    need = set(cfg.agent.allow_hosts) | {"api.anthropic.com", "claude.ai", "platform.claude.com"}
+    work = cfg.paths.work_root.resolve()
+    return [*([] if p.allow_claude else ["allow_claude is false"]),
+            *(f"host not allowed: {h}" for h in sorted(need - set(p.allowed_hosts))),
+            *([] if any(work.is_relative_to(Path(r).resolve()) for r in p.allowed_roots)
+              else [f"work_root {work} not under allowed_roots {p.allowed_roots}"])]
+
+
 async def cmd_check(cfg, args) -> int:
     from .agent import csub_client
     from .auth import bot_login
@@ -60,19 +70,17 @@ async def cmd_check(cfg, args) -> int:
         except Exception as e:  # report every check, then fail
             rows.append((name, False, f"{type(e).__name__}: {e}"))
 
-    gh = GitHub.for_autodev(cfg)
+    gh = None
 
     async def repo():
+        nonlocal gh
+        gh = GitHub.for_autodev(cfg)
         r = (await gh.request("GET", f"/repos/{cfg.github.repo}")).json()
         return f"{r['full_name']} (default branch {r['default_branch']})"
 
     async def csub_ok():
         p = await asyncio.to_thread(csub_client(cfg).probe)
-        need = set(cfg.agent.allow_hosts) | {"api.anthropic.com", "claude.ai", "platform.claude.com"}
-        problems = [*([] if p.allow_claude else ["allow_claude is false"]),
-                    *(f"host not allowed: {h}" for h in sorted(need - set(p.allowed_hosts))),
-                    *([] if any(str(cfg.paths.work_root).startswith(r) for r in p.allowed_roots)
-                      else [f"work_root {cfg.paths.work_root} not under allowed_roots {p.allowed_roots}"])]
+        problems = _csub_problems(cfg, p)
         if problems:
             raise RuntimeError("; ".join(problems))
         return f"broker user {p.user}, sandbox {p.sandbox}"
@@ -93,7 +101,8 @@ async def cmd_check(cfg, args) -> int:
     await row("temporal", temporal)
     await row("csub broker", csub_ok)
     await row("directories", dirs)
-    await gh.aclose()
+    if gh:
+        await gh.aclose()
     for name, ok, detail in rows:
         print(f"{'ok ' if ok else 'BAD'}  {name:16} {detail}")
     return 0 if all(ok for _, ok, _ in rows) else 1
