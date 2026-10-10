@@ -67,7 +67,7 @@
 
   Check: `csub probe`.
 - [ ] **P3. Claude login** for that account: `claude auth login`. Check: `csub submit --claude --walltime 5 --wait -- claude -p "Reply OK" --model sonnet` prints `OK`.
-- [ ] **P4. GitHub token** with Contents, Pull requests and Issues read/write on the target repo, saved for the sandboxed worker with `gh auth token > ~/.config/autodev/token && chmod 600 ~/.config/autodev/token` (or a fine-grained PAT in that file). `GITHUB_TOKEN` in `.env` also works for host-side commands, but the sandbox masks `.env`.
+- [ ] **P4. GitHub token** with Contents, Pull requests and Issues read/write, and Checks and Commit statuses read, on the target repo, saved for the sandboxed worker with `gh auth token > ~/.config/autodev/token && chmod 600 ~/.config/autodev/token` (or a fine-grained PAT in that file). `GITHUB_TOKEN` in `.env` also works for host-side commands, but the sandbox masks `.env`.
 - [ ] **P5. Branch.** `git checkout main && git checkout -b autodev`.
 
 ## Global Constraints
