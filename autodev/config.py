@@ -60,8 +60,8 @@ class PathsCfg(BaseModel):
 class AgentCfg(BaseModel):
     model: str = "sonnet"
     walltime_min: int = 60
-    cpus: int = 4
-    mem_mb: int = 16000
+    cpus: int = 1
+    mem_mb: int = 4000
     allow_hosts: list[str] = []  # never GitHub: the agent must not be able to push
     extra_mounts: list[str] = []  # "PATH:ro" only (read-write mounts are not allowed)
     path_prepend: list[str] = []  # dirs put first on PATH inside the job (e.g. where pixi lives)
