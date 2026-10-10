@@ -195,7 +195,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("logs", help="tail a log (default: worker)")
     s.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
     s.add_argument("-n", "--lines", type=int, default=50)
-    s.add_argument("--no-follow", action="store_true", help="print the last lines and exit")
+    s.add_argument("-f", "--follow", action="store_true", help="keep following the log (default: print the last lines and exit)")
     args = p.parse_args(argv)
     cfg = load_config(args.config)
     if args.cmd in OPS:

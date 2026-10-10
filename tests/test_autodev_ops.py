@@ -55,15 +55,15 @@ def test_logs_tails_file(tmp_path, tmux):
     log = ops.log_files(c)["worker"]
     log.parent.mkdir(parents=True)
     log.write_text("x\n")
-    ops.cmd_logs(c, Namespace(name="worker", lines=5, no_follow=False))
+    ops.cmd_logs(c, Namespace(name="worker", lines=5, follow=True))
     assert tmux.calls[-1] == ["tail", "-n", "5", "-F", str(log)]
-    ops.cmd_logs(c, Namespace(name="worker", lines=5, no_follow=True))
+    ops.cmd_logs(c, Namespace(name="worker", lines=5, follow=False))
     assert tmux.calls[-1] == ["tail", "-n", "5", str(log)]
 
 
 def test_logs_missing_file_exits(tmp_path):
     with pytest.raises(SystemExit):
-        ops.cmd_logs(cfg(tmp_path), Namespace(name="broker", lines=5, no_follow=True))
+        ops.cmd_logs(cfg(tmp_path), Namespace(name="broker", lines=5, follow=True))
 
 
 def test_cli_reads_deployment_from_config(tmp_path, tmux):

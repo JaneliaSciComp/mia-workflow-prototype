@@ -71,7 +71,7 @@ def cmd_logs(cfg, args) -> int:
     path = log_files(cfg)[args.name]
     if not path.is_file():
         sys.exit(f"autodev: no log at {path}")
-    cmd = ["tail", "-n", str(args.lines), *([] if args.no_follow else ["-F"]), str(path)]
+    cmd = ["tail", "-n", str(args.lines), *(["-F"] if args.follow else []), str(path)]
     try:
         return subprocess.run(cmd).returncode
     except KeyboardInterrupt:
