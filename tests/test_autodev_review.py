@@ -4,7 +4,7 @@ import respx
 
 from autodev.github import GitHub
 from autodev.models import Feedback
-from autodev.review import approved, combine_checks, feedback, handled_ids
+from autodev.review import approved, combine_checks, feedback, handled_ids, latest_round_at
 
 from autodev_helpers import API, R
 
@@ -22,8 +22,8 @@ def cm(id, login, body, at="2026-10-10T02:00:00Z"):
     return {"id": id, "user": {"login": login}, "body": body, "created_at": at}
 
 
-def ok(reviews=(), comments=(), bot="bot", allow_self=False):
-    return approved(HEAD, list(reviews), list(comments), W, bot, allow_self, MP)
+def ok(reviews=(), comments=(), bot="bot", allow_self=False, since=None):
+    return approved(HEAD, list(reviews), list(comments), W, bot, allow_self, MP, since)
 
 
 def test_approval_must_match_head():
@@ -49,6 +49,24 @@ def test_approve_comment_with_sha_prefix():
     assert not ok(comments=[cm(1, "alice", "/approve 0ld1234")])
     assert not ok(comments=[cm(1, "alice", f"/approve abc1234 {MP} x -->")])  # our own comment
     assert not ok(comments=[cm(1, "bob", "/approve abc1234")])
+
+
+def test_approve_comment_must_follow_latest_round():
+    """A prefix approved earlier must not carry over to a later head the agent grinds to match it."""
+    since = "2026-10-10T02:00:00Z"
+    assert not ok(comments=[cm(1, "alice", "/approve abc1234", at="2026-10-10T01:59:59Z")], since=since)
+    assert not ok(comments=[cm(1, "alice", "/approve abc1234", at=since)], since=since)
+    assert ok(comments=[cm(1, "alice", "/approve abc1234", at="2026-10-10T02:00:01Z")], since=since)
+    assert ok([rv(1, "alice", "APPROVED", at="2026-10-10T01:00:00Z")], since=since)  # reviews pin the full sha
+
+
+def test_latest_round_at_is_the_bots_latest_round_marker():
+    comments = [cm(1, "bot", f"r1 {MP} round k-1 -->", at="2026-10-10T01:00:00Z"),
+                cm(2, "bot", f"r2 {MP} round k-2 -->", at="2026-10-10T03:00:00Z"),
+                cm(3, "mallory", f"{MP} round k-3 -->", at="2026-10-10T04:00:00Z"),
+                cm(4, "bot", f"{MP} started k-3 -->", at="2026-10-10T05:00:00Z")]
+    assert latest_round_at(comments, MP, "bot") == "2026-10-10T03:00:00Z"
+    assert latest_round_at([], MP, "bot") is None
 
 
 def test_feedback_from_reviews_and_revise_comments_oldest_first():
@@ -104,6 +122,12 @@ async def test_label_actor_is_latest_labeler(gh):
 async def test_permission_of_stranger_is_none(gh):
     respx.get(f"{API}{R}/collaborators/eve/permission").mock(return_value=httpx.Response(404, json={}))
     assert await gh.permission("eve") == "none"
+
+
+@respx.mock
+async def test_bot_permission_is_none_without_asking(gh):
+    """`/collaborators/<x>[bot]/permission` can 403/422; a bot is never a reviewer anyway."""
+    assert await gh.permission("github-actions[bot]") == "none"  # respx: no route, so any request fails
 
 
 @respx.mock

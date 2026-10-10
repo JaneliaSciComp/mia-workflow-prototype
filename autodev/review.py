@@ -25,8 +25,16 @@ def _ours(body: str | None, marker_prefix: str) -> bool:
     return marker_prefix in (body or "")
 
 
+def latest_round_at(comments: list[dict], marker_prefix: str, bot: str) -> str | None:
+    """When the current head was published: the time of the bot's latest round-summary comment."""
+    return max((c.get("created_at") or "" for c in comments
+                if _login(c) == bot and f"{marker_prefix} round " in (c.get("body") or "")), default=None)
+
+
 def approved(head_sha: str, reviews: list[dict], comments: list[dict], perms: dict[str, str], bot: str,
-             allow_self: bool, marker_prefix: str) -> bool:
+             allow_self: bool, marker_prefix: str, since: str | None) -> bool:
+    """`since`: `/approve` comments count only if posted after it (a short prefix of an older head must not
+    approve a later head the agent grinds to match). GitHub's ISO-8601 UTC timestamps compare as strings."""
     latest: dict[str, dict] = {}
     for r in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
         if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and _login(r):
@@ -35,7 +43,7 @@ def approved(head_sha: str, reviews: list[dict], comments: list[dict], perms: di
            for login, r in latest.items()):
         return True
     for c in comments:
-        if _ours(c.get("body"), marker_prefix):
+        if _ours(c.get("body"), marker_prefix) or (since and (c.get("created_at") or "") <= since):
             continue
         m = APPROVE_RE.search(c.get("body") or "")
         if m and head_sha.startswith(m.group(1)) and _human(_login(c), perms, bot, allow_self):

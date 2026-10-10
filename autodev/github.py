@@ -21,6 +21,8 @@ class GitHub(_Base):
         return self._token_fn
 
     async def permission(self, login: str) -> str:
+        if login.endswith("[bot]"):  # GitHub may 403/422 the lookup for app bots; a bot never reviews
+            return "none"
         r = await self.request("GET", f"/repos/{self.repo}/collaborators/{login}/permission", ok404=True)
         return r.json()["permission"] if r else "none"
 

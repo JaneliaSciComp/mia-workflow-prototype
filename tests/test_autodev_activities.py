@@ -110,6 +110,27 @@ async def test_observe_skips_handled_feedback(tmp_path, gh):
     assert (snap.state, snap.head_sha, snap.approved, snap.checks) == ("open", head, False, "none")
 
 
+@respx.mock
+@pytest.mark.parametrize("approve_at,want", [("2026-10-10T01:00:00Z", False), ("2026-10-10T03:00:00Z", True)])
+async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path, gh, approve_at, want):
+    head = "abc1234def"
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={
+        "state": "open", "merged": False, "head": {"sha": head}}))
+    respx.get(f"{API}{R}/pulls/5/reviews").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}{R}/pulls/5/comments").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}{R}/issues/5/comments").mock(return_value=httpx.Response(200, json=sorted([
+        {"id": 9, "user": {"login": "bot"}, "body": "round 2\n<!-- autodev: round k-2 -->",
+         "created_at": "2026-10-10T02:00:00Z"},
+        {"id": 10, "user": {"login": "alice"}, "body": "/approve abc1234", "created_at": approve_at}],
+        key=lambda c: c["created_at"])))
+    for who in ("alice", "bot"):
+        respx.get(f"{API}{R}/collaborators/{who}/permission").mock(
+            return_value=httpx.Response(200, json={"permission": "write"}))
+    respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
+    respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
+    assert (await acts(tmp_path, gh).observe_pr(ObserveInput(5))).approved is want
+
+
 async def _prepared(tmp_path, gh, issue=7):
     origin = make_origin(tmp_path)
     a = acts(tmp_path, gh, origin=origin)

@@ -18,7 +18,7 @@ from .gitops import RejectedBundleError
 from .models import (AwaitInput, CommentInput, FailureInput, IssueInput, JobOutcome, JobRef, MergeInput,
                      MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput, StageInput,
                      SubmitInput, Workspace)
-from .review import WRITE_PERMISSIONS, approved, feedback, handled_ids
+from .review import WRITE_PERMISSIONS, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
 log = logging.getLogger(__name__)
@@ -189,8 +189,8 @@ class Activities:
         mp, allow_self = self.cfg.marker_prefix, self.cfg.github.auth == "token"
         done = handled_ids(comments, mp, self.bot)
         fb = [f for f in feedback(reviews, inline, comments, perms, self.bot, allow_self, mp) if f.id not in done]
-        return PrSnapshot(a.pr, "open", head, approved(head, reviews, comments, perms, self.bot, allow_self, mp),
-                          await self.gh.check_state(head), fb)
+        ok = approved(head, reviews, comments, perms, self.bot, allow_self, mp, latest_round_at(comments, mp, self.bot))
+        return PrSnapshot(a.pr, "open", head, ok, await self.gh.check_state(head), fb)
 
     @activity.defn(name="merge_pr")
     @permanent_errors
