@@ -1,10 +1,15 @@
 """IssueWorkflow on Temporal's time-skipping server, with every activity mocked."""
 
+import json
+import os
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
@@ -28,8 +33,9 @@ def snap(state="open", sha="h1", approved=False, checks="none", feedback=()):
 
 class Mocks:
     def __init__(self, snaps, existing_pr=None, job_state="DONE", exit_code=0, publish_pr=5, await_failures=0,
-                 merge_ok=True, observe_failures=0, report_failures=0):
+                 merge_ok=True, observe_failures=0, report_failures=0, observe_fatal=False):
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
+        self.observe_fatal = observe_fatal
         self.calls: list[tuple[str, object]] = []
         self.snaps = list(snaps)
         self.existing_pr, self.job_state, self.exit_code = existing_pr, job_state, exit_code
@@ -69,6 +75,8 @@ class Mocks:
         @activity.defn(name="observe_pr")
         async def observe(a: ObserveInput) -> PrSnapshot:
             self.calls.append(("observe", a.pr))
+            if self.observe_fatal:
+                raise ApplicationError("PR is gone", non_retryable=True)
             if self.observe_failures:
                 self.observe_failures -= 1
                 raise ApplicationError("github 502")
@@ -140,7 +148,8 @@ async def test_existing_pr_is_resumed_not_redone(env):
 async def test_no_commits_reports_failure(env):
     m = Mocks([snap()], publish_pr=None)
     assert await run(env, m) == "failed"
-    assert "no commits" in m.of("report_failure")[0].error and "observe" not in m.names()
+    f = m.of("report_failure")[0]
+    assert "no commits" in f.error and f.workspace.dir == "/w/round-1" and "observe" not in m.names()
 
 
 async def test_failed_job_reports_and_does_not_publish(env):
@@ -204,6 +213,31 @@ async def test_replay_after_log_change(env, monkeypatch):
     assert (await replayer.replay_workflow(history, raise_on_replay_failure=False)).replay_failure is None
 
 
+HISTORY = Path(__file__).parent / "fixtures" / "autodev_issue_history.json"
+
+
+def _scrub(obj):
+    """Drop worker/client identities (pid@hostname) from a recorded history."""
+    if isinstance(obj, dict):
+        return {k: "test" if k == "identity" else _scrub(v) for k, v in obj.items()}
+    return [_scrub(v) for v in obj] if isinstance(obj, list) else obj
+
+
+async def test_replay_recorded_history(env):
+    """A run recorded with an earlier IssueWorkflow (round 1, a revision round, merge) must replay on today's.
+    This fails when a change to workflow code alters the commands it issues, which breaks in-flight runs. If the
+    change is intentional, guard it with workflow.patched() (or Worker Versioning) and re-record the fixture:
+    AUTODEV_RECORD_HISTORY=1 pixi run pytest tests/test_autodev_workflows.py -k recorded_history"""
+    if os.environ.get("AUTODEV_RECORD_HISTORY"):
+        fb = Feedback("review-1", "rename foo")
+        _, h = await start(env, Mocks([snap(feedback=[fb]), snap(sha="h2", feedback=[fb]),
+                                       snap(sha="h2", approved=True, checks="success")]))
+        HISTORY.parent.mkdir(exist_ok=True)
+        HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("autodev-recorded", HISTORY.read_text())
+    await Replayer(workflows=[IssueWorkflow]).replay_workflow(history)
+
+
 async def test_transient_observe_failures_do_not_fail_the_workflow(env):
     m = Mocks([snap(approved=True)], observe_failures=8)
     assert await run(env, m) == "merged"
@@ -214,3 +248,20 @@ async def test_report_failure_survives_transient_errors(env):
     m = Mocks([snap()], job_state="EXIT", exit_code=1, report_failures=7)
     assert await run(env, m) == "failed"
     assert m.names().count("report_failure") == 8 and m.reported == 1
+
+
+async def test_failure_after_publish_has_no_stale_log_tail(env):
+    """The round's logs belong to the round; a later observe/merge failure must not attach them."""
+    m = Mocks([snap()], observe_fatal=True)
+    assert await run(env, m) == "failed"
+    f = m.of("report_failure")[0]
+    assert "PR is gone" in f.error and f.workspace is None
+
+
+@pytest.mark.parametrize("key", ["../../etc", "C0FFEE01", "c0ffee0"])
+async def test_bad_key_is_replaced_by_run_id(env, key):
+    """The key names directories; one sent by a hand-started workflow must not reach the activities."""
+    m = Mocks([snap(state="merged")])
+    assert await run(env, m, IssueInput(7, key=key)) == "merged"
+    used = m.of("prepare")[0].key
+    assert re.fullmatch(r"[0-9a-f]{8}", used) and m.of("submit")[0].key == used

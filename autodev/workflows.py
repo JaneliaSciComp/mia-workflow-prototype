@@ -10,7 +10,7 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from .decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, decide
-    from .models import (AwaitInput, CommentInput, FailureInput, Feedback, IssueInput, JobOutcome, JobRef,
+    from .models import (KEY_RE, AwaitInput, CommentInput, FailureInput, Feedback, IssueInput, JobOutcome, JobRef,
                          MergeInput, MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput,
                          StageInput, Status, SubmitInput, Workspace)
 
@@ -56,7 +56,8 @@ class IssueWorkflow:
     @workflow.run
     async def execute(self, inp: IssueInput) -> str:
         s = self.s
-        s.key = s.key or workflow.info().run_id[:8]
+        if not KEY_RE.fullmatch(s.key):  # unset, or a bad value from a hand-started run: it names directories
+            s.key = workflow.info().run_id[:8]
         try:
             if s.pr is None:
                 s.pr = (await self._act("find_pr", s.issue, result_type=PrRef)).pr
@@ -96,8 +97,11 @@ class IssueWorkflow:
         if out.state != "DONE" or out.exit_code not in (0, None):
             raise RoundFailed(f"agent job {out.job_id} ended {out.state} (exit {out.exit_code})")
         self.state = "PUBLISHING"
-        return await self._act("publish_round", PublishInput(s.issue, s.key, s.round, ws, s.pr, fb.id if fb else None),
-                               seconds=300, result_type=PrRef)
+        res = await self._act("publish_round", PublishInput(s.issue, s.key, s.round, ws, s.pr, fb.id if fb else None),
+                              seconds=300, result_type=PrRef)
+        if res.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
+            self.workspace = None
+        return res
 
     async def _watch(self) -> str:
         s = self.s
