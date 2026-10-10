@@ -14,7 +14,7 @@ from temporalio.exceptions import ApplicationError
 from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
 from .github import GitHubError
-from .gitops import GitError
+from .gitops import RejectedBundleError
 from .models import (AwaitInput, CommentInput, FailureInput, IssueInput, JobOutcome, JobRef, MergeInput,
                      MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput, StageInput,
                      SubmitInput, Workspace)
@@ -88,6 +88,12 @@ class Activities:
         return [self.set_stage, self.comment, self.find_pr, self.prepare_round, self.submit_agent,
                 self.publish_round, self.observe_pr, self.merge_pr, self.report_failure, self.poll_issues]
 
+    async def _comment_once(self, number: int, body: str, marker: str) -> None:
+        """Post unless the *bot* already posted this marker (an outsider's copy must not suppress us)."""
+        if not any((c.get("user") or {}).get("login") == self.bot and marker in (c.get("body") or "")
+                   for c in await self.gh.issue_comments(number)):
+            await self.gh.comment(number, body)
+
     def _round_dir(self, issue: int, key: str, rnd: int) -> Path:
         return self.cfg.paths.work_root / self.cfg.repo_slug / f"issue-{issue}" / key / f"round-{rnd}"
 
@@ -107,7 +113,7 @@ class Activities:
     @permanent_errors
     async def comment(self, a: CommentInput) -> None:
         marker = self.cfg.marker(a.marker)
-        await self.gh.comment_once(a.number, f"{a.body}\n\n{marker}", marker)
+        await self._comment_once(a.number, f"{a.body}\n\n{marker}", marker)
 
     @activity.defn(name="find_pr")
     @permanent_errors
@@ -125,6 +131,9 @@ class Activities:
         base = await asyncio.to_thread(self.mirror.workspace, d, start, branch, self.cfg.git_url)
         issue = await self.gh.get_issue(a.issue)
         comments = await self.gh.issue_comments(a.issue)
+        logins = {(c.get("user") or {}).get("login") for c in comments} - {None}
+        writers = {x for x in logins if await self.gh.permission(x) in WRITE_PERMISSIONS}
+        comments = [c for c in comments if (c.get("user") or {}).get("login") in writers]  # outsiders must not steer the agent
         (d / "prompt.md").write_text(render_prompt(self.cfg, issue, comments, branch, base, a.pr, a.feedback))
         return Workspace(str(d), base, branch)
 
@@ -147,7 +156,7 @@ class Activities:
                 self.mirror.publish, ws / "result.bundle", a.workspace.base_sha, a.workspace.branch,
                 f"refs/autodev/issue-{a.issue}/{a.key}-r{a.round}", self.cfg.github.protected_paths,
                 a.pr is None)  # round 1 owns the branch; revisions must fast-forward
-        except GitError as e:  # permanent: protected path, not a descendant, refused bundle
+        except RejectedBundleError as e:  # permanent; other GitErrors (push, locks) may be transient
             raise ApplicationError(str(e), non_retryable=True) from e
         pr = a.pr
         if head and pr is None:
@@ -161,7 +170,7 @@ class Activities:
         markers = [f"round {a.key}-{a.round}"] + ([f"handled {a.feedback_id}"] if a.feedback_id else [])
         body = render_summary(self.cfg, a.round, a.workspace.branch, head, neutralize(summary), cost)
         body += "\n\n" + "\n".join(self.cfg.marker(m) for m in markers)
-        await self.gh.comment_once(pr or a.issue, body, self.cfg.marker(markers[0]))
+        await self._comment_once(pr or a.issue, body, self.cfg.marker(markers[0]))
         return PrRef(pr, head)
 
     @activity.defn(name="observe_pr")
@@ -199,7 +208,7 @@ class Activities:
     async def report_failure(self, a: FailureInput) -> None:
         tail = log_tail(Path(a.workspace.dir)) if a.workspace else ""
         marker = self.cfg.marker(f"failed {a.key}-{a.round}")
-        await self.gh.comment_once(a.issue, f"{render_failure(self.cfg, a.error, neutralize(tail))}\n\n{marker}", marker)
+        await self._comment_once(a.issue, f"{render_failure(self.cfg, neutralize(a.error), neutralize(tail))}\n\n{marker}", marker)
         await self.set_stage(StageInput(a.issue, "needs-human"))
 
     @activity.defn(name="poll_issues")
@@ -209,18 +218,22 @@ class Activities:
         started = []
         for i in await self.gh.list_issues(labels=go, state="open"):
             n = i["number"]
-            actor = await self.gh.label_actor(n, go)
-            if not actor or await self.gh.permission(actor) not in WRITE_PERMISSIONS:
-                await self.gh.remove_label(n, go)
-                marker = self.cfg.marker(f"ignored-label {actor}")
-                await self.gh.comment_once(n, f"Ignoring `{go}`: it was added by `{actor}`, who does not have write "
-                                              f"access to this repository.\n\n{marker}", marker)
-                continue
-            await self.client.start_workflow(
-                IssueWorkflow.execute, IssueInput(n, self.cfg.agent.max_revisions, self.cfg.temporal.poll_minutes),
-                id=self.cfg.workflow_id(n), task_queue=self.cfg.task_queue,
-                id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
-            started.append(n)
+            try:
+                actor = await self.gh.label_actor(n, go)
+                if not actor or await self.gh.permission(actor) not in WRITE_PERMISSIONS:
+                    await self.gh.remove_label(n, go)
+                    who = actor or "unknown"
+                    marker = self.cfg.marker(f"ignored-label {who}")
+                    await self._comment_once(n, f"Ignoring `{go}`: it was added by `{who}`, who does not have write "
+                                                f"access to this repository.\n\n{marker}", marker)
+                    continue
+                await self.client.start_workflow(
+                    IssueWorkflow.execute, IssueInput(n, self.cfg.agent.max_revisions, self.cfg.temporal.poll_minutes),
+                    id=self.cfg.workflow_id(n), task_queue=self.cfg.task_queue,
+                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+                started.append(n)
+            except Exception:  # one bad issue must not skip the rest; the next poll retries it
+                log.exception("poll: issue #%s failed", n)
         if started:
             log.info("poll: started/kept workflows for %s", started)
         return started

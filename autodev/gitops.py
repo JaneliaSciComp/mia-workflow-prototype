@@ -16,7 +16,11 @@ class GitError(RuntimeError):
     pass
 
 
-class ProtectedPathError(GitError):
+class RejectedBundleError(GitError):
+    """The agent's result is invalid (permanent); other GitErrors may be transient (push, lock contention)."""
+
+
+class ProtectedPathError(RejectedBundleError):
     pass
 
 
@@ -70,11 +74,11 @@ class Mirror:
         # The bundle is agent-controlled: only a real bundle file is fetched, and only from a worker-owned copy
         # (a gitfile or symlink would make git run upload-pack inside the agent's repo).
         if bundle.is_symlink() or not bundle.is_file():
-            raise GitError("agent result is not a regular file")
+            raise RejectedBundleError("agent result is not a regular file")
         with bundle.open("rb") as f:
             header = f.readline().rstrip(b"\n")
             if header not in (b"# v2 git bundle", b"# v3 git bundle"):
-                raise GitError("agent result is not a git bundle")
+                raise RejectedBundleError("agent result is not a git bundle")
             f.seek(0)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=self.path.parent, suffix=".bundle") as tmp:
@@ -89,7 +93,7 @@ class Mirror:
             try:
                 git("merge-base", "--is-ancestor", base_sha, new, cwd=self.path)
             except GitError:
-                raise GitError(f"agent commits do not descend from {base_sha[:12]}") from None
+                raise RejectedBundleError(f"agent commits do not descend from {base_sha[:12]}") from None
             # Plumbing, NUL-separated, no rename detection: names are never quoted and both sides of a rename show.
             out = git("diff-tree", "-r", "-z", "--no-renames", "--name-only", base_sha, new, cwd=self.path)
             changed = [p for p in out.split("\0") if p]

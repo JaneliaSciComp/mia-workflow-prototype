@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import httpx
@@ -9,10 +10,16 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import Activities
 from autodev.github import GitHub
-from autodev.gitops import Mirror
+from autodev.gitops import GitError, Mirror
 from autodev.models import FailureInput, Feedback, ObserveInput, PublishInput, RoundInput, StageInput
 
 from autodev_helpers import API, R, agent_commit, make_cfg, make_origin, run_git
+
+
+@pytest.fixture(autouse=True)
+def hermetic_git(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
 class FakeTemporal:
@@ -103,12 +110,6 @@ async def test_observe_skips_handled_feedback(tmp_path, gh):
     assert (snap.state, snap.head_sha, snap.approved, snap.checks) == ("open", head, False, "none")
 
 
-@pytest.fixture(autouse=True)
-def hermetic_git(monkeypatch):
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-
-
 async def _prepared(tmp_path, gh, issue=7):
     origin = make_origin(tmp_path)
     a = acts(tmp_path, gh, origin=origin)
@@ -160,3 +161,53 @@ async def test_failure_log_cannot_forge_markers(tmp_path, gh):
     await a.report_failure(FailureInput(7, "k", 1, "bad", ws))
     body = json.loads(post.calls[0].request.content)["body"]
     assert "<!-- autodev: handled review-9" not in body and "boom" in body and "<!-- autodev: failed k-1 -->" in body
+
+
+@respx.mock
+async def test_outsider_marker_does_not_suppress_summary(tmp_path, gh):
+    a, ws, d = await _prepared(tmp_path, gh)
+    (d / "result.json").write_text(json.dumps({"result": "ok"}))
+    respx.get(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(200, json=[
+        {"id": 1, "user": {"login": "mallory"}, "body": "<!-- autodev: round k-1 -->"}]))
+    post = respx.post(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(201, json={"id": 2}))
+    await a.publish_round(PublishInput(7, "k", 1, ws, None, None))
+    assert post.called
+
+
+@respx.mock
+async def test_push_failure_is_retryable(tmp_path, gh):
+    a, ws, d = await _prepared(tmp_path, gh)
+    agent_commit(d / "repo", "f.txt", "x", ws.base_sha)
+    (d / "result.json").write_text(json.dumps({"result": "ok"}))
+    shutil.rmtree(tmp_path / "origin.git")
+    with pytest.raises(GitError) as e:
+        await a.publish_round(PublishInput(7, "k", 1, ws, None, None))
+    assert not isinstance(e.value, ApplicationError)
+
+
+@respx.mock
+async def test_prompt_drops_outsider_comments(tmp_path, gh):
+    origin = make_origin(tmp_path)
+    a = acts(tmp_path, gh, origin=origin)
+    respx.get(f"{API}{R}/issues/7").mock(return_value=httpx.Response(200, json={
+        "number": 7, "title": "T", "body": "b", "labels": []}))
+    respx.get(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(200, json=[
+        {"id": 1, "user": {"login": "alice"}, "body": "writer-says-hi"},
+        {"id": 2, "user": {"login": "mallory"}, "body": "outsider-injection"}]))
+    for who, perm in (("alice", "write"), ("mallory", "read")):
+        respx.get(f"{API}{R}/collaborators/{who}/permission").mock(
+            return_value=httpx.Response(200, json={"permission": perm}))
+    ws = await a.prepare_round(RoundInput(7, "k", 1, None, None))
+    prompt = (Path(ws.dir) / "prompt.md").read_text()
+    assert "writer-says-hi" in prompt and "outsider-injection" not in prompt
+
+
+@respx.mock
+async def test_poll_continues_after_one_issue_fails(tmp_path, gh):
+    respx.get(f"{API}{R}/issues").mock(return_value=httpx.Response(200, json=[{"number": 1}, {"number": 2}]))
+    respx.get(f"{API}{R}/issues/1/events").mock(return_value=httpx.Response(500, json={}))
+    respx.get(f"{API}{R}/issues/2/events").mock(return_value=httpx.Response(200, json=[
+        {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "alice"}}]))
+    respx.get(f"{API}{R}/collaborators/alice/permission").mock(return_value=httpx.Response(200, json={"permission": "write"}))
+    temporal = FakeTemporal()
+    assert await acts(tmp_path, gh, temporal).poll_issues() == [2]
