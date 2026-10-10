@@ -214,12 +214,17 @@ def test_log_tail_reads_only_newest_job_dirs(tmp_path):
 
 
 async def test_submit_reuses_job_when_work_root_is_symlinked(tmp_path):
+    """Config canonicalizes work_root, so round dirs (and the csub cwd/mount) match what the broker records."""
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="x", cwd=str(real), state="RUN"),
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="x", cwd=str(real.resolve() / "r1"), state="RUN"),
                               SimpleNamespace(job_id="556", name="y", state="RUN")])
-    ref = await _jobs(tmp_path, fake).submit(7, K, 1, Workspace(str(tmp_path / "link"), "abc", "b"))
+    cfg = make_cfg(tmp_path, paths={"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "link")})
+    j = AgentJobs(cfg, client_factory=lambda: fake)
+    ws = Workspace(str(j.cfg.paths.work_root / "r1"), "abc", "b")
+    assert ws.dir == str(real.resolve() / "r1")
+    ref = await j.submit(7, K, 1, ws)
     assert ref.job_id == "555" and fake.submitted == []
 
 

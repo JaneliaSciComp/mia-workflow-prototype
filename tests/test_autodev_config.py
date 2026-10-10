@@ -57,3 +57,22 @@ def test_agent_constraints_rejected(tmp_path, agent):
 
 def test_agent_constraints_allow_safe_values(tmp_path):
     make_cfg(tmp_path, agent={"allow_hosts": ["pypi.org", "notgithub.com"], "extra_mounts": ["/tools:ro"]})
+
+
+def test_paths_are_canonical(tmp_path):
+    """csub rejects non-canonical mounts, and the round dir is a mount: resolve symlinks once, in config."""
+    for name in ("work", "state", "tools"):
+        (tmp_path / f"real-{name}").mkdir()
+        (tmp_path / f"link-{name}").symlink_to(tmp_path / f"real-{name}")
+    cfg = make_cfg(tmp_path, agent={"extra_mounts": [f"{tmp_path}/link-tools/../link-tools:ro"]},
+                   paths={"state_dir": str(tmp_path / "link-state"), "work_root": str(tmp_path / "link-work")})
+    assert cfg.paths.work_root == (tmp_path / "real-work").resolve()
+    assert cfg.paths.state_dir == (tmp_path / "real-state").resolve()
+    assert cfg.agent.extra_mounts == [f"{(tmp_path / 'real-tools').resolve()}:ro"]
+
+
+def test_env_override_into_an_empty_section(tmp_path, monkeypatch):
+    p = tmp_path / "c.yaml"
+    p.write_text(f"github: {{repo: o/r}}\npaths: {{work_root: {tmp_path}}}\ntemporal:\n")
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "example:7233")
+    assert load_config(p).temporal.address == "example:7233"

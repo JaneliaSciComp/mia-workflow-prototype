@@ -76,7 +76,7 @@ class Mirror:
         if bundle.is_symlink() or not bundle.is_file():
             raise RejectedBundleError("agent result is not a regular file")
         with bundle.open("rb") as f:
-            header = f.readline().rstrip(b"\n")
+            header = f.readline(64).rstrip(b"\n")  # bounded: the file may be one huge line
             if header not in (b"# v2 git bundle", b"# v3 git bundle"):
                 raise RejectedBundleError("agent result is not a git bundle")
             f.seek(0)
@@ -84,7 +84,10 @@ class Mirror:
             with tempfile.NamedTemporaryFile(dir=self.path.parent, suffix=".bundle") as tmp:
                 shutil.copyfileobj(f, tmp)
                 tmp.flush()
-                git("-c", "transfer.fsckObjects=true", "fetch", "-q", tmp.name, f"+HEAD:{ref}", cwd=self.path)
+                try:
+                    git("-c", "transfer.fsckObjects=true", "fetch", "-q", tmp.name, f"+HEAD:{ref}", cwd=self.path)
+                except GitError as e:  # a local fetch from our own copy: the bundle's content is at fault
+                    raise RejectedBundleError(f"agent bundle is unusable: {e}") from e
         try:
             new = git("rev-parse", ref, cwd=self.path)
             if new == base_sha:

@@ -16,7 +16,7 @@ def make_cfg(tmp_path: Path, github: dict | None = None, agent: dict | None = No
     return Config(**{
         "deployment": "autodev",
         "github": {"repo": "o/r", **(github or {})},
-        "paths": {"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "work")},
+        "paths": top.pop("paths", None) or {"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "work")},
         "agent": agent or {},
         **top,
     })

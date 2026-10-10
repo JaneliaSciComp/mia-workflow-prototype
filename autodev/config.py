@@ -83,8 +83,9 @@ class Config(BaseModel):
         g = self.github
         if g.auth == "app" and not (g.app_id and g.installation_id and g.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
-        self.paths.state_dir = self.paths.state_dir.expanduser()
-        self.paths.work_root = self.paths.work_root.expanduser()
+        # canonical: csub rejects non-canonical mounts, and round dirs (under work_root) are mounts
+        self.paths.state_dir = self.paths.state_dir.expanduser().resolve()
+        self.paths.work_root = self.paths.work_root.expanduser().resolve()
         for attr in ("private_key_path", "token_file"):
             if getattr(g, attr):
                 setattr(g, attr, getattr(g, attr).expanduser())
@@ -93,13 +94,14 @@ class Config(BaseModel):
             if any(h == b or h.endswith("." + b) for b in ("github.com", "githubusercontent.com")):
                 raise ValueError(f"agent.allow_hosts: {h!r} would let the agent reach GitHub")
         secrets = [self.paths.state_dir, g.token_file, g.private_key_path]
-        for m in self.agent.extra_mounts:
+        for i, m in enumerate(self.agent.extra_mounts):
             if not m.endswith(":ro"):
                 raise ValueError(f"agent.extra_mounts: {m!r} must end with ':ro'")
             mp = Path(m.removesuffix(":ro"))
             if not mp.is_absolute():
                 raise ValueError(f"agent.extra_mounts: {m!r} must be an absolute path")
             mp = mp.resolve()
+            self.agent.extra_mounts[i] = f"{mp}:ro"
             for sec in filter(None, secrets):
                 sec = Path(sec).resolve()
                 if mp == sec or mp in sec.parents or sec in mp.parents:
@@ -146,7 +148,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         if os.environ.get(env):
             d = data
             for k in keys[:-1]:
-                d = d.setdefault(k, {})
+                if d.get(k) is None:  # a bare `temporal:` in YAML is None
+                    d[k] = {}
+                d = d[k]
             d[keys[-1]] = os.environ[env]
     try:
         return Config(**data)

@@ -1,6 +1,10 @@
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 
-from autodev.gitops import GitError, Mirror, ProtectedPathError
+from autodev import gitops
+from autodev.gitops import GitError, Mirror, ProtectedPathError, RejectedBundleError
 
 from autodev_helpers import agent_commit, make_origin, run_git
 
@@ -111,6 +115,30 @@ def test_gitfile_bundle_refused(setup):
     origin, m, ws, base = setup
     (ws / "result.bundle").write_text(f"gitdir: {ws / 'repo' / '.git'}\n")
     _assert_refused(origin, m, ws, base, GitError)
+
+
+def test_corrupt_bundle_with_valid_header_is_rejected(setup):
+    """Not a transient git failure: retrying cannot fix the agent's bundle."""
+    origin, m, ws, base = setup
+    (ws / "result.bundle").write_bytes(b"# v2 git bundle\n" + b"\x00garbage" * 100)
+    _assert_refused(origin, m, ws, base, RejectedBundleError)
+
+
+def test_every_worker_git_call_disables_hooks(setup, monkeypatch):
+    """The workspace's .git/hooks belong to the agent: no git command of ours may run them."""
+    origin, m, ws, base = setup
+    calls = []
+
+    def spy(argv, *a, **kw):
+        calls.append(argv)
+        return subprocess.run(argv, *a, **kw)
+
+    monkeypatch.setattr(gitops, "subprocess", SimpleNamespace(run=spy))  # gitops' calls only, not the test's
+    m.sync()
+    base = m.workspace(ws, "main", "autodev/issue-7", URL)
+    agent_commit(ws / "repo", "f.txt", "x", base)
+    _publish(m, ws, base)
+    assert len(calls) > 10 and all(c[:3] == ["git", "-c", "core.hooksPath=/dev/null"] for c in calls)
 
 
 def test_token_never_on_disk_or_in_errors(tmp_path):
