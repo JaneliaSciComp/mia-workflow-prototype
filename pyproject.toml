@@ -52,7 +52,7 @@ cryptography = "*"
 zarr-doctor = { path = ".", editable = true }
 temporalio = ">=1.7"
 py-cluster-api = ">=0.8"
-csub = { git = "https://github.com/saalfeldlab/csub", branch = "main" }
+csub = { git = "https://github.com/krokicki/csub", branch = "deploy-all" }
 
 [tool.pixi.feature.test.dependencies]
 pytest = "*"

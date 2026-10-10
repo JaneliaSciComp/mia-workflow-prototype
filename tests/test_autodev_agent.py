@@ -1,8 +1,12 @@
 import json
+import os
 import subprocess
+import threading
 from types import SimpleNamespace
 
-from autodev.agent import AgentJobs, job_script, log_tail, read_result, render_prompt
+from csub.protocol import JobSpec
+
+from autodev.agent import AgentJobs, csub_client, job_script, log_tail, read_result, render_prompt
 from autodev.gitops import Mirror
 from autodev.models import Workspace
 
@@ -66,6 +70,7 @@ class FakeCsub:
         self.submitted, self.states, self.existing = [], list(states), list(existing)
 
     def submit(self, spec):
+        JobSpec.from_dict(spec)
         self.submitted.append(spec)
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
 
@@ -102,10 +107,16 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):
-    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", state="RUN")])
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path), state="RUN")])
     j = _jobs(tmp_path, fake)
     ref = await j.submit(7, "k", 1, Workspace(str(tmp_path), "abc", "b"))
     assert ref.job_id == "555" and fake.submitted == []
+
+
+async def test_submit_ignores_same_name_job_from_another_round_dir(tmp_path):
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd="/old/run", state="DONE")])
+    ref = await _jobs(tmp_path, fake).submit(7, "k2", 1, Workspace(str(tmp_path), "abc", "b"))
+    assert ref.job_id == "777" and len(fake.submitted) == 1
 
 
 async def test_api_key_mode_passes_key_in_job_env(tmp_path, monkeypatch):
@@ -129,3 +140,49 @@ async def test_unknown_state_uses_exit_code_file(tmp_path):
     out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", Workspace(str(tmp_path), "a", "b"),
                                                                     lambda s: None)
     assert (out.state, out.exit_code) == ("DONE", 0)
+
+
+def test_log_tail_ignores_symlinks(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text("TOKEN-123")
+    d = tmp_path / "round"
+    (d / ".csub").mkdir(parents=True)
+    (d / "claude.err").symlink_to(secret)
+    (d / ".csub" / "jobs").symlink_to(tmp_path / "elsewhere")
+    (tmp_path / "elsewhere" / "9").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "9" / "stderr").write_text("TOKEN-456")
+    assert "TOKEN" not in log_tail(d)
+
+
+def test_read_result_fifo_does_not_block(tmp_path):
+    os.mkfifo(tmp_path / "result.json")
+    out = []
+    t = threading.Thread(target=lambda: out.append(read_result(tmp_path)), daemon=True)
+    t.start()
+    t.join(5)
+    assert out and out[0][0].startswith("(the agent left no readable result.json")
+
+
+def test_read_result_deeply_nested_json(tmp_path):
+    (tmp_path / "result.json").write_text("[" * 100000)
+    assert read_result(tmp_path)[0].startswith("(the agent left no readable")
+
+
+async def test_exit_code_symlink_and_garbage_ignored(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text("0")
+    d = tmp_path / "r"
+    d.mkdir()
+    (d / "exit_code").symlink_to(secret)
+    out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", Workspace(str(d), "a", "b"), lambda s: None)
+    assert (out.state, out.exit_code) == ("UNKNOWN", None)
+    (d / "exit_code").unlink()
+    (d / "exit_code").write_text("\u00b2")
+    out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", Workspace(str(d), "a", "b"), lambda s: None)
+    assert out.exit_code is None
+
+
+def test_csub_client_uses_deployment_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("CSUB_TRANSPORT", "local")
+    c = csub_client(make_cfg(tmp_path, deployment="mydep"))
+    assert c.config.session == "mydep"

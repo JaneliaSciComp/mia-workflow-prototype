@@ -39,3 +39,20 @@ def test_app_auth_requires_key_settings(tmp_path):
 def test_deployment_name_is_restricted(tmp_path):
     with pytest.raises(ValueError, match="deployment"):
         make_cfg(tmp_path, deployment="Auto Dev")
+
+
+@pytest.mark.parametrize("agent", [
+    {"allow_hosts": ["github.com"]}, {"allow_hosts": ["api.github.com"]},
+    {"allow_hosts": ["Raw.GithubUserContent.com."]}, {"extra_mounts": ["/tools"]},
+    {"extra_mounts": ["/tools:rw"]}, {"extra_mounts": ["{state}:ro"]}, {"extra_mounts": ["{state}/sub:ro"]},
+    {"extra_mounts": ["{tmp}:ro"]}, {"extra_mounts": ["{tmp}/tok:ro"]},
+])
+def test_agent_constraints_rejected(tmp_path, agent):
+    sub = {"state": str(tmp_path / "state"), "tmp": str(tmp_path)}
+    agent = {k: [v.format(**sub) for v in vs] for k, vs in agent.items()}
+    with pytest.raises(ValueError):
+        make_cfg(tmp_path, github={"token_file": str(tmp_path / "tok")}, agent=agent)
+
+
+def test_agent_constraints_allow_safe_values(tmp_path):
+    make_cfg(tmp_path, agent={"allow_hosts": ["pypi.org", "notgithub.com"], "extra_mounts": ["/tools:ro"]})
