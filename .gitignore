@@ -5,3 +5,4 @@ __pycache__/
 zarr_doctor.yaml
 .env
 .it-results/
+autodev.yaml
