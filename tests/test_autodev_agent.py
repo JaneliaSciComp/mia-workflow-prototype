@@ -4,13 +4,17 @@ import subprocess
 import threading
 from types import SimpleNamespace
 
-from csub.protocol import JobSpec
+import pytest
+from csub.protocol import CsubError, JobSpec, ProtocolError
+from csub.transport.base import TransportError
+from temporalio.exceptions import ApplicationError
 
+from autodev.activities import Activities
 from autodev.agent import AgentJobs, csub_client, job_script, log_tail, read_result, render_prompt
 from autodev.gitops import Mirror
-from autodev.models import Workspace
+from autodev.models import SubmitInput, Workspace
 
-from autodev_helpers import make_cfg, make_origin, run_git
+from autodev_helpers import K, make_cfg, make_origin, run_git
 
 ISSUE = {"number": 7, "title": "Add feature", "body": "Please add feature.txt"}
 
@@ -66,10 +70,12 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
 
 
 class FakeCsub:
-    def __init__(self, states=("DONE",), existing=()):
-        self.submitted, self.states, self.existing = [], list(states), list(existing)
+    def __init__(self, states=("DONE",), existing=(), error=None):
+        self.submitted, self.states, self.existing, self.error = [], list(states), list(existing), error
 
     def submit(self, spec):
+        if self.error:
+            raise self.error
         JobSpec.from_dict(spec)
         self.submitted.append(spec)
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
@@ -97,8 +103,8 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     fake = FakeCsub()
     j = _jobs(tmp_path, fake, extra_mounts=["/tools:ro"], allow_hosts=["pypi.org"])
     ws = Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7")
-    ref = await j.submit(7, "k", 1, ws)
-    assert ref.job_id == "777" and await j.submit(7, "k", 1, ws) == ref
+    ref = await j.submit(7, K, 1, ws)
+    assert ref.job_id == "777" and await j.submit(7, K, 1, ws) == ref
     assert len(fake.submitted) == 1
     spec = fake.submitted[0]
     assert spec["claude"] is True and spec["shell"] is True and spec["cwd"] == ws.dir
@@ -109,20 +115,20 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
 async def test_submit_reuses_job_found_by_name(tmp_path):
     fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path), state="RUN")])
     j = _jobs(tmp_path, fake)
-    ref = await j.submit(7, "k", 1, Workspace(str(tmp_path), "abc", "b"))
+    ref = await j.submit(7, K, 1, Workspace(str(tmp_path), "abc", "b"))
     assert ref.job_id == "555" and fake.submitted == []
 
 
 async def test_submit_ignores_same_name_job_from_another_round_dir(tmp_path):
     fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd="/old/run", state="DONE")])
-    ref = await _jobs(tmp_path, fake).submit(7, "k2", 1, Workspace(str(tmp_path), "abc", "b"))
+    ref = await _jobs(tmp_path, fake).submit(7, "c0ffee02", 1, Workspace(str(tmp_path), "abc", "b"))
     assert ref.job_id == "777" and len(fake.submitted) == 1
 
 
 async def test_api_key_mode_passes_key_in_job_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SVC_KEY", "sk-1")
     fake = FakeCsub()
-    await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, "k", 1, Workspace(str(tmp_path), "a", "b"))
+    await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, K, 1, Workspace(str(tmp_path), "a", "b"))
     assert fake.submitted[0]["env"] == {"ANTHROPIC_API_KEY": "sk-1"}
 
 
@@ -213,5 +219,31 @@ async def test_submit_reuses_job_when_work_root_is_symlinked(tmp_path):
     (tmp_path / "link").symlink_to(real)
     fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="x", cwd=str(real), state="RUN"),
                               SimpleNamespace(job_id="556", name="y", state="RUN")])
-    ref = await _jobs(tmp_path, fake).submit(7, "k", 1, Workspace(str(tmp_path / "link"), "abc", "b"))
+    ref = await _jobs(tmp_path, fake).submit(7, K, 1, Workspace(str(tmp_path / "link"), "abc", "b"))
     assert ref.job_id == "555" and fake.submitted == []
+
+
+@pytest.mark.parametrize("err,permanent", [
+    (CsubError("policy_violation", "mount not under allowed_roots"), True),
+    (CsubError("invalid_request", "bad spec"), True),
+    (ProtocolError("response: not valid JSON"), True),
+    (TransportError("cannot reach broker socket"), False),
+    (CsubError("lsf_error", "bsub timed out"), False),
+])
+async def test_submit_rejection_is_permanent_transport_error_is_not(tmp_path, err, permanent):
+    j = _jobs(tmp_path, FakeCsub(error=err))
+    a = Activities(j.cfg, None, None, j, "bot")
+    with pytest.raises(Exception) as e:
+        await a.submit_agent(SubmitInput(7, K, 1, Workspace(str(tmp_path), "abc", "b")))
+    if permanent:
+        assert isinstance(e.value, ApplicationError) and e.value.non_retryable and err.code in str(e.value)
+    else:
+        assert e.value is err
+
+
+@pytest.mark.parametrize("key", ["", "../../tmp", "C0FFEE01", "c0ffee0", "c0ffee01/.."])
+async def test_submit_refuses_a_key_that_is_not_8_hex(tmp_path, key):
+    j = _jobs(tmp_path, FakeCsub())
+    with pytest.raises(ApplicationError) as e:
+        await Activities(j.cfg, None, None, j, "bot").submit_agent(SubmitInput(7, key, 1, Workspace(str(tmp_path), "a", "b")))
+    assert e.value.non_retryable and not (tmp_path / "state" / "jobs").exists()

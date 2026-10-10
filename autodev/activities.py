@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 from pathlib import Path
 
 from temporalio import activity
@@ -15,28 +16,37 @@ from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
 from .github import GitHubError
 from .gitops import RejectedBundleError
-from .models import (AwaitInput, CommentInput, FailureInput, IssueInput, JobOutcome, JobRef, MergeInput,
-                     MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput, StageInput,
-                     SubmitInput, Workspace)
+from .models import (AwaitInput, CommentInput, FailureInput, InvalidKeyError, IssueInput, JobOutcome, JobRef,
+                     MergeInput, MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput, StageInput,
+                     SubmitInput, Workspace, check_key)
 from .review import WRITE_PERMISSIONS, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
 log = logging.getLogger(__name__)
 
-PERMANENT_HTTP = {400, 404, 410, 422}
+PERMANENT_CSUB = {"policy_violation", "invalid_request"}  # the broker or client rejected the spec; csub's
+# ProtocolError and ConfigError carry invalid_request. transport_error, lsf_error etc. may pass, so they retry.
+PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside the GitHub client
+# ponytail: known secret shapes plus our own token (see neutralize); not a general secret scanner.
+SECRET_RE = re.compile(r"sk-ant-[\w-]+|gh[pousr]_\w+|github_pat_\w+|eyJ[\w-]+\.[\w-]+\.[\w-]+")
 
 
-def neutralize(text: str) -> str:
-    """Agent-controlled text must not forge our `<!-- autodev: ... -->` markers."""
-    return text.replace("<!--", "&lt;!--")
+def neutralize(text: str, token: str | None = None) -> str:
+    """Agent-controlled text must not forge our `<!-- autodev: ... -->` markers, nor publish a credential that a
+    prompt-injected agent printed (e.g. from ~/.claude/.credentials.json)."""
+    if token:
+        text = text.replace(token, "[redacted]")
+    return SECRET_RE.sub("[redacted]", text).replace("<!--", "&lt;!--")
 
 
 def permanent_errors(fn):
-    """Retrying a GitHub 4xx that cannot change just burns the workflow's retry budget."""
+    """Retrying a GitHub 4xx (or a bad key) that cannot change just burns the workflow's retry budget."""
     @functools.wraps(fn)
     async def wrapper(*args, **kw):
         try:
             return await fn(*args, **kw)
+        except InvalidKeyError as e:
+            raise ApplicationError(str(e), non_retryable=True) from e
         except GitHubError as e:
             if e.status in PERMANENT_HTTP:
                 raise ApplicationError(str(e), non_retryable=True) from e
@@ -94,8 +104,11 @@ class Activities:
                    for c in await self.gh.issue_comments(number)):
             await self.gh.comment(number, body)
 
+    def _clean(self, text: str) -> str:
+        return neutralize(text, self.gh.tokens())
+
     def _round_dir(self, issue: int, key: str, rnd: int) -> Path:
-        return self.cfg.paths.work_root / self.cfg.repo_slug / f"issue-{issue}" / key / f"round-{rnd}"
+        return self.cfg.paths.work_root / self.cfg.repo_slug / f"issue-{issue}" / check_key(key) / f"round-{rnd}"
 
     @activity.defn(name="set_stage")
     @permanent_errors
@@ -140,7 +153,14 @@ class Activities:
     @activity.defn(name="submit_agent")
     @permanent_errors
     async def submit_agent(self, a: SubmitInput) -> JobRef:
-        return await self.jobs.submit(a.issue, a.key, a.round, a.workspace)
+        from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
+
+        try:
+            return await self.jobs.submit(a.issue, a.key, a.round, a.workspace)
+        except CsubError as e:
+            if e.code in PERMANENT_CSUB:
+                raise ApplicationError(str(e), non_retryable=True) from e
+            raise
 
     @activity.defn(name="await_agent")
     async def await_agent(self, a: AwaitInput) -> JobOutcome:
@@ -168,7 +188,7 @@ class Activities:
                 pr = (await self.gh.create_pr(f"{issue['title']} (#{a.issue})", render_pr_body(self.cfg, a.issue),
                                               a.workspace.branch, self.cfg.github.base_branch))["number"]
         markers = [f"round {a.key}-{a.round}"] + ([f"handled {a.feedback_id}"] if a.feedback_id else [])
-        body = render_summary(self.cfg, a.round, a.workspace.branch, head, neutralize(summary), cost)
+        body = render_summary(self.cfg, a.round, a.workspace.branch, head, self._clean(summary), cost)
         body += "\n\n" + "\n".join(self.cfg.marker(m) for m in markers)
         await self._comment_once(pr or a.issue, body, self.cfg.marker(markers[0]))
         return PrRef(pr, head)
@@ -208,7 +228,7 @@ class Activities:
     async def report_failure(self, a: FailureInput) -> None:
         tail = log_tail(Path(a.workspace.dir)) if a.workspace else ""
         marker = self.cfg.marker(f"failed {a.key}-{a.round}")
-        await self._comment_once(a.issue, f"{render_failure(self.cfg, neutralize(a.error), neutralize(tail))}\n\n{marker}", marker)
+        await self._comment_once(a.issue, f"{render_failure(self.cfg, self._clean(a.error), self._clean(tail))}\n\n{marker}", marker)
         await self.set_stage(StageInput(a.issue, "needs-human"))
 
     @activity.defn(name="poll_issues")

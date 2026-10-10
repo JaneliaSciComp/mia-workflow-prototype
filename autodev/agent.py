@@ -10,7 +10,7 @@ import stat
 from pathlib import Path
 from typing import Callable
 
-from .models import JobOutcome, JobRef, Workspace
+from .models import JobOutcome, JobRef, Workspace, check_key
 
 PROMPT = """You are implementing GitHub issue #{number} in {repo}. The repository is checked out in the current
 directory on branch `{branch}` at commit {base_sha}.
@@ -129,7 +129,7 @@ class AgentJobs:
         return self._client
 
     def _id_file(self, issue: int, key: str, rnd: int) -> Path:
-        return self.cfg.paths.state_dir / "jobs" / f"issue-{issue}-{key}-r{rnd}.id"
+        return self.cfg.paths.state_dir / "jobs" / f"issue-{issue}-{check_key(key)}-r{rnd}.id"
 
     async def submit(self, issue: int, key: str, rnd: int, ws: Workspace) -> JobRef:
         """Submit once per (issue, key, round); a retry returns the same job."""

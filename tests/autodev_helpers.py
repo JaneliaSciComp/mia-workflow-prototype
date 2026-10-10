@@ -9,6 +9,7 @@ from autodev.config import Config
 
 API = "https://api.github.com"
 R = "/repos/o/r"
+K = "c0ffee01"  # a workflow key: 8 hex chars, like run_id[:8]
 
 
 def make_cfg(tmp_path: Path, github: dict | None = None, agent: dict | None = None, **top) -> Config:

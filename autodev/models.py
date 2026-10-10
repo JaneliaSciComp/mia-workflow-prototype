@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+KEY_RE = re.compile(r"[0-9a-f]{8}")  # IssueInput.key: run_id[:8]
+
+
+class InvalidKeyError(ValueError):
+    pass
+
+
+def check_key(key: str) -> str:
+    """The key names workspace directories and job-id files: anything but 8 hex chars could escape them."""
+    if not KEY_RE.fullmatch(key):
+        raise InvalidKeyError(f"invalid workflow key {key!r}: want 8 hex chars")
+    return key
 
 
 @dataclass
