@@ -12,17 +12,19 @@ dependencies = [
     "zarr>=3",
     "numpy",
     "matplotlib",
+    "cryptography",
 ]
 
 [project.scripts]
 zarr-doctor = "zarr_doctor.cli:main"
+autodev = "autodev.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["zarr_doctor"]
+packages = ["zarr_doctor", "autodev"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -44,11 +46,13 @@ zarr = ">=3"
 pyyaml = "*"
 pydantic = ">=2"
 httpx = "*"
+cryptography = "*"
 
 [tool.pixi.pypi-dependencies]
 zarr-doctor = { path = ".", editable = true }
 temporalio = ">=1.7"
 py-cluster-api = ">=0.8"
+csub = { git = "https://github.com/krokicki/csub", branch = "deploy-all" }
 
 [tool.pixi.feature.test.dependencies]
 pytest = "*"
@@ -61,3 +65,4 @@ default = { features = ["test"], solve-group = "default" }
 [tool.pixi.tasks]
 test = "pytest tests/"
 zd = "zarr-doctor"
+ad = "autodev"

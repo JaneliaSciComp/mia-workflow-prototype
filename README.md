@@ -85,3 +85,8 @@ pixi run pytest -m integration -s               # real bsub against two real vol
 - [x] LSF queue: none by default; `-W 01:00` auto-routes to `short` on the Janelia cluster
 - [ ] LSF billing project (`cluster.project`, passed as `bsub -P`); required for scicompsoft members
 - [ ] The job activates the env with `pixi shell-hook` from this checkout. The checkout must be on a filesystem compute nodes can see, and `pixi` must be on the login-shell PATH there
+
+## autodev
+
+An agentic issue → PR → approval → merge loop built on the same Temporal stack: see
+[`notes/autodev-runbook.md`](notes/autodev-runbook.md).
