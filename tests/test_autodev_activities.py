@@ -272,3 +272,36 @@ async def test_poll_continues_after_one_issue_fails(tmp_path, gh):
     respx.get(f"{API}{R}/collaborators/alice/permission").mock(return_value=httpx.Response(200, json={"permission": "write"}))
     temporal = FakeTemporal()
     assert await acts(tmp_path, gh, temporal).poll_issues() == [2]
+
+
+@respx.mock
+async def test_observe_unchanged_pr_sends_etags_and_reuses_cache(tmp_path, gh):
+    head = "abc1234def"
+    bodies = {
+        f"{R}/pulls/5": {"state": "open", "merged": False, "head": {"sha": head}},
+        f"{R}/pulls/5/reviews": [], f"{R}/pulls/5/comments": [], f"{R}/issues/5/comments": [],
+        f"{R}/commits/{head}/check-runs": {"check_runs": []}, f"{R}/commits/{head}/status": {"statuses": []}}
+    routes = {}
+    for path, body in bodies.items():
+        routes[path] = respx.get(f"{API}{path}").mock(side_effect=[
+            httpx.Response(200, json=body, headers={"etag": f'"{path}"'}), httpx.Response(304)])
+    a = acts(tmp_path, gh)
+    first = await a.observe_pr(ObserveInput(5))
+    second = await a.observe_pr(ObserveInput(5))
+    assert second == first
+    for path, route in routes.items():
+        assert "if-none-match" not in route.calls[0].request.headers
+        assert route.calls[1].request.headers["if-none-match"] == f'"{path}"'
+
+
+@respx.mock
+async def test_changed_resource_replaces_cached_etag(gh):
+    route = respx.get(f"{API}{R}/pulls/5").mock(side_effect=[
+        httpx.Response(200, json={"n": 1}, headers={"etag": '"a"'}),
+        httpx.Response(200, json={"n": 2}, headers={"etag": '"b"'}),
+        httpx.Response(304)])
+    assert (await gh.get_pr(5))["n"] == 1
+    assert (await gh.get_pr(5))["n"] == 2
+    assert (await gh.get_pr(5))["n"] == 2
+    assert route.calls[1].request.headers["if-none-match"] == '"a"'
+    assert route.calls[2].request.headers["if-none-match"] == '"b"'

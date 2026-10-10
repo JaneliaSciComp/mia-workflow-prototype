@@ -40,6 +40,7 @@ class GitHub:
         self._min_gap = 1.0 / writes_per_second
         self._creates_per_hour = creates_per_hour
         self._last_write = 0.0
+        self._etags: dict[tuple, tuple[str, httpx.Response]] = {}  # (path, params) -> (etag, last 200 response)
         self._creates: collections.deque[float] = collections.deque()
         # Contents API PUTs to one branch race (409 "is at X but expected Y"); serialize them in-process.
         self._commit_lock = asyncio.Lock()
@@ -83,16 +84,21 @@ class GitHub:
         return None
 
     async def request(self, method: str, path: str, *, json: Any = None, params: dict | None = None,
-                      ok404: bool = False, write: bool | None = None, attempts: int = 8) -> httpx.Response | None:
+                      ok404: bool = False, write: bool | None = None, attempts: int = 8,
+                      conditional: bool = False) -> httpx.Response | None:
+        """`conditional`: GET with If-None-Match; a 304 returns the response cached from the last 200 (free of rate limit)."""
+        ckey = (path, tuple(sorted((params or {}).items()))) if conditional and method == "GET" else None
         if write is None:
             write = method != "GET"
         create = write and method == "POST"
         for attempt in range(attempts):
             if write:
                 await self._throttle(create)
+            headers = {"Authorization": f"Bearer {self._token_fn()}"}
+            if ckey in self._etags:
+                headers["If-None-Match"] = self._etags[ckey][0]
             try:
-                r = await self._client.request(method, path, json=json, params=params,
-                                               headers={"Authorization": f"Bearer {self._token_fn()}"})
+                r = await self._client.request(method, path, json=json, params=params, headers=headers)
             except httpx.TransportError as e:
                 log.warning("github %s %s transport error %s (attempt %d)", method, path, e, attempt + 1)
                 await self._sleep(min(2**attempt, 60))
@@ -102,6 +108,8 @@ class GitHub:
                 log.warning("github rate limited on %s %s; sleeping %.0fs", method, path, delay)
                 await self._sleep(delay)
                 continue
+            if r.status_code == 304 and ckey in self._etags:
+                return self._etags[ckey][1]
             if r.status_code >= 500:
                 await self._sleep(min(2**attempt, 60))
                 continue
@@ -111,6 +119,11 @@ class GitHub:
                 raise GitHubError(f"{method} {path} -> {r.status_code}: {r.text[:500]}", r.status_code)
             if write:
                 log.info("github %s %s -> %d", method, path, r.status_code)
+            if ckey is not None:
+                if r.headers.get("etag"):
+                    self._etags[ckey] = (r.headers["etag"], r)
+                else:
+                    self._etags.pop(ckey, None)
             return r
         raise GitHubError(f"{method} {path}: gave up after {attempts} attempts")
 
@@ -129,10 +142,11 @@ class GitHub:
             return body["data"]
         raise GitHubError("graphql: rate limited, gave up")
 
-    async def _paged(self, path: str, params: dict | None = None):
+    async def _paged(self, path: str, params: dict | None = None, conditional: bool = False):
         page = 1
         while True:
-            items = (await self.request("GET", path, params={**(params or {}), "per_page": 100, "page": page})).json()
+            items = (await self.request("GET", path, params={**(params or {}), "per_page": 100, "page": page},
+                                      conditional=conditional)).json()
             for it in items:
                 yield it
             if len(items) < 100:

@@ -35,7 +35,7 @@ class GitHub(_Base):
         return actor
 
     async def issue_comments(self, number: int) -> list[dict]:
-        return [c async for c in self._paged(f"/repos/{self.repo}/issues/{number}/comments")]
+        return [c async for c in self._paged(f"/repos/{self.repo}/issues/{number}/comments", conditional=True)]
 
     async def find_pr(self, branch: str) -> dict | None:
         owner = self.repo.split("/")[0]
@@ -48,18 +48,19 @@ class GitHub(_Base):
                                    json={"title": title, "body": body, "head": head, "base": base})).json()
 
     async def get_pr(self, number: int) -> dict:
-        return (await self.request("GET", f"/repos/{self.repo}/pulls/{number}")).json()
+        return (await self.request("GET", f"/repos/{self.repo}/pulls/{number}",
+                                   conditional=True)).json()
 
     async def pr_reviews(self, number: int) -> list[dict]:
-        return [r async for r in self._paged(f"/repos/{self.repo}/pulls/{number}/reviews")]
+        return [r async for r in self._paged(f"/repos/{self.repo}/pulls/{number}/reviews", conditional=True)]
 
     async def pr_review_comments(self, number: int) -> list[dict]:
-        return [c async for c in self._paged(f"/repos/{self.repo}/pulls/{number}/comments")]
+        return [c async for c in self._paged(f"/repos/{self.repo}/pulls/{number}/comments", conditional=True)]
 
     async def check_state(self, sha: str) -> str:
         runs = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/check-runs",
-                                   params={"per_page": 100})).json()["check_runs"]
-        statuses = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status")).json()["statuses"]
+                                   params={"per_page": 100}, conditional=True)).json()["check_runs"]
+        statuses = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status", conditional=True)).json()["statuses"]
         return combine_checks(runs, statuses)
 
     async def merge_pr(self, number: int, sha: str) -> tuple[bool, str]:
