@@ -9,7 +9,6 @@ from .models import Feedback
 WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 APPROVE_RE = re.compile(r"^/approve\s+([0-9a-f]{7,40})\b", re.M)
 REVISE_RE = re.compile(r"^/revise\b(.*)", re.M | re.S)
-_HANDLED_RE = re.compile(r"handled (\S+) -->")
 _FAILED = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
@@ -64,13 +63,13 @@ def feedback(reviews: list[dict], review_comments: list[dict], comments: list[di
     return [f for _, f in sorted(items, key=lambda t: t[0])]
 
 
-def handled_ids(comments: list[dict], marker_prefix: str) -> set[str]:
-    """Feedback ids that a round already addressed, from the markers in our summary comments."""
+def handled_ids(comments: list[dict], marker_prefix: str, bot: str) -> set[str]:
+    """Feedback ids that a round already addressed: only the bot's own `<prefix> handled <id> -->` markers count."""
+    handled_re = re.compile(re.escape(marker_prefix) + r" handled (\S+) -->")
     out: set[str] = set()
     for c in comments:
-        body = c.get("body") or ""
-        if _ours(body, marker_prefix):
-            out.update(_HANDLED_RE.findall(body))
+        if _login(c) == bot:
+            out.update(handled_re.findall(c.get("body") or ""))
     return out
 
 

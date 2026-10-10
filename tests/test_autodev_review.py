@@ -65,8 +65,9 @@ def test_feedback_from_reviews_and_revise_comments_oldest_first():
 
 def test_handled_ids_come_from_our_markers():
     comments = [cm(1, "bot", "done\n<!-- autodev: round k-2 -->\n<!-- autodev: handled review-3 -->"),
-                cm(2, "alice", "<!-- autodev: handled review-9 -->")]  # a person pasting our marker also counts
-    assert handled_ids(comments, MP) >= {"review-3"}
+                cm(2, "alice", "<!-- autodev: handled review-9 -->"),  # a person pasting our marker does not count
+                cm(3, "bot", "see <!-- autodev: round k-1 --> and handled review-7 -->")]  # not anchored to the prefix
+    assert handled_ids(comments, MP, "bot") == {"review-3"}
 
 
 @pytest.mark.parametrize("runs,statuses,want", [
