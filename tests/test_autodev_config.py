@@ -42,7 +42,8 @@ def test_deployment_name_is_restricted(tmp_path):
 
 
 @pytest.mark.parametrize("agent", [
-    {"allow_hosts": ["github.com"]}, {"allow_hosts": ["api.github.com"]},
+    {"allow_hosts": ["github.com"]}, {"allow_hosts": [" api.github.com"]}, {"allow_hosts": ["github.com "]},
+    {"extra_mounts": ["tools:ro"]}, {"extra_mounts": ["~/tools:ro"]}, {"allow_hosts": ["api.github.com"]},
     {"allow_hosts": ["Raw.GithubUserContent.com."]}, {"extra_mounts": ["/tools"]},
     {"extra_mounts": ["/tools:rw"]}, {"extra_mounts": ["{state}:ro"]}, {"extra_mounts": ["{state}/sub:ro"]},
     {"extra_mounts": ["{tmp}:ro"]}, {"extra_mounts": ["{tmp}/tok:ro"]},

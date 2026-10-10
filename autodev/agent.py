@@ -71,12 +71,15 @@ def _read_agent_file(d: Path, rel: str, limit: int, tail: bool = False) -> str |
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 return None
+            # the opened file itself (not the path we checked earlier) must live inside the round dir
+            if not Path(os.path.realpath(f"/proc/self/fd/{fd}")).is_relative_to(root):
+                return None
             if tail:
                 os.lseek(fd, max(0, st.st_size - limit), os.SEEK_SET)
             return os.read(fd, limit).decode(errors="replace")
         finally:
             os.close(fd)
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: symlink loop in resolve()
         return None
 
 
@@ -95,7 +98,7 @@ def read_result(d: Path, limit: int = 20000) -> tuple[str, float | None]:
 def log_tail(d: Path, n: int = 40) -> str:
     d = Path(d)
     parts = []
-    for rel in ["claude.err", *(str(p.relative_to(d)) for p in sorted((d / ".csub" / "jobs").glob("*/stderr")))]:
+    for rel in ["claude.err", *(str(p.relative_to(d)) for p in sorted((d / ".csub" / "jobs").glob("*/stderr"))[-3:])]:  # newest few: bounds memory
         if text := (_read_agent_file(d, rel, 1 << 16, tail=True) or "").strip():
             parts.append(f"== {rel} ==\n" + "\n".join(text.splitlines()[-n:]))
     return "\n".join(parts)[-5000:]
@@ -135,7 +138,7 @@ class AgentJobs:
         if f.exists():
             return JobRef(f.read_text().strip(), a.walltime_min)
         name = f"{self.cfg.deployment}-{issue}-r{rnd}"
-        found = [s for s in await asyncio.to_thread(self.client.status) if getattr(s, "cwd", None) == ws.dir]
+        found = [s for s in await asyncio.to_thread(self.client.status) if os.path.realpath(getattr(s, "cwd", None) or "/nonexistent") == os.path.realpath(ws.dir)]
         if found:  # same round dir (unique per issue/key/round): submitted, then the worker died before writing the id file
             job_id = found[0].job_id
         else:

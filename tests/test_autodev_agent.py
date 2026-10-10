@@ -186,3 +186,32 @@ def test_csub_client_uses_deployment_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CSUB_TRANSPORT", "local")
     c = csub_client(make_cfg(tmp_path, deployment="mydep"))
     assert c.config.session == "mydep"
+
+
+async def test_symlink_loops_are_survived(tmp_path):
+    d = tmp_path / "r"
+    (d / ".csub" / "jobs" / "9").mkdir(parents=True)
+    for rel in ("claude.err", "result.json", "exit_code", ".csub/jobs/9/stderr"):
+        (d / rel).symlink_to(d / rel)
+    assert log_tail(d) == ""
+    assert read_result(d)[0].startswith("(the agent left no readable result.json")
+    out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", Workspace(str(d), "a", "b"), lambda s: None)
+    assert out.exit_code is None
+
+
+def test_log_tail_reads_only_newest_job_dirs(tmp_path):
+    for i in range(10):
+        (tmp_path / ".csub" / "jobs" / str(i)).mkdir(parents=True)
+        (tmp_path / ".csub" / "jobs" / str(i) / "stderr").write_text(f"err{i}")
+    t = log_tail(tmp_path)
+    assert "err9" in t and "err7" in t and "err6" not in t
+
+
+async def test_submit_reuses_job_when_work_root_is_symlinked(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="x", cwd=str(real), state="RUN"),
+                              SimpleNamespace(job_id="556", name="y", state="RUN")])
+    ref = await _jobs(tmp_path, fake).submit(7, "k", 1, Workspace(str(tmp_path / "link"), "abc", "b"))
+    assert ref.job_id == "555" and fake.submitted == []

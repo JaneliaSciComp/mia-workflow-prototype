@@ -89,14 +89,17 @@ class Config(BaseModel):
             if getattr(g, attr):
                 setattr(g, attr, getattr(g, attr).expanduser())
         for h in self.agent.allow_hosts:
-            h = h.lower().rstrip(".")
+            h = h.strip().lower().rstrip(".")
             if any(h == b or h.endswith("." + b) for b in ("github.com", "githubusercontent.com")):
                 raise ValueError(f"agent.allow_hosts: {h!r} would let the agent reach GitHub")
         secrets = [self.paths.state_dir, g.token_file, g.private_key_path]
         for m in self.agent.extra_mounts:
             if not m.endswith(":ro"):
                 raise ValueError(f"agent.extra_mounts: {m!r} must end with ':ro'")
-            mp = Path(m.removesuffix(":ro")).expanduser().resolve()
+            mp = Path(m.removesuffix(":ro"))
+            if not mp.is_absolute():
+                raise ValueError(f"agent.extra_mounts: {m!r} must be an absolute path")
+            mp = mp.resolve()
             for sec in filter(None, secrets):
                 sec = Path(sec).resolve()
                 if mp == sec or mp in sec.parents or sec in mp.parents:
