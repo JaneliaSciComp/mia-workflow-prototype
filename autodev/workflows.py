@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
 
 ROUND_DONE_LOG = "issue #%d round %d: job %s ended %s"
 MAX_POLLS_PER_EXECUTION = 500
+RETRY_MAX_INTERVAL = timedelta(minutes=5)
 QUEUE_SLACK = timedelta(hours=12)  # ponytail: covers LSF pending time; use schedule-to-start metrics if it bites
 
 
@@ -43,10 +44,11 @@ class IssueWorkflow:
     def status(self) -> Status:
         return Status(self.s.issue, self.state, self.s.round, self.s.pr, self.job_id, self.last_error)
 
-    async def _act(self, name: str, arg, seconds: int = 60, attempts: int = 5, result_type=None):
+    async def _act(self, name: str, arg, seconds: int = 60, budget: timedelta = timedelta(hours=6), result_type=None):
+        # retry by time budget; activities raise non-retryable ApplicationError for permanent failures
         return await workflow.execute_activity(
-            name, arg, start_to_close_timeout=timedelta(seconds=seconds),
-            retry_policy=RetryPolicy(maximum_attempts=attempts), result_type=result_type)
+            name, arg, start_to_close_timeout=timedelta(seconds=seconds), schedule_to_close_timeout=budget,
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL), result_type=result_type)
 
     async def _comment(self, number: int, body: str, marker: str) -> None:
         await self._act("comment", CommentInput(number, body, marker))
@@ -68,7 +70,8 @@ class IssueWorkflow:
             return await self._watch()
         except (ActivityError, RoundFailed) as e:
             self.state, self.last_error = "FAILED", _err(e)
-            await self._act("report_failure", FailureInput(s.issue, s.key, s.round, self.last_error, self.workspace))
+            await self._act("report_failure", FailureInput(s.issue, s.key, s.round, self.last_error, self.workspace),
+                            budget=timedelta(hours=24))
             return "failed"
 
     async def _round(self, fb: Feedback | None) -> PrRef:
@@ -77,8 +80,8 @@ class IssueWorkflow:
         self.state, self.job_id = "PREPARING", None
         self.workspace = ws = await self._act(
             "prepare_round", RoundInput(s.issue, s.key, s.round, s.pr, fb.text if fb else None),
-            seconds=600, attempts=3, result_type=Workspace)
-        job = await self._act("submit_agent", SubmitInput(s.issue, s.key, s.round, ws), attempts=3,
+            seconds=600, result_type=Workspace)
+        job = await self._act("submit_agent", SubmitInput(s.issue, s.key, s.round, ws),
                               result_type=JobRef)
         self.state, self.job_id = "RUNNING", job.job_id
         await self._comment(s.pr or s.issue, f"Round {s.round} started: agent job `{job.job_id}`.",
@@ -87,13 +90,14 @@ class IssueWorkflow:
             "await_agent", AwaitInput(job.job_id, ws), result_type=JobOutcome,
             task_queue=workflow.info().task_queue + "-await",
             start_to_close_timeout=timedelta(minutes=job.walltime_min) + QUEUE_SLACK,
-            heartbeat_timeout=timedelta(minutes=3), retry_policy=RetryPolicy(maximum_attempts=3))
+            schedule_to_close_timeout=timedelta(minutes=job.walltime_min) + timedelta(hours=24),
+            heartbeat_timeout=timedelta(minutes=3), retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL))
         workflow.logger.info(ROUND_DONE_LOG, s.issue, s.round, out.job_id, out.state)
         if out.state != "DONE" or out.exit_code not in (0, None):
             raise RoundFailed(f"agent job {out.job_id} ended {out.state} (exit {out.exit_code})")
         self.state = "PUBLISHING"
         return await self._act("publish_round", PublishInput(s.issue, s.key, s.round, ws, s.pr, fb.id if fb else None),
-                               seconds=300, attempts=3, result_type=PrRef)
+                               seconds=300, result_type=PrRef)
 
     async def _watch(self) -> str:
         s = self.s

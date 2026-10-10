@@ -28,7 +28,8 @@ def snap(state="open", sha="h1", approved=False, checks="none", feedback=()):
 
 class Mocks:
     def __init__(self, snaps, existing_pr=None, job_state="DONE", exit_code=0, publish_pr=5, await_failures=0,
-                 merge_ok=True):
+                 merge_ok=True, observe_failures=0, report_failures=0):
+        self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.calls: list[tuple[str, object]] = []
         self.snaps = list(snaps)
         self.existing_pr, self.job_state, self.exit_code = existing_pr, job_state, exit_code
@@ -68,6 +69,9 @@ class Mocks:
         @activity.defn(name="observe_pr")
         async def observe(a: ObserveInput) -> PrSnapshot:
             self.calls.append(("observe", a.pr))
+            if self.observe_failures:
+                self.observe_failures -= 1
+                raise ApplicationError("github 502")
             return self.snaps.pop(0) if len(self.snaps) > 1 else self.snaps[0]
 
         @activity.defn(name="merge_pr")
@@ -78,6 +82,10 @@ class Mocks:
         @activity.defn(name="report_failure")
         async def report(a: FailureInput) -> None:
             self.calls.append(("report_failure", a))
+            if self.report_failures:
+                self.report_failures -= 1
+                raise ApplicationError("github 502")
+            self.reported += 1
 
         return [set_stage, comment, find_pr, prepare, submit, publish, observe, merge, report]
 
@@ -194,3 +202,15 @@ async def test_replay_after_log_change(env, monkeypatch):
     await replayer.replay_workflow(history)
     monkeypatch.setattr(workflows, "ROUND_DONE_LOG", "issue #%d, round %d: %s -> %s")
     assert (await replayer.replay_workflow(history, raise_on_replay_failure=False)).replay_failure is None
+
+
+async def test_transient_observe_failures_do_not_fail_the_workflow(env):
+    m = Mocks([snap(approved=True)], observe_failures=8)
+    assert await run(env, m) == "merged"
+    assert m.names().count("observe") == 9
+
+
+async def test_report_failure_survives_transient_errors(env):
+    m = Mocks([snap()], job_state="EXIT", exit_code=1, report_failures=7)
+    assert await run(env, m) == "failed"
+    assert m.names().count("report_failure") == 8 and m.reported == 1
