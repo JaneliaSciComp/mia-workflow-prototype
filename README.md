@@ -5,7 +5,7 @@ same stack (Temporal for orchestration, LSF for compute, GitHub issues as the us
 
 | component | what it does | setup |
 |---|---|---|
-| [**autodev**](#autodev) | turns a labelled GitHub issue into a PR written by Claude Code, revises it on request, merges it after human approval | [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md) |
+| [**autodev**](#autodev) | turns a labelled GitHub issue into a PR written by Claude Code, revises it on request, merges it after human approval | [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md), bot identity: [`docs/github-app.md`](docs/github-app.md) |
 | [**zarr-doctor**](#zarr-doctor) | one GitHub issue per zarr volume; moving it to **Run** submits an LSF job that histograms the volume and posts the result | [`docs/zarr-doctor.md`](docs/zarr-doctor.md) |
 
 ## autodev

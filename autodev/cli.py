@@ -128,7 +128,7 @@ async def cmd_worker(cfg, args) -> int:
 
     from .activities import Activities
     from .agent import AgentJobs
-    from .auth import bot_login, token_fn
+    from .auth import bot_login, noreply_email, token_fn
     from .github import GitHub
     from .gitops import Mirror
     from .workflows import IssueWorkflow, PollWorkflow
@@ -137,7 +137,9 @@ async def cmd_worker(cfg, args) -> int:
     tokens = token_fn(cfg)
     gh = GitHub.for_autodev(cfg, tokens)
     bot = await bot_login(cfg)
-    mirror = Mirror(cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git", cfg.git_url, tokens)
+    # Agent commits are authored as the account that pushes them and opens the PR.
+    mirror = Mirror(cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git", cfg.git_url, tokens,
+                    author=(bot, await noreply_email(cfg, bot)))
     acts = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
     tq = cfg.task_queue
     main = Worker(client, task_queue=tq, workflows=[IssueWorkflow, PollWorkflow], activities=acts.all(),

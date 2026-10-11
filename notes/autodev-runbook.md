@@ -65,7 +65,7 @@ round summary count, so a short prefix approved earlier cannot approve a later h
 4. **GitHub App** owned by the org, installed on the repo, permissions: Contents RW, Pull requests RW, Issues
    RW, Checks R, Commit statuses R, Metadata R. **Not** Workflows, **not** Administration. Private key at
    `~svc/.config/autodev/app.pem` (mode 600); `github.auth: app`, `app_id`, `installation_id`,
-   `private_key_path`.
+   `private_key_path`. Step by step: [`docs/github-app.md`](../docs/github-app.md).
 5. **Branch protection / ruleset on `main`**: 1 approving review required, stale approvals dismissed on push,
    the App not in the bypass list. This is the real gate; autodev's own approval check is a pre-check.
    Add `.github/CODEOWNERS` (inside `.github/`, so agents cannot edit it) covering `autodev/`, `scripts/` and

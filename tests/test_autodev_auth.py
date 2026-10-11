@@ -7,7 +7,7 @@ import respx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from autodev.auth import AppTokens, app_jwt, bot_login, token_fn
+from autodev.auth import AppTokens, app_jwt, bot_login, noreply_email, token_fn
 
 from autodev_helpers import API, make_cfg
 
@@ -74,3 +74,10 @@ async def test_bot_login_app_mode(tmp_path, key):
     respx.get(f"{API}/app").mock(return_value=httpx.Response(200, json={"slug": "autodev-bot"}))
     cfg = make_cfg(tmp_path, github={"auth": "app", "app_id": 42, "installation_id": 7, "private_key_path": str(kp)})
     assert await bot_login(cfg) == "autodev-bot[bot]"
+
+
+@respx.mock
+async def test_noreply_email_uses_the_bot_user_id(tmp_path):
+    respx.get(f"{API}/users/autodev-bot%5Bbot%5D").mock(return_value=httpx.Response(200, json={"id": 123}))
+    assert await noreply_email(make_cfg(tmp_path), "autodev-bot[bot]") == \
+        "123+autodev-bot[bot]@users.noreply.github.com"
