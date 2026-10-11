@@ -135,5 +135,3 @@ Add `.github/CODEOWNERS` covering `autodev/`, `scripts/` and `.github/` so chang
 - **`403 Resource not accessible by integration`**: a permission from step 1 is missing, or the repo isn't in the
   installation's repository list.
 - **Commits show a plain name with no avatar**: the worker started before the switch. Restart it.
-
-zarr-doctor still uses a personal token (`$GITHUB_TOKEN`). It doesn't read these settings.

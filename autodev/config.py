@@ -11,9 +11,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
-from zarr_doctor.config import PROJECT_DIR, load_dotenv
-
-__all__ = ["PROJECT_DIR", "STAGES", "Config", "load_config"]
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 _ENV_OVERRIDES = {
     "AUTODEV_DEPLOYMENT": ("deployment",),
@@ -135,6 +133,18 @@ class Config(BaseModel):
     @property
     def repo_slug(self) -> str:
         return self.github.repo.replace("/", "__")
+
+
+def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
+    """Minimal .env loader: KEY=VALUE lines; real env vars win."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
