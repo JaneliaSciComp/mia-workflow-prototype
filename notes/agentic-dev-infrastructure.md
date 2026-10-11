@@ -25,7 +25,7 @@ Existing systems were surveyed on 2026-10-10.
 
 ## 1. Temporal vs Prefect for this workload
 
-Background: [`temporal-vs-prefect.md`](https://github.com/krokicki/mia-workflow-prototype/blob/prefect/notes/temporal-vs-prefect.md) (on the `prefect` branch), sections 2 and 3.
+Background: [`temporal-vs-prefect.md`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/prefect/notes/temporal-vs-prefect.md) (on the `prefect` branch), sections 2 and 3.
 
 | need | Temporal | Prefect |
 |---|---|---|

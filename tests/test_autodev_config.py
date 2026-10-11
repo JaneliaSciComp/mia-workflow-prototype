@@ -14,11 +14,11 @@ def test_example_loads_and_derives_names(monkeypatch):
     assert cfg.github.auth == "token"
     assert cfg.label("go") == "autodev:go"
     assert cfg.branch(12) == "autodev/issue-12"
-    assert cfg.workflow_id(12) == "autodev/krokicki/mia-workflow-prototype/issue-12"
+    assert cfg.workflow_id(12) == "autodev/JaneliaSciComp/mia-workflow-prototype/issue-12"
     assert cfg.marker("handled review-3") == "<!-- autodev: handled review-3 -->"
     assert cfg.marker_prefix == "<!-- autodev:"
-    assert cfg.git_url == "https://github.com/krokicki/mia-workflow-prototype.git"
-    assert cfg.repo_slug == "krokicki__mia-workflow-prototype"
+    assert cfg.git_url == "https://github.com/JaneliaSciComp/mia-workflow-prototype.git"
+    assert cfg.repo_slug == "JaneliaSciComp__mia-workflow-prototype"
 
 
 def test_deployment_override_isolates_a_personal_instance(monkeypatch):
