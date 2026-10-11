@@ -3,7 +3,7 @@ lmd_root: /groups/miaai/miaai/lmd-v0.0.1          # read-only; $LMD_ROOT overrid
 results_dir: /nrs/scicompsoft/zarr-doctor/results # shared FS visible to compute nodes; $RESULTS_DIR overrides
 state_dir: ~/.local/state/zarr-doctor             # SQLite + logs; $STATE_DIR overrides
 github:
-  repo: krokicki/mia-workflow-prototype
+  repo: JaneliaSciComp/mia-workflow-prototype
   token_env: GITHUB_TOKEN
   results_branch: zarr-doctor-results
 trigger:

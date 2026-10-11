@@ -2,7 +2,7 @@
 # Who autodev acts as = the OS account running it + the github.auth settings below.
 deployment: autodev          # prefix for labels, task queue, workflow ids, branches; personal test: autodev-<you>
 github:
-  repo: krokicki/mia-workflow-prototype
+  repo: JaneliaSciComp/mia-workflow-prototype
   base_branch: main
   auth: token                # token: $GITHUB_TOKEN (run as yourself) | app: GitHub App (service account)
   token_env: GITHUB_TOKEN

@@ -42,22 +42,22 @@ defined next to it in the same file (such as `_act`, `find_run_hits`, `render_re
 
 ### 1.0 Before anything runs
 
-[`scripts/run-all.sh`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/run-all.sh) starts the Temporal dev server, then the worker, then applies the
+[`scripts/run-all.sh`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/run-all.sh) starts the Temporal dev server, then the worker, then applies the
 poll Schedule.
 
-- **The worker.** [`cmd_worker`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L210) connects a Temporal client, builds the three
+- **The worker.** [`cmd_worker`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L210) connects a Temporal client, builds the three
   shared clients (GitHub, SQLite state, LSF through `Cluster`), wraps them in an
-  [`Activities`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L122-L128) object, and starts two `Worker`s: one on the `zarr-doctor`
+  [`Activities`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L122-L128) object, and starts two `Worker`s: one on the `zarr-doctor`
   queue serving both workflow classes and the short activities, one on `zarr-doctor-await` serving only `await_job`.
   From here on the process long-polls the server for work.
-- **The Schedule.** [`cmd_schedule`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L235) creates (or updates) the server-side Schedule
+- **The Schedule.** [`cmd_schedule`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L235) creates (or updates) the server-side Schedule
   `zarr-doctor-poll`. It starts a `PollWorkflow` every `poll_every_minutes` (2 by default) and skips a tick while the
   previous poll is still running.
-- **The issues.** `zarr-doctor discover` is a plain CLI, not a workflow. [`cmd_discover`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L149-L181)
-  calls [`discover`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L212-L265), which walks `$LMD_ROOT/data`, reads each volume's zarr
+- **The issues.** `zarr-doctor discover` is a plain CLI, not a workflow. [`cmd_discover`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L149-L181)
+  calls [`discover`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L212-L265), which walks `$LMD_ROOT/data`, reads each volume's zarr
   JSON (never chunk data), and creates one GitHub issue per new volume with a hidden
   `<!-- zarr-doctor: path=… fingerprint=… -->` marker in the body. After each creation it calls
-  [`signal_discovered`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L28-L31), which signal-with-starts that issue's `IssueWorkflow`.
+  [`signal_discovered`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L28-L31), which signal-with-starts that issue's `IssueWorkflow`.
   So before any run, there is already one `IssueWorkflow` per issue, each parked in `IDLE`.
 
 ### 1.1 You move an issue to Run
@@ -67,25 +67,25 @@ to this directly, because GitHub never calls us. The next poll notices.
 
 ### 1.2 The poll, every 2 minutes
 
-1. The Schedule fires. The server starts a [`PollWorkflow`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L159-L165) execution with
+1. The Schedule fires. The server starts a [`PollWorkflow`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L159-L165) execution with
    ID `zarr-doctor-poll-run` and puts a workflow task on the `zarr-doctor` queue.
 2. The worker runs it. The workflow does one thing: execute the `poll_github` activity with no retries, because
    the next tick is the retry.
-3. [`poll_github`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L178-L192) runs on the worker. `find_run_hits` asks GitHub which
+3. [`poll_github`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L178-L192) runs on the worker. `find_run_hits` asks GitHub which
    issues are in the Run stage: in project mode through
-   [`projects.issues_with_status`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L54-L66), in label mode by listing open issues with
+   [`projects.issues_with_status`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L54-L66), in label mode by listing open issues with
    `zd:run`. For each hit, `path_for_issue` looks up the volume path, first in SQLite
-   ([`State.path_for_issue`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/state.py#L45-L47)), else from the marker in the issue body. Then
+   ([`State.path_for_issue`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/state.py#L45-L47)), else from the marker in the issue body. Then
    `signal_run` calls `client.start_workflow(..., id="zarr-doctor/issue-N", start_signal="run")`: start the
    issue's workflow if it doesn't exist, then deliver the `run` signal, atomically. Finally it writes `last_poll_at`
    to SQLite.
 
 `zarr-doctor poll-once` does the same lookup without signalling. `zarr-doctor run --issue N`
-([`cmd_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L265)) skips the poll and calls `signal_run` directly.
+([`cmd_run`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L265)) skips the poll and calls `signal_run` directly.
 
 ### 1.3 The issue workflow wakes up
 
-The `run` signal lands in [`IssueWorkflow`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L37-L88):
+The `run` signal lands in [`IssueWorkflow`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L37-L88):
 
 1. If the workflow is new, `__init__` receives the `IssueInput`, then the signal handler runs, then `execute`
    starts. If it already exists, it is sitting in `execute` at `wait_condition(lambda: bool(self.pending))`.
@@ -96,22 +96,22 @@ The `run` signal lands in [`IssueWorkflow`](https://github.com/krokicki/mia-work
 
 ### 1.4 One run: `_run_once`
 
-[`_run_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130) is the whole run, top to bottom. It's workflow code, so it does
+[`_run_once`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130) is the whole run, top to bottom. It's workflow code, so it does
 no I/O itself. Each step schedules an activity by name (through `_act`, which sets the timeout and retry count) and
 waits for the recorded result. The implementations are methods on `Activities` and run on the worker.
 
 1. **Ack.** State becomes `ACKED` and `run_id` becomes `r<n>-<timestamp>`, using `workflow.now()` so replay gets the
    same value. The workflow schedules `ack_run`.
-   [`ack_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L133-L137) moves the issue to the running stage
-   ([`projects.set_stage`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L79-L92): swap `zd:*` labels, or set the project field) and
-   posts a "Run … started" comment through [`GitHub.comment_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L183-L189), which
+   [`ack_run`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L133-L137) moves the issue to the running stage
+   ([`projects.set_stage`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py#L79-L92): swap `zd:*` labels, or set the project field) and
+   posts a "Run … started" comment through [`GitHub.comment_once`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L183-L189), which
    first checks for a comment carrying this run's marker so a retry can't post twice.
    *On GitHub:* `zd:running`, one "started" comment.
 
 2. **Submit.** The workflow schedules `submit_histogram_job` and, from its result, records `job_id` and moves to
    `SUBMITTED`.
-   [`submit_histogram_job`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L139-L142) calls
-   [`Cluster.submit`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L56-L88), which has three layers of "did I already do this?": if
+   [`submit_histogram_job`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L139-L142) calls
+   [`Cluster.submit`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L56-L88), which has three layers of "did I already do this?": if
    `$RESULTS_DIR/<issue>/<run>/job_id` exists, return it; else look for a live LSF job named `zd-<issue>-<run>`; else
    `bsub` (via `py-cluster-api`) a job that cd's into this checkout, activates the pixi env and runs
    `python -m zarr_doctor.jobs.histogram`. It then writes the `job_id` file. The activity returns the job id and the
@@ -121,11 +121,11 @@ waits for the recorded result. The implementations are methods on `Activities` a
    activity goes to the `zarr-doctor-await` queue with `start_to_close = walltime + 15 min`, a 2-minute heartbeat
    timeout and 3 attempts. State becomes `RUNNING` and the workflow blocks on
    `wait_condition(handle.done() or self.cancel_requested)`.
-   [`await_job`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L144-L148) calls [`Cluster.wait`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L90-L112):
+   [`await_job`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L144-L148) calls [`Cluster.wait`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L90-L112):
    a `JobMonitor` polls `bjobs`, and every poll calls `activity.heartbeat`. If this worker didn't submit the job
    (a restart), `executor.track(job_id)` adopts it first. It returns a `JobOutcome` (status, exit code, runtime, peak
    memory).
-   *Meanwhile, on a compute node:* [`jobs/histogram.py`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/jobs/histogram.py#L185-L224) opens
+   *Meanwhile, on a compute node:* [`jobs/histogram.py`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/jobs/histogram.py#L185-L224) opens
    `raw/<level>`, samples up to 256 chunks deterministically, computes stats and a histogram, and writes
    `stats.json`, `histogram.json` and `histogram.png` into the run directory. It imports nothing from Temporal or
    GitHub.
@@ -133,13 +133,13 @@ waits for the recorded result. The implementations are methods on `Activities` a
 4. **Check.** If `outcome.status` isn't `done`, the workflow raises `_RunFailed` and goes to §1.5.
 
 5. **Publish.** State becomes `PUBLISHING`; the workflow schedules `publish_results`.
-   [`publish_results`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L155-L166) creates the results branch if missing
-   ([`ensure_branch`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L193-L203)), commits the three files
-   ([`upsert_file`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L208-L215), skipping any that already exist), then
+   [`publish_results`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L155-L166) creates the results branch if missing
+   ([`ensure_branch`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L193-L203)), commits the three files
+   ([`upsert_file`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L208-L215), skipping any that already exist), then
    `comment_once` posts the result comment rendered by `render_result`.
    *On GitHub:* commits on `zarr-doctor-results`, the histogram comment.
 
-6. **Finish.** [`finish_run`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L168-L170) calls `set_stage(…, "done")`.
+6. **Finish.** [`finish_run`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L168-L170) calls `set_stage(…, "done")`.
    *On GitHub:* `zd:done`.
 
 7. **Idle.** State returns to `IDLE` and control returns to `execute`, which checks whether it should
@@ -151,14 +151,14 @@ comments are guarded by markers, files by existence, the LSF job by the `job_id`
 ### 1.5 When it goes wrong
 
 Any `ActivityError` (retries exhausted) or `_RunFailed` drops `_run_once` into `_fail`
-([workflows.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L132-L156)). State becomes `FAILED-REPORTED` and a shielded cleanup
+([workflows.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L132-L156)). State becomes `FAILED-REPORTED` and a shielded cleanup
 runs: cancel the `await_job` handle if it's still in flight; if this is a cancellation, run the `cluster_cancel`
-activity (`bkill`); then run [`report_failure`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L172-L176), which grabs the last 40
-lines of `lsf.err` ([`Cluster.log_tail`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L117-L123)), posts a failure comment with the
+activity (`bkill`); then run [`report_failure`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L172-L176), which grabs the last 40
+lines of `lsf.err` ([`Cluster.log_tail`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L117-L123)), posts a failure comment with the
 stage, error and log tail (again through `comment_once`), and calls `set_stage(…, "failed")`. State then returns to
 `IDLE`, so moving the issue back to Run reruns it.
 
-**Cancel.** `zarr-doctor cancel --issue N` ([`cmd_cancel`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L268-L273)) sends the `cancel`
+**Cancel.** `zarr-doctor cancel --issue N` ([`cmd_cancel`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L268-L273)) sends the `cancel`
 signal. `on_cancel` sets `cancel_requested`, the `wait_condition` in step 3 wakes, `_run_once` raises
 `_RunFailed("cancelled")`, and `_fail` takes the path above with `kill_job=True`.
 
@@ -168,7 +168,7 @@ for `await_job`, or "worker is shutting down"), the server re-dispatches it to t
 
 ### 1.6 Watching it happen
 
-- `zarr-doctor status --issue N` ([`cmd_status`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L276-L300)) runs the `status` query
+- `zarr-doctor status --issue N` ([`cmd_status`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L276-L300)) runs the `status` query
   against the live workflow: state, run id, job id, last error.
 - The Temporal UI (`:8233`) → Workflows → `zarr-doctor/issue-N` → Event History shows each step above as
   `ActivityTaskScheduled` / `Started` / `Completed` events with inputs and results.
@@ -313,7 +313,7 @@ in-flight execution on its next replay. Two tools help:
 - **`workflow.patched("id")`** returns True on first execution and records a marker. During replay it returns
   whatever was recorded, so old histories take the old path and new runs take the new one. (Lab 5)
 - **Replay testing**: replay recorded histories against new code before you deploy.
-  [`scripts/replay_history.py`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)
+  [`scripts/replay_history.py`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)
   does this for a history exported from the live server.
 
 ### 2.11 Testing
@@ -350,19 +350,19 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage A: orientation
 
-1. **[notes/zarr-doctor-spec.md](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/notes/zarr-doctor-spec.md)**
+1. **[notes/zarr-doctor-spec.md](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/notes/zarr-doctor-spec.md)**
    *What:* the original spec this PoC implements.
    *Look for:* §3 (runtime architecture), §7 (the `IssueWorkflow` state machine and per-step timeouts and retries),
    §16 (decisions already made).
    *Depends on:* nothing.
 
-2. **[README.md](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/README.md)**
+2. **[README.md](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/README.md)**
    *What:* how to run it, plus "Findings and deviations".
    *Look for:* the deviations section. Each entry is a spot where real data or real infrastructure disagreed with the
    spec.
    *Depends on:* nothing.
 
-3. **[pyproject.toml](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/pyproject.toml)**
+3. **[pyproject.toml](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/pyproject.toml)**
    *What:* package metadata, dependencies and the pixi environment, all in one file.
    *Look for:* `temporalio` (the Python SDK), `py-cluster-api` (LSF wrapper), `httpx`, `zarr`. Also the pytest config
    (`asyncio_mode = "auto"`, a session-scoped event loop so one Temporal test server is shared, and the
@@ -371,7 +371,7 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage B: the data contract
 
-4. **[zarr_doctor/models.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/models.py)**
+4. **[zarr_doctor/models.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/models.py)**
    *What:* every value that crosses the workflow↔activity boundary, as plain dataclasses.
    *Look for:* the absence of logic. Temporal serializes these to JSON into the history, so they are the
    **persisted schema** of the system. Adding a field with a default is safe; renaming or removing one can break
@@ -381,14 +381,14 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage C: the workflow (read slowly; this is the Temporal part)
 
-5. **[workflows.py L1–L35: imports and helpers](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L1-L35)**
+5. **[workflows.py L1–L35: imports and helpers](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L1-L35)**
    *What:* module setup for workflow code.
    *Look for:* `workflow.unsafe.imports_passed_through()` (§2.3). There are no imports of `httpx`, `zarr` or
    `cluster_api`, and none of `activities.py`: activities are called **by name** (strings), so the workflow module
    stays pure. Also `workflow_id()`, the business-key ID, and `RUN_STARTED_LOG`, which Lab 5 and the replay test use.
    *Depends on:* `temporalio.workflow`, `temporalio.common.RetryPolicy`, `temporalio.exceptions.ActivityError`, `models`.
 
-6. **[workflows.py L37–L73: state, signals, query](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L37-L73)**
+6. **[workflows.py L37–L73: state, signals, query](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L37-L73)**
    *What:* the workflow's in-memory state and its message handlers.
    *Look for:*
    - `@workflow.init` lets `__init__` receive the workflow input. That matters because with signal-with-start the
@@ -398,7 +398,7 @@ Read in this order. Each step builds on the previous one.
    - The `status` query is read-only, as queries must be.
    *Depends on:* `models.RunRequest`, `Discovered`, `WorkflowStatus`.
 
-7. **[workflows.py L76–L93: the main loop and activity options](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L76-L93)**
+7. **[workflows.py L76–L93: the main loop and activity options](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L76-L93)**
    *What:* a workflow that never ends. It waits for a signal, does a run, and repeats.
    *Look for:*
    - `wait_condition(lambda: bool(self.pending))`: a durable wait (§2.7). 20 workflows sit here right now holding
@@ -408,7 +408,7 @@ Read in this order. Each step builds on the previous one.
    - `_act()`: one place that turns "seconds, attempts" into `start_to_close_timeout` + `RetryPolicy`.
    *Depends on:* `temporalio.workflow` APIs only.
 
-8. **[workflows.py L95–L130: one run, step by step](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130)**
+8. **[workflows.py L95–L130: one run, step by step](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L130)**
    *What:* the spec §7 state machine. ACKED → SUBMITTED → RUNNING → PUBLISHING → IDLE.
    *Look for:*
    - `run_id` is built from `workflow.now()`, not `datetime.now()`. That's determinism (§2.3).
@@ -420,14 +420,14 @@ Read in this order. Each step builds on the previous one.
      `asyncio.CancelledError` means the *workflow itself* is being cancelled.
    *Depends on:* the activity names defined in `activities.py` (a string contract), plus `models`.
 
-9. **[workflows.py L132–L156: failure reporting that survives cancellation](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L132-L156)**
+9. **[workflows.py L132–L156: failure reporting that survives cancellation](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L132-L156)**
    *What:* "every run ends in exactly one result or failure comment".
    *Look for:* cancelling the in-flight `await_job` handle, killing the LSF job with `cluster_cancel`, then
    `report_failure`, all wrapped in `asyncio.shield(...)` so a workflow cancellation can't interrupt its own
    cleanup. Failures *of the cleanup* are logged, not raised, so the workflow always returns to IDLE.
    *Depends on:* the `cluster_cancel` and `report_failure` activities.
 
-10. **[workflows.py L159–L165: PollWorkflow](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L159-L165)**
+10. **[workflows.py L159–L165: PollWorkflow](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L159-L165)**
     *What:* the workflow the Schedule starts every 2 minutes.
     *Look for:* `maximum_attempts=1`. A failed poll isn't retried, because the next scheduled run *is* the retry.
     This is a common Temporal idiom: let the schedule supply retries.
@@ -435,7 +435,7 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage D: activities, where side effects live
 
-11. **[activities.py L22–L48: signal-with-start and poll helpers](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L22-L48)**
+11. **[activities.py L22–L48: signal-with-start and poll helpers](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L22-L48)**
     *What:* how the outside world (the poller, the CLI, discovery) talks to issue workflows.
     *Look for:* `client.start_workflow(..., id=workflow_id(issue), start_signal="run", ...)`. That's
     signal-with-start (§2.6): it starts the workflow if needed, then signals it, atomically. Because Workflow IDs are
@@ -443,7 +443,7 @@ Read in this order. Each step builds on the previous one.
     *Depends on:* `temporalio.client.Client` (passed in), `projects` (find Run-stage issues), `state` (path lookup),
     `discovery.MARKER_RE`.
 
-12. **[activities.py L122–L153: the Activities class, ack/submit/await/cancel](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L122-L153)**
+12. **[activities.py L122–L153: the Activities class, ack/submit/await/cancel](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L122-L153)**
     *What:* activity implementations as methods on one object that holds the shared clients.
     *Look for:*
     - `@activity.defn(name=...)`: these names are the strings the workflow uses.
@@ -453,7 +453,7 @@ Read in this order. Each step builds on the previous one.
     - `all()` omits `await_job` because it's registered on the other queue (see step 15).
     *Depends on:* `temporalio.activity`, `cluster.Cluster`, `github_api.GitHub`, `projects.set_stage`.
 
-13. **[activities.py L155–L192: publish, finish, failure, poll](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L155-L192)**
+13. **[activities.py L155–L192: publish, finish, failure, poll](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/activities.py#L155-L192)**
     *What:* the GitHub side of the run.
     *Look for:* idempotency at each layer. Files are only committed if absent (`upsert_file`), and the result
     comment carries `<!-- zarr-doctor: run=<id> result -->` so a retry after a partial publish completes the job
@@ -462,13 +462,13 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage E: wiring workers, the Schedule and the CLI
 
-14. **[cli.py L40–L44: connecting a client](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L40-L44)**
+14. **[cli.py L40–L44: connecting a client](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L40-L44)**
     *What:* `Client.connect(address, namespace)`.
     *Look for:* a **namespace** is the server's tenancy boundary (we use `default`). The client is cheap and
     long-lived, and is shared by workers, signals and queries.
     *Depends on:* `temporalio.client`.
 
-15. **[cli.py L184–L211: the worker process](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L211)**
+15. **[cli.py L184–L211: the worker process](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L184-L211)**
     *What:* two `Worker` objects in one process, one per task queue (§2.5).
     *Look for:*
     - `workflows=[...]` registers workflow types and `activities=[...]` registers activity functions.
@@ -477,13 +477,13 @@ Read in this order. Each step builds on the previous one.
       is shutting down", and Temporal retries them on the next worker. You'll see exactly that in Lab 1.
     *Depends on:* `temporalio.worker.Worker`, `activities.Activities`, `cluster.Cluster`, `github_api`, `state`.
 
-16. **[cli.py L213–L236: the Schedule](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L236)**
+16. **[cli.py L213–L236: the Schedule](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L213-L236)**
     *What:* creating or updating the server-side cron (§2.9).
     *Look for:* `ScheduleActionStartWorkflow`, `ScheduleIntervalSpec(every=...)`, `ScheduleOverlapPolicy.SKIP`, and
     create-or-update via `ScheduleAlreadyRunningError`, which makes `schedule apply` idempotent.
     *Depends on:* `temporalio.client` schedule types, `workflows.PollWorkflow`.
 
-17. **[cli.py L253–L301: run, cancel, status](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L301)**
+17. **[cli.py L253–L301: run, cancel, status](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cli.py#L253-L301)**
     *What:* operator commands built from signals, queries and **visibility** (`client.list_workflows(query)`, which
     lists or filters executions server-side).
     *Look for:* `rpc_timeout=QUERY_TIMEOUT` on queries. A query blocks while no worker is up (§2.1).
@@ -491,7 +491,7 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage F: the cluster side
 
-18. **[cluster.py L21–L88: idempotent submission](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L21-L88)**
+18. **[cluster.py L21–L88: idempotent submission](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L21-L88)**
     *What:* wraps `py-cluster-api` so that "submit" can safely be retried.
     *Look for:* three layers of "did I already submit this?":
     - the `job_id` file in the run directory;
@@ -502,19 +502,19 @@ Read in this order. Each step builds on the previous one.
     and the `-P` billing argument.
     *Depends on:* `cluster_api` (`create_executor`, `ResourceSpec`, `JobMonitor`), `config.PROJECT_DIR`.
 
-19. **[cluster.py L90–L123: restart-safe waiting](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L90-L123)**
+19. **[cluster.py L90–L123: restart-safe waiting](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/cluster.py#L90-L123)**
     *What:* the body of `await_job`.
     *Look for:* when the job isn't in this process's memory (a new worker after a crash), `executor.track(job_id)`
     seeds it so `bjobs` polling resumes. That's the code path behind "restart never duplicates an LSF job". The loop
     wakes every `interval` to call `on_poll`, which is the heartbeat.
     *Depends on:* `cluster_api.JobMonitor`, `JobStatus`, `models.JobOutcome`.
 
-20. **[cluster_api.yaml](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/cluster_api.yaml)**
+20. **[cluster_api.yaml](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/cluster_api.yaml)**
     *What:* `py-cluster-api` profiles: `janelia_lsf` (real `bsub`/`bjobs`) and `local` (subprocesses, for tests).
     *Look for:* `zombie_timeout_minutes`, the safety net for jobs the scheduler forgets.
     *Depends on:* read by `cluster_api.create_executor`.
 
-21. **[jobs/histogram.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/jobs/histogram.py)**
+21. **[jobs/histogram.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/jobs/histogram.py)**
     *What:* the compute job itself, a standalone script.
     *Look for:* zero imports of Temporal or GitHub (a spec §16 decision); compute code shouldn't depend on the
     orchestrator. Deterministic chunk sampling (L56–L75); one- or two-pass histograms by dtype (L77–L143); a one-line
@@ -523,7 +523,7 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage G: the GitHub side
 
-22. **[github_api.py L34–L130: the HTTP client](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L34-L130)**
+22. **[github_api.py L34–L130: the HTTP client](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L34-L130)**
     *What:* a thin async REST + GraphQL client.
     *Look for:*
     - `_rate_limit_delay`: GitHub's primary (`x-ratelimit-*`) and secondary (403/429 with or without
@@ -534,13 +534,13 @@ Read in this order. Each step builds on the previous one.
     Retrying *inside* the client handles short rate-limit waits; Temporal's activity retries handle everything else.
     *Depends on:* `httpx`.
 
-23. **[github_api.py L183–L215: idempotent helpers](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L183-L215)**
+23. **[github_api.py L183–L215: idempotent helpers](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/github_api.py#L183-L215)**
     *What:* `comment_once`, `ensure_branch` (an orphan commit through the Git Data API), and `upsert_file`.
     *Look for:* `_commit_lock`. Concurrent Contents-API commits to one branch return 409, which we hit for real and
     fixed.
     *Depends on:* `httpx`, `base64`.
 
-24. **[projects.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py)**
+24. **[projects.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/projects.py)**
     *What:* the two trigger modes behind one function, `set_stage()` (L79). It's either a Projects v2 Status field
     (GraphQL) or `zd:*` labels.
     *Look for:* project, field and option IDs resolved once and cached in SQLite.
@@ -548,13 +548,13 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage H: discovery, state, config (no Temporal here)
 
-25. **[discovery.py L80–L134: metadata extraction and traits](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L80-L134)**
+25. **[discovery.py L80–L134: metadata extraction and traits](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L80-L134)**
     *What:* reads only `zarr.json` / `.zarray` / `.zattrs`, never chunk data, so all 1,071 volumes take about 25 s.
     *Look for:* sharded v3 arrays (inner vs outer chunk shape), the OME-NGFF 0.4 vs 0.5 attribute locations, and
     `fingerprint()` (a sha1 of the extracted metadata), which detects changed volumes.
     *Depends on:* stdlib `json`, `hashlib`, `numpy` (dtype names only).
 
-26. **[discovery.py L212–L265: the discover loop](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L212-L265)**
+26. **[discovery.py L212–L265: the discover loop](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/discovery.py#L212-L265)**
     *What:* creates one issue per new volume, resumable across runs.
     *Look for:*
     - A GitHub reconcile pass first, so dedupe works even with SQLite deleted.
@@ -564,8 +564,8 @@ Read in this order. Each step builds on the previous one.
     Discovery is a plain CLI rather than a workflow. It's bounded batch work with its own resumable state.
     *Depends on:* injected `gh`, `state`, `set_stage` and `signal` callables (that injection is what makes it testable).
 
-27. **[state.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/state.py)** and
-    **[config.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/config.py)**
+27. **[state.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/state.py)** and
+    **[config.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/config.py)**
     *What:* the only state the service owns (volumes ↔ issues, a key/value table), and YAML config with env overrides
     plus a tiny `.env` loader.
     *Look for:* how little state there is. Temporal holds all per-run state. Config never enters the workflow;
@@ -574,32 +574,32 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage I: tests (the best way to see the workflow move)
 
-28. **[tests/test_workflows.py L20–L98: test harness](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_workflows.py#L20-L98)**
+28. **[tests/test_workflows.py L20–L98: test harness](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_workflows.py#L20-L98)**
     *What:* the time-skipping test server (§2.11), fake activities registered **under the real names**, and two
     real `Worker`s on per-test task queues.
     *Look for:* `Mocks.await_act` can block (`self.block`) while heartbeating, which is how tests hold a run in
     RUNNING to send it signals. `wait_for` polls the `status` query.
     *Depends on:* `temporalio.testing.WorkflowEnvironment`, `temporalio.worker.Worker`, `temporalio.activity`.
 
-29. **[tests/test_workflows.py L100–L186: the scenarios](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_workflows.py#L100-L186)**
+29. **[tests/test_workflows.py L100–L186: the scenarios](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_workflows.py#L100-L186)**
     *What:* the spec §13 list: success, job failure, restart without resubmitting, duplicate signal, cancel, and
     workflow cancellation.
     *Look for:* `test_restart_between_submit_and_await_does_not_resubmit`. The fake `await_job` fails its first
     attempt and the test asserts `submit` ran once. Temporal's retry is the restart.
     *Depends on:* the harness above, `workflows.IssueWorkflow`.
 
-30. **[tests/test_replay.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_replay.py)** and
-    **[scripts/replay_history.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)**
+30. **[tests/test_replay.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_replay.py)** and
+    **[scripts/replay_history.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/replay_history.py)**
     *What:* determinism checks (§2.10). The test records a history, changes a log line (not a command), and replays.
     The script replays a history you export from the live server.
     *Look for:* `Replayer(...).replay_workflow(history)`. The unsandboxed runner in the test lets the monkeypatched
     module constant reach the workflow.
     *Depends on:* `temporalio.worker.Replayer`, `temporalio.client.WorkflowHistory`.
 
-31. **[tests/test_activities.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_activities.py)**,
-    **[tests/test_github_api.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_github_api.py)**,
-    **[tests/test_cluster_local.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_cluster_local.py)**,
-    **[tests/conftest.py](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/conftest.py)**
+31. **[tests/test_activities.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_activities.py)**,
+    **[tests/test_github_api.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_github_api.py)**,
+    **[tests/test_cluster_local.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/test_cluster_local.py)**,
+    **[tests/conftest.py](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/tests/conftest.py)**
     *What:* activities are plain async methods, so they're tested *without* Temporal, against fakes, `respx` (mocked
     HTTP) and the `local` cluster executor. `conftest.py` builds tiny zarr v2/v3 volumes.
     *Look for:* the split. Workflow tests mock activities; activity tests skip Temporal entirely.
@@ -607,7 +607,7 @@ Read in this order. Each step builds on the previous one.
 
 ### Stage J: operations
 
-32. **[scripts/run-all.sh](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/run-all.sh)**
+32. **[scripts/run-all.sh](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/scripts/run-all.sh)**
     *What:* starts the Temporal dev server and the worker under tmux, then applies the Schedule.
     *Look for:* `temporal server start-dev --db-filename ...`. The dev server is a full single-binary Temporal with
     SQLite persistence and the Web UI on :8233. Production would point `TEMPORAL_ADDRESS` at a real cluster with no
@@ -631,7 +631,7 @@ T=~/.local/state/zarr-doctor/bin/temporal
 $T workflow show -w zarr-doctor/issue-9
 ```
 
-You'll see about 39 events. Map them onto [`_run_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L125):
+You'll see about 39 events. Map them onto [`_run_once`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L95-L125):
 
 - 1–5: started, with signal 2 (`discovered`), then the first workflow task, which ends in `wait_condition`.
 - 6: the `run` signal from the poller at 16:50. 7–9: a workflow task. 10–12: `ack_run`.
@@ -703,7 +703,7 @@ pixi run python scripts/replay_history.py /tmp/h9.json         # ok: current cod
 ```
 
 Now add a timer before the ack in
-[`_run_once`](https://github.com/krokicki/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L101-L102):
+[`_run_once`](https://github.com/JaneliaSciComp/mia-workflow-prototype/blob/74aed15da79d8663e52152c9cd98bd1914b88673/zarr_doctor/workflows.py#L101-L102):
 
 ```python
         try:
