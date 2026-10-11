@@ -1,22 +1,17 @@
 [project]
-name = "zarr-doctor"
+name = "mia-workflow-prototype"
 version = "0.1.0"
-description = "Zarr Doctor PoC: GitHub issue per zarr volume, LSF histogram jobs, Temporal orchestration"
+description = "MIA agentic workflows prototype: autodev (GitHub issue -> Claude Code PR), Temporal orchestration, LSF via csub"
 requires-python = ">=3.11"
 dependencies = [
     "temporalio>=1.7",
     "httpx>=0.27",
     "pydantic>=2",
     "pyyaml",
-    "py-cluster-api>=0.8",
-    "zarr>=3",
-    "numpy",
-    "matplotlib",
     "cryptography",
 ]
 
 [project.scripts]
-zarr-doctor = "zarr_doctor.cli:main"
 autodev = "autodev.cli:main"
 
 [build-system]
@@ -24,14 +19,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["zarr_doctor", "autodev"]
+packages = ["autodev"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-markers = ["integration: needs the real cluster or GitHub (deselected by default)"]
-addopts = "-m 'not integration'"
 pythonpath = ["tests"]
 
 [tool.pixi.workspace]
@@ -40,18 +33,14 @@ platforms = ["linux-64"]
 
 [tool.pixi.dependencies]
 python = "3.12.*"
-numpy = "*"
-matplotlib-base = "*"
-zarr = ">=3"
 pyyaml = "*"
 pydantic = ">=2"
 httpx = "*"
 cryptography = "*"
 
 [tool.pixi.pypi-dependencies]
-zarr-doctor = { path = ".", editable = true }
+mia-workflow-prototype = { path = ".", editable = true }
 temporalio = ">=1.7"
-py-cluster-api = ">=0.8"
 csub = { git = "https://github.com/krokicki/csub", branch = "deploy-all" }
 
 [tool.pixi.feature.test.dependencies]
@@ -64,5 +53,4 @@ default = { features = ["test"], solve-group = "default" }
 
 [tool.pixi.tasks]
 test = "pytest tests/"
-zd = "zarr-doctor"
 ad = "autodev"

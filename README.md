@@ -1,12 +1,10 @@
 # MIA agentic workflows (prototype)
 
-A prototype for running agentic workflows for MIA on the Janelia cluster. It has two components, built on the
-same stack (Temporal for orchestration, LSF for compute, GitHub issues as the user interface):
-
-| component | what it does | setup |
-|---|---|---|
-| [**autodev**](#autodev) | turns a labelled GitHub issue into a PR written by Claude Code, revises it on request, merges it after human approval | [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md), bot identity: [`docs/github-app.md`](docs/github-app.md) |
-| [**zarr-doctor**](#zarr-doctor) | one GitHub issue per zarr volume; moving it to **Run** submits an LSF job that histograms the volume and posts the result | [`docs/zarr-doctor.md`](docs/zarr-doctor.md) |
+A prototype for running agentic workflows for MIA on the Janelia cluster, built on Temporal for orchestration, LSF
+for compute, and GitHub issues as the user interface. The workflow so far is **autodev**: it turns a labelled GitHub
+issue into a PR written by Claude Code, revises it on request, and merges it after human approval. Setup:
+[`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
+[`docs/github-app.md`](docs/github-app.md).
 
 ## autodev
 
@@ -20,14 +18,6 @@ Humans stay in control. Only people with write access can trigger, approve or st
 `.github/` are refused, and branch protection on `main` is the real merge gate. Details, trust boundaries and
 known gaps: [`notes/autodev-runbook.md`](notes/autodev-runbook.md). Design rationale:
 [`notes/agentic-dev-infrastructure.md`](notes/agentic-dev-infrastructure.md).
-
-## zarr-doctor
-
-zarr-doctor is the simpler first workflow, and it doesn't use an LLM. It keeps one GitHub issue per zarr volume in
-the LMD store. Moving an issue to **Run** submits an LSF job that histograms the volume, and the PNG and stats are
-posted back to the issue. There is one durable workflow per issue. It served as the proving ground for the GitHub
-client, labels/Projects logic and LSF job handling that autodev reuses. Setup, commands and findings:
-[`docs/zarr-doctor.md`](docs/zarr-doctor.md). Spec: [`notes/zarr-doctor-spec.md`](notes/zarr-doctor-spec.md).
 
 ## Why durable workflows
 
@@ -67,8 +57,8 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 
 | path | |
 |---|---|
-| `autodev/`, `zarr_doctor/` | the two packages (workflows, activities, CLI) |
+| `autodev/` | the package (workflows, activities, CLI) |
 | `docs/` | setup guides |
 | `notes/` | design notes, runbook, specs |
-| `scripts/` | `autodev-up.sh`, `run-all.sh`, replay tooling |
+| `scripts/` | `autodev-up.sh` |
 | `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed |
