@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -85,3 +86,11 @@ async def bot_login(cfg) -> str:
         r = await c.get("/app", headers={"Authorization": f"Bearer {jwt}"})
         r.raise_for_status()
         return f"{r.json()['slug']}[bot]"
+
+
+async def noreply_email(cfg, login: str) -> str:
+    """The address that links a commit to `login` on GitHub (for an app, the id of its [bot] user, not the app id)."""
+    async with httpx.AsyncClient(base_url=cfg.github.api_url, timeout=30, headers=_HEADERS) as c:
+        r = await c.get(f"/users/{quote(login)}")
+        r.raise_for_status()
+        return f"{r.json()['id']}+{login}@users.noreply.github.com"

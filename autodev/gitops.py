@@ -43,8 +43,9 @@ def git(*args: str, cwd: Path | None = None, token: str | None = None) -> str:
 
 
 class Mirror:
-    def __init__(self, path: Path, url: str, tokens: Callable[[], str | None] = lambda: None):
-        self.path, self.url, self.tokens = Path(path), url, tokens
+    def __init__(self, path: Path, url: str, tokens: Callable[[], str | None] = lambda: None,
+                 author: tuple[str, str] = ("autodev", "autodev@localhost")):
+        self.path, self.url, self.tokens, self.author = Path(path), url, tokens, author  # author: (name, email)
 
     def sync(self) -> None:
         if not (self.path / "HEAD").exists():
@@ -61,8 +62,8 @@ class Mirror:
         git("clone", "-q", "--no-hardlinks", "--branch", start, str(self.path), str(repo))
         git("checkout", "-q", "-B", branch, cwd=repo)
         git("remote", "set-url", "origin", agent_url, cwd=repo)
-        git("config", "user.name", "autodev", cwd=repo)
-        git("config", "user.email", "autodev@localhost", cwd=repo)
+        git("config", "user.name", self.author[0], cwd=repo)
+        git("config", "user.email", self.author[1], cwd=repo)
         return git("rev-parse", "HEAD", cwd=repo)
 
     def publish(self, bundle: Path, base_sha: str, branch: str, ref: str, protected: list[str],

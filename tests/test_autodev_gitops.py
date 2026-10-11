@@ -37,6 +37,15 @@ def test_round_trip_pushes_agent_commits(setup):
     assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=origin) == head
 
 
+def test_workspace_commits_as_the_configured_author(tmp_path):
+    author = ("bot[bot]", "1+bot[bot]@users.noreply.github.com")
+    m = Mirror(tmp_path / "mirror.git", str(make_origin(tmp_path)), author=author)
+    m.sync()
+    m.workspace(tmp_path / "ws", "main", "autodev/issue-7", URL)
+    repo = tmp_path / "ws" / "repo"
+    assert (run_git("config", "user.name", cwd=repo), run_git("config", "user.email", cwd=repo)) == author
+
+
 def test_no_bundle_means_no_commits(setup):
     origin, m, ws, base = setup
     assert m.publish(ws / "result.bundle", base, "autodev/issue-7", "refs/autodev/7/k-r1", [], force=True) is None
