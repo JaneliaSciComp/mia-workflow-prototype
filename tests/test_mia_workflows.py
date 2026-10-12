@@ -2,15 +2,19 @@
 
 import asyncio
 import contextlib
+import json
+import os
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from mia_data import workflows
 from mia_data.activities import Activities
@@ -464,3 +468,28 @@ async def test_poll_sets_status_for_non_snippet_pr(tmp_path):
     await a.poll()
     assert snip.set == [(h[0], "mia-data/crops", "success", "no snippet in this PR")]
     assert fc.signals == [("mia-data/o/data/issue-1", "pr_update", PrUpdate(8, h[3], "open", None, 100, False))]
+
+
+HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
+
+
+def _scrub(obj):
+    """Drop worker/client identities (pid@hostname) from a recorded history."""
+    if isinstance(obj, dict):
+        return {k: "test" if k == "identity" else _scrub(v) for k, v in obj.items()}
+    return [_scrub(v) for v in obj] if isinstance(obj, list) else obj
+
+
+async def test_replay_dataset_history(env):
+    """A recorded match/test/review/approve/crop run must replay on today's MiaDataDataset. This fails when a change
+    to workflow code alters the commands it issues, which breaks in-flight runs; guard an intended change with
+    workflow.patched() and re-record: MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            HISTORY.parent.mkdir(exist_ok=True)
+            HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-recorded", HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
