@@ -6,17 +6,13 @@ import logging
 import re
 
 from . import catalog
+from .status import _c
 
 log = logging.getLogger(__name__)
 MARKER = "<!-- mia-data:record={} -->"
 MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
-
-
-def _c(x) -> str:
-    """Record text is data: no forged markers, no table/line breaks."""
-    return " ".join(str(x).split()).replace("<!--", "&lt;!--").replace("|", "\\|")
 
 
 def render_issue(rec: dict, entry: dict, licences: list[str], repo: str = "", path: str = "", id_: str | None = None) -> tuple[str, str, list[str]]:
