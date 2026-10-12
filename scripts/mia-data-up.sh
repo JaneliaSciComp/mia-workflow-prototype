@@ -66,9 +66,10 @@ tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh'
 
 cat <<MSG
 mia-data '$DEPLOY' running in tmux (windows: broker, worker; Temporal is shared, namespace $NS).
-  attach:      tmux attach -t $DEPLOY
-  logs:        tmux attach -t $DEPLOY   (broker log: $HOST/logs/broker.log)
+  status:      pixi run md ps
+  logs:        pixi run md logs [worker|broker] -f
+  attach:      pixi run md attach
   Temporal UI: http://localhost:8233 (ssh -L 8233:localhost:8233 $(hostname -f))
-  stop:        tmux kill-session -t $DEPLOY
+  stop:        pixi run md down
   trigger:     add the label 'data:go' to a dataset issue
 MSG

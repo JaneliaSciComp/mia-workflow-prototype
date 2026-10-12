@@ -108,12 +108,14 @@ names what is missing); P4 see the plan.
 2. `pixi run md check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness && pixi
    install` was done in `harness.dir`). Run on the host, `md check` and `md test-pr` need the mia-data broker:
    `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run md check`.
-3. `scripts/autodev-up.sh` first (it owns the one shared Temporal dev server), then `scripts/mia-data-up.sh`:
-   it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and applies the poll schedule.
-   Re-running it while the tmux session exists only re-applies the schedule, so a run that failed partway is
-   repaired by running it again. It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Uses `temporal` from PATH
-   (or `$TEMPORAL`); otherwise it downloads one into `<state_dir>-host/bin`. The shared Temporal server lives
-   in whichever tmux session started it, so `ad down` on that deployment stops it for mia-data too.
+3. `pixi run ad up` first (it owns the one shared Temporal dev server), then `pixi run md up` (runs
+   `scripts/mia-data-up.sh`): it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and
+   applies the poll schedule. Re-running it while the tmux session exists only re-applies the schedule, so a run
+   that failed partway is repaired by running it again. It refuses to run when no Temporal is healthy. Uses
+   `temporal` from PATH (or `$TEMPORAL`); otherwise it downloads one into `<state_dir>-host/bin`. The shared
+   Temporal server lives in whichever tmux session started it, so `ad down` on that deployment stops it for
+   mia-data too. Manage it like autodev: `md ps`, `md logs [worker|broker]` (`-n N`, `-f`), `md attach`,
+   `md down`, `md restart` (needed after a config change; wait for running rounds to finish first).
 4. `pixi run md init-labels` creates the `data:*` labels; `pixi run md seed` seeds dataset issues from the catalog.
 5. `pixi run md test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.

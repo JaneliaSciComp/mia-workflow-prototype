@@ -19,10 +19,10 @@ from pathlib import Path
 import yaml
 
 from autodev.auth import bot_login, token_fn
-from autodev.cli import _client, _setup_logging
+from autodev.cli import OPS, _client, _setup_logging
 from autodev.github import GitHub
 
-from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
+from .config import EXTRA_LABELS, HUMAN_LABELS, PROJECT_DIR, STAGES, load_config
 
 log = logging.getLogger("mia_data")
 
@@ -320,8 +320,21 @@ def main(argv=None) -> int:
     t.add_argument("--record", required=True, help="catalog record id")
     sub.add_parser("worker", help="run the Temporal workers (main and await queues)")
     sub.add_parser("schedule", help="manage the poll Schedule").add_argument("action", choices=["apply"])
+    sub.add_parser("up", help="start this deployment (tmux: broker, worker; Temporal must already run)")
+    sub.add_parser("down", help="stop this deployment's tmux session")
+    sub.add_parser("restart", help="down, then up")
+    sub.add_parser("ps", help="show whether this deployment is running")
+    sub.add_parser("attach", help="attach to the deployment's tmux session")
+    s = sub.add_parser("logs", help="tail a log (default: worker)")
+    s.add_argument("name", nargs="?", default="worker", choices=["worker", "broker"])
+    s.add_argument("-n", "--lines", type=int, default=50)
+    s.add_argument("-f", "--follow", action="store_true", help="keep following the log")
     args = p.parse_args(argv)
     cfg = load_config(args.config)
+    if args.cmd in OPS:
+        args.config_path = Path(args.config or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml").resolve()
+        args.up_script, args.config_env = PROJECT_DIR / "scripts" / "mia-data-up.sh", "MIA_DATA_CONFIG"
+        return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     cmd = {"check": cmd_check, "crops-by-snippet": cmd_crops_by_snippet, "reindex": cmd_reindex, "seed": cmd_seed, "init-labels": cmd_init_labels, "worker": cmd_worker, "test-pr": cmd_test_pr, "schedule": cmd_schedule}
     return asyncio.run(cmd[args.cmd](cfg, args))

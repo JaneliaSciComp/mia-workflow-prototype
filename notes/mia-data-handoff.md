@@ -51,9 +51,10 @@ on your behalf are listed at the end: read them, they are the decisions you did 
 4. **Config.** `cp mia_data.yaml.example mia_data.yaml`, fill it in, then run
    `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run md check` until every row is `ok`
    (the broker must be running for the csub row: start it with step 5 first if needed).
-5. **Bring up.** `pixi run ad up` (Temporal dev server + autodev), then `scripts/mia-data-up.sh` (broker,
-   sandboxed worker, schedule). If it exits with an error after the tmux windows are up, run it again: it then
-   only applies the poll schedule, and without that schedule labels are never read. `pixi run md init-labels`; `pixi run md seed --dry-run`; `pixi run md seed`.
+5. **Bring up.** `pixi run ad up` (Temporal dev server + autodev), then `pixi run md up` (broker, sandboxed
+   worker, schedule). If it exits with an error after the tmux windows are up, run it again: it then only
+   applies the poll schedule, and without that schedule labels are never read. Then `md ps`, `md logs -f`,
+   `md down`, `md restart` as for autodev. `pixi run md init-labels`; `pixi run md seed --dry-run`; `pixi run md seed`.
 6. **First real check (optional).** Both snippets are already on `main`, so there is no snippet PR to test.
    To exercise `test-pr` anyway, open a throwaway PR that touches anything under `snippets/tiff-zip-member/`,
    then `pixi run md test-pr <pr> --binding snippets/tiff-zip-member/examples/bbbc034-hipsc-nuclei-3d.yaml --record bbbc034-hipsc-nuclei-3d`.
