@@ -20,7 +20,8 @@ class PrUpdate:
     state: str
     merge_sha: str | None
     snippet_issue: int
-    needs_human: bool
+    needs_human: bool  # the snippets issue has `snippets:needs-human`
+    url: str | None = None  # the PR's html_url
 
 
 @dataclass
@@ -127,6 +128,7 @@ class RoundLimits:
     test_n: int
     per_round: int
     walltime_min: int
+    max_pr_revisions: int = 5  # PR heads tested per round (develop path)
 
 
 @dataclass

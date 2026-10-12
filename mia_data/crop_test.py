@@ -1,8 +1,24 @@
-"""§7.4 test crops without Temporal: the activity methods in MiaDataDataset._crop's order (used by `test-pr`)."""
+"""§7.4 test crops: `judge` (pure, shared with MiaDataDataset) and `run_crop_test`, the activity methods in
+MiaDataDataset._crop's order without Temporal (used by `test-pr`). The orchestration is twice because the workflow
+can't await activity methods directly and `test-pr` has no worker; what a result means lives once, in `judge`."""
 
 from __future__ import annotations
 
 from .models import GalleryResult, JobArgs, JobDone, Pins, VerifyResult, job_key
+
+
+def _ok(d: JobDone) -> bool:
+    return d.state == "DONE" and d.exit_code in (0, None)
+
+
+def _failed(kind: str, d: JobDone) -> str:
+    return f"{kind} job {d.job_id} ended {d.state} (exit {d.exit_code})"
+
+
+def judge(v: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
+    """(passed, failed jobs): both jobs succeeded and every test crop verified."""
+    bad = [_failed(k, j) for k, j in zip(("crop", "verify"), jobs) if not _ok(j)]
+    return not bad and v.ok_count > 0 and not v.errors, bad
 
 
 async def run_crop_test(acts, *, issue: int, round_id: str, pins: Pins, sha: str, binding_path: str, seed: str,

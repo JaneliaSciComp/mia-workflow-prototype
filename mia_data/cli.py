@@ -145,11 +145,10 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
     from . import catalog
     from .activities import _catalog, _write
     from .binding import check_binding, https
-    from .crop_test import run_crop_test
+    from .crop_test import judge, run_crop_test
     from .jobspec import SHA_RE, harness_pin
     from .models import Pins
     from .seed import ID_RE
-    from .workflows import _failed, _ok
 
     if not ID_RE.fullmatch(record_id):
         raise ValueError(f"bad record id {record_id!r}")
@@ -183,8 +182,7 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
         _write(rd / "pins.json", json.dumps(dataclasses.asdict(pins)))
         v, g, jobs = await run_crop_test(acts, issue=0, round_id=rid, pins=pins, sha=head, trusted=False,
                                          binding_path=str(rd / "binding.yaml"), seed=f"test-pr-{pr}-{head}")
-        bad = [_failed(k, j) for k, j in zip(("crop", "verify"), jobs) if not _ok(j)]
-        passed = not bad and v.ok_count > 0 and not v.errors
+        passed, bad = judge(v, jobs)
         summary = f"{v.ok_count} of {v.n} crops verified"
         body = "\n".join([f"Crop test of `{head}` with `{record_id}`: **{'passed' if passed else 'failed'}**, {summary}; "
                           f"the crop job fetched {v.bytes_fetched} bytes.{note}", *(f"- {x}" for x in bad + v.errors),

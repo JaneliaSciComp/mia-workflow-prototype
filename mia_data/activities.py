@@ -44,6 +44,7 @@ ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
 SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->")  # open_snippet_issue's marker
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 CROP_STATUS = {"pending": "test crops running", "success": "test crops passed", "failure": "test crops failed",
                "error": "test crops could not run"}
 PERMANENT = (HostsNotAllowed, PinMoved, Conflict, ValueError, FileNotFoundError)  # inputs that a retry can't fix
@@ -124,13 +125,15 @@ class Activities:
         self.cfg, self.gh_data, self.gh_snippets, self.gh_catalog = cfg, gh_data, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))  # csub probe: the policy's patterns
+        # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
+        self._sent: dict[int, tuple] = {}  # poll: PR number -> the (head, state, merge, needs_human) last signalled
 
     def all(self) -> list:
         """The main queue's activities; await_job runs on the -await queue."""
         return [self.admit, self.limits, self.poll, self.set_stage, self.comment, self.prepare_match, self.prepare_job, self.probe_hosts,
                 self.submit, self.read_match, self.read_smoke, self.read_verify, self.publish_gallery,
                 self.publish_crops, self.refuse_label, self.open_snippet_issue, self.pr_state, self.set_crop_status,
-                self.tree_sha]
+                self.tree_sha, self.adopt_pr_binding]
 
     # --- helpers -----------------------------------------------------------------------------
 
@@ -142,9 +145,9 @@ class Activities:
         return next((c for c in await gh.issue_comments(n)
                      if (c.get("user") or {}).get("login") == self.bot and marker in (c.get("body") or "")), None)
 
-    async def _comment_once(self, gh, n: int, body: str, marker: str) -> None:
-        if not await self._bot_comment(gh, n, marker):
-            await gh.comment(n, body)
+    async def _comment_once(self, gh, n: int, body: str, marker: str) -> str | None:
+        """The comment's URL (the earlier one, on a retry)."""
+        return (await self._bot_comment(gh, n, marker) or await gh.comment(n, body)).get("html_url")
 
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""
@@ -227,7 +230,8 @@ class Activities:
     @activity.defn(name="limits")
     async def limits(self) -> RoundLimits:
         c = self.cfg
-        return RoundLimits(c.crops.test_per_round, c.crops.per_round, c.limits.job_walltime_min)
+        return RoundLimits(c.crops.test_per_round, c.crops.per_round, c.limits.job_walltime_min,
+                           c.limits.max_pr_revisions)
 
     @activity.defn(name="set_stage")
     @mia_permanent_errors
@@ -256,11 +260,11 @@ class Activities:
 
     @activity.defn(name="comment")
     @mia_permanent_errors
-    async def comment(self, issue: int, body: str, marker: str, repo: str = "data") -> None:
-        """Once per marker, on a data issue or (repo="snippets") a snippets issue or PR."""
+    async def comment(self, issue: int, body: str, marker: str, repo: str = "data") -> str | None:
+        """Once per marker, on a data issue or (repo="snippets") a snippets issue or PR. Returns its URL."""
         m = self.cfg.marker(marker)
-        await self._comment_once(self.gh_snippets if repo == "snippets" else self.gh_data, issue,
-                                 f"{self._clean(body)}\n\n{m}", m)
+        return await self._comment_once(self.gh_snippets if repo == "snippets" else self.gh_data, issue,
+                                        f"{self._clean(body)}\n\n{m}", m)
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -379,22 +383,32 @@ class Activities:
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
         if kind not in ("matched", "ineligible"):
             return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
-        text = read_untrusted(p, "binding.yaml", 1 << 20)
+        b, errs = await self._check(read_untrusted(p, "binding.yaml", 1 << 20), p.parent.name, pins,
+                                    pins.snippets_commit)
+        if errs:
+            return MatchResult("blocked", _text("binding check failed: " + "; ".join(errs)))
+        path, h = self._store(rd / f"binding-{m.group(1)}.yaml", b)
+        return MatchResult(kind, binding_path=path, binding_hash=h,
+                           shapes=_small(o.get("shapes")) if kind == "ineligible" else None,
+                           reasons=_texts(b.get("reasons")))
+
+    async def _check(self, text: str | None, round_id: str, pins: Pins, sha: str) -> tuple[dict | None, list[str]]:
+        """An agent-written binding, parsed and checked against the round's record and the snippets at `sha`."""
+        if text is None:
+            return None, ["the binding is missing or unreadable"]
         try:
-            b = yaml.safe_load(text) if text is not None else None
-            errs = check_binding(b, self._record(p.parent.name), set(_catalog(await self._snapshot(pins.snippets_commit))),
-                                 pins=pins) if text is not None else ["binding.yaml is missing or unreadable"]
+            b = yaml.safe_load(text)
+            errs = check_binding(b, self._record(round_id), set(_catalog(await self._snapshot(sha))), pins=pins)
             if not errs:
                 hosts([u for a in b["raw"] + (b.get("labels") or []) for u in a["urls"]], self.cfg)
         except (yaml.YAMLError, ValueError, RecursionError) as e:  # a malformed URL raises in urlsplit
             errs = [f"{type(e).__name__}: {e}"]
-        if errs:
-            return MatchResult("blocked", _text("binding check failed: " + "; ".join(errs)))
-        data = yaml.safe_dump(b, sort_keys=False).encode()
-        _write(path := rd / f"binding-{m.group(1)}.yaml", data)
-        return MatchResult(kind, binding_path=str(path), binding_hash=hashlib.sha256(data).hexdigest(),
-                           shapes=_small(o.get("shapes")) if kind == "ineligible" else None,
-                           reasons=_texts(b.get("reasons")))
+        return b if not errs else None, errs
+
+    @staticmethod
+    def _store(path: Path, b: dict) -> tuple[str, str]:
+        _write(path, data := yaml.safe_dump(b, sort_keys=False).encode())
+        return str(path), hashlib.sha256(data).hexdigest()
 
     @activity.defn(name="read_smoke")
     @mia_permanent_errors
@@ -519,7 +533,8 @@ class Activities:
         k, merged = int(m.group(1)), bool(p.get("merged"))
         labels = {lb["name"] for lb in (await self.gh_snippets.get_issue(k)).get("labels", [])}
         return PrUpdate(pr, p["head"]["sha"], "merged" if merged else p["state"],
-                        p.get("merge_commit_sha") if merged else None, k, "snippets:needs-human" in labels)
+                        p.get("merge_commit_sha") if merged else None, k, "snippets:needs-human" in labels,
+                        p.get("html_url"))
 
     @activity.defn(name="set_crop_status")
     @mia_permanent_errors
@@ -532,9 +547,36 @@ class Activities:
     @mia_permanent_errors
     async def tree_sha(self, sha: str, name: str) -> str | None:
         """Tree SHA of snippets/<name> at `sha` (§7.3 step 5); None if absent."""
-        if not SHA_RE.fullmatch(sha) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        if not SHA_RE.fullmatch(sha) or not NAME_RE.fullmatch(name):
             raise ValueError(f"bad tree lookup {sha!r}/{name!r}")
         return await self.gh_snippets.dir_sha(f"snippets/{name}", sha)
+
+    @activity.defn(name="adopt_pr_binding")
+    @mia_permanent_errors
+    async def adopt_pr_binding(self, round_id: str, pr: int, sha: str) -> dict:
+        """The PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge commit),
+        where <name> is the one snippet directory the PR adds. Checked like the match agent's (§7.4: this record,
+        its hosts, the schema) and using <name>, then stored with `snippets_commit: <sha>` as
+        state_dir/rounds/<round>/binding-pr-<sha7>.yaml. Returns {"path", "hash", "name", "errors": []}, or
+        {"errors"}: a bad example fails that head's test."""
+        if not SHA_RE.fullmatch(sha):
+            raise ValueError(f"bad sha {sha!r}")
+        gs, rd, pins = self.gh_snippets, self._round_dir(round_id), self._pins(round_id)
+        names = sorted({f.split("/")[1] for f in await gs.pr_files(pr) if f.startswith("snippets/") and "/" in f[9:]})
+        if len(names) != 1 or not NAME_RE.fullmatch(name := names[0]):
+            return {"errors": [_text(f"the PR must add exactly one snippets/<name>/ directory, not {names}", 500)]}
+        if not await gs.dir_sha(f"snippets/{name}", sha):
+            return {"errors": [f"snippets/{name} is not in {sha}"]}
+        rel = f"snippets/{name}/examples/{pins.record}.yaml"
+        raw = await gs.get_file(rel, sha)
+        text = raw.decode(errors="replace") if raw is not None and len(raw) <= 1 << 20 else None
+        b, errs = await self._check(text, round_id, pins, sha)
+        if b and name not in {a["snippet"] for a in b["raw"] + (b.get("labels") or [])}:
+            errs = [f"{rel} does not use snippet {name!r}"]
+        if errs:
+            return {"errors": [f"{rel}: {x}" for x in _texts(errs)]}
+        path, h = self._store(rd / f"binding-pr-{sha[:7]}.yaml", {**b, "snippets_commit": sha})
+        return {"path": path, "hash": h, "name": name, "errors": []}
 
     # --- the poller --------------------------------------------------------------------------
 
@@ -593,9 +635,12 @@ class Activities:
                 merged = bool(p.get("merged_at"))
                 u = PrUpdate(p["number"], head["sha"], "merged" if merged else p["state"],
                              p.get("merge_commit_sha") if merged else None, k["number"],
-                             "snippets:needs-human" in {lb["name"] for lb in k.get("labels", [])})
+                             "snippets:needs-human" in {lb["name"] for lb in k.get("labels", [])}, p.get("html_url"))
+                if self._sent.get(u.pr) == (key := (u.head_sha, u.state, u.merge_sha, u.needs_human)):
+                    continue  # signalled already: a wake-up per change, not per poll
                 try:
                     await self.client.get_workflow_handle(cfg.workflow_id(int(mk.group(1)))).signal("pr_update", u)
+                    self._sent[u.pr] = key
                     did.append(f"pr_update PR #{p['number']}")
                 except RPCError as e:
                     if e.status != RPCStatusCode.NOT_FOUND:  # no dataset workflow (any more): nothing to wake

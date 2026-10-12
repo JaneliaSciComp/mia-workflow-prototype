@@ -160,6 +160,55 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     assert body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->") and "<!-- x" not in body
 
 
+def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/examples/rec-1.yaml")):
+    d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "new-snip"  # the PR head's snapshot
+    d.mkdir()
+    (d / "snippet.yaml").write_text("name: new-snip\n")
+    t.snip.files[("snippets/new-snip/examples/rec-1.yaml", SNIP_SHA)] = yaml.safe_dump(b).encode()
+
+    async def pr_files(n):
+        return list(files)
+
+    async def dir_sha(path, ref):
+        return "tree1" if (path, ref) == ("snippets/new-snip", SNIP_SHA) else None
+    t.snip.pr_files, t.snip.dir_sha = pr_files, dir_sha
+
+
+NEW = {**BINDING, "snippets_commit": "f" * 40, "raw": [{**BINDING["raw"][0], "snippet": "new-snip"}]}
+
+
+async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, NEW)
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    p = Path(r["path"])
+    assert r["errors"] == [] and r["name"] == "new-snip" and p.name == f"binding-pr-{SNIP_SHA[:7]}.yaml"
+    assert yaml.safe_load(p.read_text()) == {**NEW, "snippets_commit": SNIP_SHA}
+    assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("b, files, why", [
+    ({**NEW, "record": "rec-2"}, None, "rec-2"),
+    ({**NEW, "raw": [{**NEW["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}, None, "evil.example.com"),
+    (BINDING, None, "new-snip"),  # the example doesn't use the PR's snippet
+    (NEW, ["snippets/new-snip/a.py", "snippets/other/b.py"], "exactly one"),
+])
+async def test_adopt_pr_binding_rejects(tmp_path, b, files, why):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, b, *([files] if files else []))
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    assert "path" not in r and why in " ".join(r["errors"])
+    assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+async def test_comment_returns_its_url_once(tmp_path):
+    t = _setup(tmp_path)
+    u = await t.a.comment(5, "crops passed", "test i1-e99 x", repo="snippets")
+    assert u and await t.a.comment(5, "again", "test i1-e99 x", repo="snippets") == u and len(t.snip.comments[5]) == 1
+
+
 def _crop(root, cid, n):
     d = root / "crops" / cid
     d.mkdir(parents=True)

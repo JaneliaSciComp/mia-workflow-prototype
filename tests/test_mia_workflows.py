@@ -44,11 +44,13 @@ def shift(iso, seconds):
 
 class Mocks:
     def __init__(self, outcome="matched", smoke=SmokeResult(True, True), states=None, test_ok=4, prod_ok=16,
-                 n_effective=16, await_failures=0, gate=None):
+                 n_effective=16, await_failures=0, gate=None, gate_on="", test_ok_by=None, pr_now=None, trees=None,
+                 revisions=5):
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke, states or {}
         self.test_ok, self.prod_ok, self.n_effective = test_ok, prod_ok, n_effective
-        self.await_failures, self.gate = await_failures, gate
+        self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
+        self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -61,7 +63,7 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120)
+            return RoundLimits(4, 16, 120, self.revisions)
 
         @activity.defn(name="set_stage")
         async def set_stage(issue: int, stage: str, state: DatasetState | None = None, links: dict | None = None,
@@ -69,8 +71,9 @@ class Mocks:
             rec("set_stage", stage, detail, links)
 
         @activity.defn(name="comment")
-        async def comment(issue: int, body: str, marker: str, repo: str = "data") -> None:
-            rec("comment", body, marker)
+        async def comment(issue: int, body: str, marker: str, repo: str = "data") -> str | None:
+            rec("comment", body, marker, repo)
+            return f"https://github.com/o/{repo}/issues/{issue}#{marker}" if repo == "snippets" else None
 
         @activity.defn(name="refuse_label")
         async def refuse_label(issue: int, label: str, reason: str, event_id: str) -> None:
@@ -106,7 +109,8 @@ class Mocks:
         async def read_verify(ws: str, crop_ws: str | None = None) -> VerifyResult:
             rec("read_verify", ws, crop_ws)
             prod = "production" in ws
-            k, n = (self.prod_ok, 16) if prod else (self.test_ok, 4)
+            test_ok = next((v for s, v in self.test_ok_by.items() if s in ws), self.test_ok)  # by tested SHA
+            k, n = (self.prod_ok, 16) if prod else (test_ok, 4)
             return VerifyResult(k, n, [] if k == n else ["c9: overlaps c1"],
                                 [{"crop_id": f"c{i}", "files": {}} for i in range(k)], self.n_effective if prod else 4,
                                 bytes_fetched=1234)
@@ -122,14 +126,39 @@ class Mocks:
             rec("publish_crops", crop_ws, len(verified), sha)
             return {"published": [c["crop_id"] for c in verified], "already": [], "total": len(verified)}
 
+        @activity.defn(name="open_snippet_issue")
+        async def open_snippet_issue(issue: int, round_id: str, draft: dict) -> int:
+            rec("open_snippet_issue", round_id)
+            return 100
+
+        @activity.defn(name="pr_state")
+        async def pr_state(pr: int) -> PrUpdate:
+            rec("pr_state", pr)
+            return self.pr_now
+
+        @activity.defn(name="set_crop_status")
+        async def set_crop_status(sha: str, state: str, url: str | None, description: str = "") -> None:
+            rec("set_crop_status", sha, state, url)
+
+        @activity.defn(name="tree_sha")
+        async def tree_sha(sha: str, name: str) -> str | None:
+            rec("tree_sha", sha, name)
+            return self.trees.get(sha, "T1")
+
+        @activity.defn(name="adopt_pr_binding")
+        async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
+            rec("adopt_pr_binding", pr, sha)
+            return {"path": f"/s/binding-pr-{sha[:7]}.yaml", "hash": "h" + sha[:7], "name": "new-snip", "errors": []}
+
         return [admit, limits, set_stage, comment, refuse_label, prepare_match, prepare_job, submit, read_match,
-                read_smoke, read_verify, publish_gallery, publish_crops]
+                read_smoke, read_verify, publish_gallery, publish_crops, open_snippet_issue, pr_state, set_crop_status,
+                tree_sha, adopt_pr_binding]
 
     def await_act(self):
         @activity.defn(name="await_job")
         async def await_job(job_id: str, ws: str) -> JobDone:
             self.calls.append(("await", (job_id, ws)))
-            if self.gate:
+            if self.gate and self.gate_on in ws:
                 await self.gate.wait()
             if self.await_failures:
                 self.await_failures -= 1
@@ -377,6 +406,150 @@ async def test_continue_as_new_keeps_handled(env, monkeypatch):
     assert m.of("admit") == [("11",), ("12",)]
 
 
+# --- the development path (§7.3) ------------------------------------------------------------
+
+H1, H2, H3, MC = "1" * 40, "2" * 40, "3" * 40, "e" * 40
+PR_URL = "https://github.com/o/snippets/pull/5"
+
+
+def head(sha, state="open", merge=None, needs_human=False, issue=100):
+    return PrUpdate(5, sha, state, merge, issue, needs_human, PR_URL)
+
+
+def statuses(m):
+    return [(sha, state) for sha, state, _ in m.of("set_crop_status")]
+
+
+async def wake(h, m, now):
+    """The PR is now `now`; the poller's signal is a wake-up only (its fields are deliberately stale)."""
+    m.pr_now = now
+    await h.signal(MiaDataDataset.pr_update, head("0" * 40))
+
+
+async def to_pr_ready(h, m):
+    """needs_snippet → snippets issue → h1 tested → pr-ready."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await idle(h, m, "pr-ready")
+
+
+async def happy(h, m):
+    await to_pr_ready(h, m)
+    await wake(h, m, head(H1, "merged", MC))
+    await idle(h, m, "done")
+
+
+async def test_develop_happy_path(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await happy(h, m)
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "pr-ready", "cropping", "done"]
+    assert statuses(m) == [(H1, "pending"), (H1, "success")]
+    assert m.of("set_crop_status")[1][2] == f"https://github.com/o/snippets/issues/5#test i7-e11 {H1}"  # the PR comment
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no smoke: tested
+    test, prod = [a for a in m.jobs() if a.n]
+    assert (test.sha, test.trusted, test.n, test.batch) == (H1, False, 4, 0)  # PR head: read-only dataset cache
+    assert (prod.sha, prod.trusted, prod.n, prod.batch) == (MC, True, 16, 1)
+    assert m.of("adopt_pr_binding") == [(5, H1), (5, MC)]  # the merge commit's binding is pinned to the merge
+    assert m.of("prepare_job")[-1] == ("verify-production", f"/s/binding-pr-{MC[:7]}.yaml")
+    assert m.of("publish_crops")[0][2] == MC and m.of("publish_gallery")[0] == (H1, 4)
+    assert st.snippet_issue == 100 and st.pr == 5 and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
+    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T")] and st.links["pr"] == PR_URL
+    assert {a[2] for a in m.of("comment")} == {"snippets", "data"}
+
+
+async def test_revise_new_head_retests(env):
+    m = Mocks(outcome="needs_snippet", test_ok_by={H2: 0})
+    async with started(env, m) as h:
+        await to_pr_ready(h, m)
+        await wake(h, m, head(H2))
+        await until(lambda: (H2, "failure") in statuses(m))
+        await idle(h, m, "testing")
+    assert m.stages[-3:] == ["testing", "pr-ready", "testing"]  # h1's success does not make h2 ready
+    assert statuses(m) == [(H1, "pending"), (H1, "success"), (H2, "pending"), (H2, "failure")]
+    assert [a.sha for a in m.jobs() if a.n] == [H1, H2] and "cropping" not in m.stages
+
+
+async def test_stale_result_ignored(env):
+    m = Mocks(outcome="needs_snippet", gate=asyncio.Event(), gate_on=H1, test_ok_by={H2: 0})
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: any(H1 in a[1] for a in m.of("await")))
+        await wake(h, m, head(H2))  # h1 is still testing (and will pass)
+        m.gate.set()
+        await until(lambda: (H2, "failure") in statuses(m))
+        await idle(h, m, "testing")
+        st = await h.query(MiaDataDataset.status)
+    assert "pr-ready" not in m.stages and [(t.sha, t.ok) for t in st.tests] == [(H1, True), (H2, False)]
+    assert statuses(m)[-2:] == [(H2, "pending"), (H2, "failure")]  # h1's late success is h1's, not h2's
+
+
+@pytest.mark.parametrize("merge_ok", [True, False])
+async def test_merge_with_different_tree_retests_merge_commit(env, merge_ok):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T1", MC: "T2"}, test_ok_by={} if merge_ok else {MC: 0})
+    async with started(env, m) as h:
+        await to_pr_ready(h, m)
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done" if merge_ok else "needs-human")
+    tests = [a for a in m.jobs() if a.n and not a.batch]
+    assert [(a.sha, a.trusted) for a in tests] == [(H1, False), (MC, True)]  # the merge commit is reviewed code
+    assert statuses(m) == [(H1, "pending"), (H1, "success")]  # no status on the merge commit
+    assert bool(m.of("publish_crops")) == merge_ok and ("cropping" in m.stages) == merge_ok
+
+
+async def test_head_test_that_cannot_run_posts_error(env):
+    m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await idle(h, m, "needs-human")
+    assert statuses(m) == [(H1, "pending"), (H1, "error")] and "UNKNOWN" in m.of("set_stage")[-1][1]
+
+
+@pytest.mark.parametrize("now, why", [(head(H1, "closed"), "closed"), (head(H1, needs_human=True), "needs-human")])
+async def test_closed_pr_needs_human(env, now, why):
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await h.signal(MiaDataDataset.go, ev("go", "12"))  # busy: a round is developing
+        await until(lambda: m.of("refuse_label"))
+        await wake(h, m, now)
+        await idle(h, m, "needs-human")
+    assert m.of("refuse_label")[0][0] == "data:go" and "busy" in m.of("refuse_label")[0][1]
+    detail = m.of("set_stage")[-1][1]
+    assert why in detail and PR_URL in detail and not [a for a in m.jobs() if a.n]
+
+
+async def test_revision_limit(env):
+    m = Mocks(outcome="needs_snippet", revisions=2, test_ok=0)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        for sha in (H1, H2):
+            await wake(h, m, head(sha))
+            await until(lambda: (sha, "failure") in statuses(m))
+            await idle(h, m, "testing")
+        await wake(h, m, head(H3))
+        await idle(h, m, "needs-human")
+    assert "revision limit" in m.of("set_stage")[-1][1] and [a.sha for a in m.jobs() if a.n] == [H1, H2]
+
+
+async def test_merge_signal_before_test_finishes(env):
+    m = Mocks(outcome="needs_snippet", gate=asyncio.Event(), gate_on=H1, trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: any(H1 in a[1] for a in m.of("await")))
+        await wake(h, m, head(H1, "merged", MC))
+        m.gate.set()
+        await idle(h, m, "done")
+    assert m.stages == ["matching", "developing", "testing", "cropping", "done"]
+    assert statuses(m) == [(H1, "pending"), (H1, "success")]
+    assert [(a.sha, a.trusted) for a in m.jobs() if a.n] == [(H1, False), (MC, True)]  # h1's test carried the merge
+    assert m.names().index("tree_sha") > m.names().index("read_verify")
+
+
 # --- the poll activity -------------------------------------------------------------------------
 
 class PollGH(FakeGH):
@@ -470,7 +643,23 @@ async def test_poll_sets_status_for_non_snippet_pr(tmp_path):
     assert fc.signals == [("mia-data/o/data/issue-1", "pr_update", PrUpdate(8, h[3], "open", None, 100, False))]
 
 
+async def test_poll_signals_a_pr_only_when_it_changes(tmp_path):
+    k = issue(100, body="<!-- mia-data: issue=1 round=i1-e99 -->")
+    snip = PollGH("o/snippets", issues={100: k}, prs=[pr(8, "snippets/issue-100", H1)],
+                  changed={8: ["snippets/x/a.py"]}, status={H1: [{"context": "mia-data/crops", "state": "pending"}]})
+    a, fc = _poll(tmp_path, PollGH("o/data"), snip)
+    await a.poll()
+    await a.poll()  # nothing changed: no signal
+    snip.prs[0]["head"]["sha"] = H2
+    snip.status[H2] = snip.status[H1]
+    await a.poll()
+    k["labels"] = [{"name": "snippets:needs-human"}]
+    await a.poll()
+    assert [(u.head_sha, u.needs_human) for _, _, u in fc.signals] == [(H1, False), (H2, False), (H2, True)]
+
+
 HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
+DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 
 
 def _scrub(obj):
@@ -492,4 +681,15 @@ async def test_replay_dataset_history(env):
             HISTORY.parent.mkdir(exist_ok=True)
             HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-recorded", HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_develop_history(env):
+    """The develop path's recorded run (test_develop_happy_path), as test_replay_dataset_history; same switch."""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+        async with started(env, m) as h:
+            await happy(h, m)
+            DEVELOP_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-develop", DEVELOP_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
