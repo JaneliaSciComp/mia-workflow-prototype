@@ -1,9 +1,10 @@
 # MIA agentic workflows (prototype)
 
 A prototype for running agentic workflows for MIA on the Janelia cluster, built on Temporal for orchestration, LSF
-for compute, and GitHub issues as the user interface. The workflow so far is **autodev**: it turns a labelled GitHub
-issue into a PR written by Claude Code, revises it on request, and merges it after human approval. Setup:
-[`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
+for compute, and GitHub issues as the user interface. Two workflows so far: **autodev** turns a labelled GitHub
+issue into a PR written by Claude Code, revises it on request, and merges it after human approval; **mia-data**
+turns a dataset in the MIA catalog into verified, published image crops, with a human approving every binding.
+Setup: [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
 [`docs/github-app.md`](docs/github-app.md).
 
 ## autodev
@@ -18,6 +19,18 @@ Humans stay in control. Only people with write access can trigger, approve or st
 `.github/` are refused, and branch protection on `main` is the real merge gate. Details, trust boundaries and
 known gaps: [`notes/autodev-runbook.md`](notes/autodev-runbook.md). Design rationale:
 [`notes/agentic-dev-infrastructure.md`](notes/agentic-dev-infrastructure.md).
+
+## mia-data
+
+mia-data is a dataset → binding → test crops → human approval → production crops loop. Each dataset that
+[mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has downloaded gets an issue in
+[mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data). On `data:go`, a Claude agent in a cluster
+sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
+and writes a binding; plain harness jobs check it, cut four test crops and show them in the issue. A human approves
+with `data:approve` (or, for a new snippet, by reviewing its PR, which autodev writes), and a plain job extracts
+the production set, verifies it and publishes it to shared storage and a `galleries` branch. Every stage is a label
+and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
+step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`notes/mia-crops-spec.md`](notes/mia-crops-spec.md).
 
 ## Why durable workflows
 
@@ -57,8 +70,9 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 
 | path | |
 |---|---|
-| `autodev/` | the package (workflows, activities, CLI) |
-| `docs/` | setup guides |
+| `autodev/` | autodev: workflows, activities, CLI; GitHub client and csub job runner shared with mia-data |
+| `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run md`) |
+| `docs/` | setup guides and the [mia-data workflow overview](docs/mia-data-workflow.md) |
 | `notes/` | design notes, runbook, specs |
-| `scripts/` | `autodev-up.sh` |
+| `scripts/` | `autodev-up.sh`, `mia-data-up.sh` |
 | `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed |
