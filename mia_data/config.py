@@ -44,6 +44,7 @@ class GitHubCfg(BaseModel):
     data_repo: str
     snippets_repo: str
     catalog_repo: str
+    snippets_git_url: str | None = None  # clone URL override for the snippet mirror (default: GitHub https)
     auth: Literal["token", "app"] = "token"
     token_env: str = "GITHUB_TOKEN"
     token_file: Path | None = None

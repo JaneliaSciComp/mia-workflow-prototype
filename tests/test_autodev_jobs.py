@@ -40,6 +40,14 @@ async def test_plain_job_spec(tmp_path):
         ("harness", "echo hi", 2, 8000, 30, ["pypi.org"])
 
 
+async def test_rw_mounts_follow_the_workspace(tmp_path):
+    fake = FakeCsub()
+    ws = str(tmp_path / "ws")
+    await _jobs(tmp_path, fake).submit("k1", JobSpec("j", "true", ws, 10, ro_mounts=["/ro"], rw_mounts=["/cache"]))
+    assert fake.submitted[0]["mounts"] == [{"path": ws, "mode": "rw"}, {"path": "/cache", "mode": "rw"},
+                                           {"path": "/ro", "mode": "ro"}]
+
+
 @pytest.mark.parametrize("key", ["../x", "", "a/b", "x" * 121])
 async def test_bad_key_rejected(tmp_path, key):
     with pytest.raises(ValueError):

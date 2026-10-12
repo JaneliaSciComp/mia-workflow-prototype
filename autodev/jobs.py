@@ -25,6 +25,7 @@ class JobSpec:
     mem_mb: int = 4000
     allow_hosts: list[str] = field(default_factory=list)
     ro_mounts: list[str] = field(default_factory=list)   # absolute paths
+    rw_mounts: list[str] = field(default_factory=list)   # absolute paths, besides the workspace
     claude: bool = False
     env: dict[str, str] = field(default_factory=dict)
 
@@ -90,7 +91,8 @@ class CsubJobs:
             req = {"command": spec.command, "shell": True, "cwd": spec.workspace, "name": spec.name,
                    "cpus": spec.cpus, "mem_mb": spec.mem_mb, "walltime_min": spec.walltime_min,
                    "allow_hosts": list(spec.allow_hosts), "claude": spec.claude, "session": self.session,
-                   "mounts": [{"path": spec.workspace, "mode": "rw"}, *({"path": m, "mode": "ro"} for m in spec.ro_mounts)]}
+                   "mounts": [{"path": spec.workspace, "mode": "rw"}, *({"path": m, "mode": "rw"} for m in spec.rw_mounts),
+                              *({"path": m, "mode": "ro"} for m in spec.ro_mounts)]}
             if spec.env:
                 req["env"] = dict(spec.env)
             job_id = (await asyncio.to_thread(self.client.submit, req)).job_id
