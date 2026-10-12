@@ -65,7 +65,11 @@ else
   tmux new-window -t "$DEPLOY" -n broker "'$BROKER' --serve '$RUN/csub.sock' 2>&1 | tee -a '$HOST/logs/broker.log'"
 fi
 "$TEMPORAL" operator namespace describe -n "$NS" --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
-  || "$TEMPORAL" operator namespace create -n "$NS" --address "$TEMPORAL_ADDRESS"
+  || { "$TEMPORAL" operator namespace create -n "$NS" --address "$TEMPORAL_ADDRESS"
+       # registration is async: the frontend's namespace cache refreshes every ~10 s
+       for _ in $(seq 30); do
+         "$TEMPORAL" workflow list -n "$NS" --address "$TEMPORAL_ADDRESS" --limit 1 >/dev/null 2>&1 && break; sleep 1
+       done; }
 
 # cwd = $STATE, which sandbox-run.sh binds read-write; the repo (code + pixi env) is read-only.
 tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh' --ro '$REPO' --ro '$CFG' \

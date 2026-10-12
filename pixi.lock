@@ -69,7 +69,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - pypi: .
-      - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#c369526bbee5e8f8d645ba877e587a49246210c1
+      - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
       - pypi: https://files.pythonhosted.org/packages/11/52/6327a5f4fda01207205038a106a99848a41c83e933cd23ea2cab3d2ebc6c/nexus_rpc-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/20/b032d4a0df51d466fd929d8205e1288e83d97a890f021479f43af9bd6f9b/temporalio-1.34.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -931,7 +931,7 @@ packages:
   - pyyaml
   - cryptography
   requires_python: '>=3.11'
-- pypi: git+https://github.com/krokicki/csub?branch=deploy-all#c369526bbee5e8f8d645ba877e587a49246210c1
+- pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
   name: csub
   version: 0.1.0
   requires_dist:
