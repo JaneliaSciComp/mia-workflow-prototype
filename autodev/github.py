@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import logging
 import time
@@ -32,6 +33,8 @@ class GitHub:
         self._creates_per_hour = creates_per_hour
         self._last_write = 0.0
         self._creates: collections.deque[float] = collections.deque()
+        # Contents API PUTs to one branch race (409 "is at X but expected Y"); serialize them in-process.
+        self._commit_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(base_url=api_url, timeout=30, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
 
@@ -75,7 +78,8 @@ class GitHub:
         return None
 
     async def request(self, method: str, path: str, *, json: Any = None, params: dict | None = None,
-                      ok404: bool = False, write: bool | None = None, attempts: int = 8) -> httpx.Response | None:
+                      ok404: bool = False, write: bool | None = None, attempts: int = 8,
+                      headers: dict | None = None) -> httpx.Response | None:
         if write is None:
             write = method != "GET"
         create = write and method == "POST"
@@ -84,7 +88,7 @@ class GitHub:
                 await self._throttle(create)
             try:
                 r = await self._client.request(method, path, json=json, params=params,
-                                               headers={"Authorization": f"Bearer {self._token_fn()}"})
+                                               headers={**(headers or {}), "Authorization": f"Bearer {self._token_fn()}"})
             except httpx.TransportError as e:
                 log.warning("github %s %s transport error %s (attempt %d)", method, path, e, attempt + 1)
                 await self._sleep(min(2**attempt, 60))
@@ -150,13 +154,32 @@ class GitHub:
         r = await self.request("GET", f"/repos/{self.repo}/collaborators/{login}/permission", ok404=True)
         return r.json()["permission"] if r else "none"
 
-    async def label_actor(self, issue: int, label: str) -> str | None:
-        """Login of whoever most recently added `label` to the issue."""
-        actor = None
+    async def label_event(self, issue: int, label: str) -> tuple[str | None, str | None, str | None]:
+        """(actor login, event id, created_at) of the most recent `labeled` event for `label`."""
+        found = (None, None, None)
         async for e in self._paged(f"/repos/{self.repo}/issues/{issue}/events"):
             if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label:
-                actor = (e.get("actor") or {}).get("login")
-        return actor
+                found = ((e.get("actor") or {}).get("login"), str(e["id"]) if "id" in e else None, e.get("created_at"))
+        return found
+
+    async def label_actor(self, issue: int, label: str) -> str | None:
+        """Login of whoever most recently added `label` to the issue."""
+        return (await self.label_event(issue, label))[0]
+
+    async def create_issue(self, title: str, body: str, labels: list[str]) -> dict:
+        return (await self.request("POST", f"/repos/{self.repo}/issues",
+                                   json={"title": title, "body": body, "labels": labels})).json()
+
+    async def find_issue_by_marker(self, marker: str, labels: list[str] | None = None) -> dict | None:
+        """First issue (open or closed) whose body contains `marker`. Callers cache the result."""
+        params = {"state": "all", **({"labels": ",".join(labels)} if labels else {})}
+        return next((i for i in await self.list_issues(**params) if marker in (i.get("body") or "")), None)
+
+    async def find_comment(self, number: int, marker: str) -> dict | None:
+        return next((c for c in await self.issue_comments(number) if marker in (c.get("body") or "")), None)
+
+    async def edit_comment(self, comment_id: int, body: str) -> dict:
+        return (await self.request("PATCH", f"/repos/{self.repo}/issues/comments/{comment_id}", json={"body": body})).json()
 
     async def issue_comments(self, number: int) -> list[dict]:
         return [c async for c in self._paged(f"/repos/{self.repo}/issues/{number}/comments")]
@@ -205,3 +228,58 @@ class GitHub:
         except GitHubError as e:
             if e.status != 422:  # already gone
                 raise
+
+    async def list_prs(self, state: str = "all", per_page: int = 50) -> list[dict]:
+        return (await self.request("GET", f"/repos/{self.repo}/pulls", params={
+            "state": state, "sort": "updated", "direction": "desc", "per_page": per_page})).json()
+
+    async def pr_files(self, number: int) -> list[str]:
+        r = await self.request("GET", f"/repos/{self.repo}/pulls/{number}/files", params={"per_page": 100})
+        return [f["filename"] for f in r.json()]
+
+    # --- statuses, refs, contents ------------------------------------------------------------
+
+    async def set_status(self, sha: str, context: str, state: str, description: str, target_url: str | None) -> None:
+        await self.request("POST", f"/repos/{self.repo}/statuses/{sha}", json={
+            "state": state, "context": context, "description": description[:140], "target_url": target_url})
+
+    async def statuses(self, sha: str) -> list[dict]:
+        return (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status")).json()["statuses"]
+
+    async def get_ref_sha(self, branch: str) -> str:
+        return (await self.request("GET", f"/repos/{self.repo}/git/ref/heads/{branch}")).json()["object"]["sha"]
+
+    async def dir_sha(self, path: str, ref: str) -> str | None:
+        """Tree SHA of directory `path` at `ref`, from its parent's listing. None if absent."""
+        parent, _, name = path.rstrip("/").rpartition("/")
+        r = await self.request("GET", f"/repos/{self.repo}/contents/{parent}", params={"ref": ref}, ok404=True)
+        return next((e["sha"] for e in r.json() if e["name"] == name and e["type"] == "dir"), None) if r else None
+
+    async def get_file(self, path: str, ref: str) -> bytes | None:
+        r = await self.request("GET", f"/repos/{self.repo}/contents/{path}", params={"ref": ref}, ok404=True,
+                               headers={"Accept": "application/vnd.github.raw"})
+        return r.content if r else None
+
+    async def ensure_branch(self, branch: str) -> bool:
+        """Create `branch` from an orphan commit if missing. Returns True if created."""
+        if await self.request("GET", f"/repos/{self.repo}/git/ref/heads/{branch}", ok404=True):
+            return False
+        tree = (await self.request("POST", f"/repos/{self.repo}/git/trees", json={"tree": [{
+            "path": "README.md", "mode": "100644", "type": "blob",
+            "content": "mia-data galleries, written by the worker.\n"}]})).json()["sha"]
+        commit = (await self.request("POST", f"/repos/{self.repo}/git/commits", json={
+            "message": "mia-data: initialize galleries branch", "tree": tree, "parents": []})).json()["sha"]
+        await self.request("POST", f"/repos/{self.repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": commit})
+        return True
+
+    async def file_exists(self, path: str, ref: str) -> bool:
+        return await self.request("GET", f"/repos/{self.repo}/contents/{path}", params={"ref": ref}, ok404=True) is not None
+
+    async def upsert_file(self, path: str, content: bytes, branch: str, message: str) -> bool:
+        """Commit `content` at `path` unless the file already exists there. Returns True if committed."""
+        async with self._commit_lock:
+            if await self.file_exists(path, branch):
+                return False
+            await self.request("PUT", f"/repos/{self.repo}/contents/{path}", json={
+                "message": message, "branch": branch, "content": base64.b64encode(content).decode()})
+            return True
