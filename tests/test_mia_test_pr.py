@@ -66,6 +66,14 @@ async def test_test_pr_passes(tmp_path, capsys):
     assert len(log) == n and "another binding" in capsys.readouterr().out  # leaving the status alone
 
 
+async def test_test_pr_stores_the_head_as_snippets_commit(tmp_path):
+    t, log, b = _run(tmp_path, heads=(SNIP_SHA,), binding={**BINDING, "snippets_commit": "f" * 40})
+    assert await run_test_pr(t.a, PR, b, "rec-1") == 0
+    rd = t.cfg.paths.state_dir / "rounds" / f"i0-e{PR}-{SNIP_SHA[:7]}"
+    assert yaml.safe_load((rd / "binding.yaml").read_text()) == BINDING  # BINDING's snippets_commit is the head
+    assert await run_test_pr(t.a, PR, b, "rec-1") == 0  # the same file again is a rerun, not another binding
+
+
 async def test_test_pr_verify_fails(tmp_path):
     t, log, b = _run(tmp_path, verify_ok=False)
     assert await run_test_pr(t.a, PR, b, "rec-1") == 1

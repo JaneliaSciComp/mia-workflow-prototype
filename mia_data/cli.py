@@ -173,6 +173,8 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
     for a in [x for k in ("raw", "labels") if isinstance(b, dict) and isinstance(b.get(k), list) for x in b[k]]:
         if isinstance(a, dict) and isinstance(a.get("urls"), list):  # check_binding's s3:// -> https rewrite
             a["urls"] = [https(u) if isinstance(u, str) else u for u in a["urls"]]
+    if isinstance(b, dict):
+        b["snippets_commit"] = head  # the head under test, whatever the file says
     text = yaml.safe_dump(b, sort_keys=False)
     if (rd / "binding.yaml").is_file() and (rd / "binding.yaml").read_text() != text:  # its jobs would be reused
         print(f"{head} was already tested with another binding ({rd}); push a new head to test this one")

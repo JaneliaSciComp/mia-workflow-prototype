@@ -365,8 +365,9 @@ class Activities:
     @activity.defn(name="read_match")
     @mia_permanent_errors
     async def read_match(self, ws: str) -> MatchResult:
-        """outcome.json, and for matched/ineligible the checked binding.yaml, copied to
-        state_dir/rounds/<round>/binding-<attempt>.yaml. Anything we can't trust is `blocked` with the reason."""
+        """outcome.json, and for matched/ineligible the checked binding.yaml, copied (with the round's
+        snippets_commit) to state_dir/rounds/<round>/binding-<attempt>.yaml. Anything we can't trust is `blocked`
+        with the reason."""
         p = Path(ws)
         if not (m := re.fullmatch(r"match-(\d+)", p.name)):
             raise ValueError(f"{ws} is not a match workspace")
@@ -386,7 +387,7 @@ class Activities:
                                     pins.snippets_commit)
         if errs:
             return MatchResult("blocked", _text("binding check failed: " + "; ".join(errs)))
-        path, h = self._store(rd / f"binding-{m.group(1)}.yaml", b)
+        path, h = self._store(rd / f"binding-{m.group(1)}.yaml", {**b, "snippets_commit": pins.snippets_commit})
         return MatchResult(kind, binding_path=path, binding_hash=h,
                            shapes=_small(o.get("shapes")) if kind == "ineligible" else None,
                            reasons=_texts(b.get("reasons")))

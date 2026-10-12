@@ -85,6 +85,13 @@ async def test_read_match_matched_copies_binding(tmp_path):
     assert r.binding_hash == hashlib.sha256(p.read_bytes()).hexdigest() and yaml.safe_load(p.read_text()) == BINDING
 
 
+async def test_read_match_stores_the_pinned_snippets_commit(tmp_path):
+    t = _setup(tmp_path)
+    _, ws = await _match_ws(t, {"outcome": "matched"}, {**BINDING, "snippets_commit": "f" * 40})
+    r = await t.a.read_match(str(ws))
+    assert r.outcome == "matched" and yaml.safe_load(Path(r.binding_path).read_text()) == BINDING
+
+
 async def test_read_match_symlinked_outcome_is_missing(tmp_path):
     t = _setup(tmp_path)
     _, ws = await _match_ws(t, None, BINDING)
