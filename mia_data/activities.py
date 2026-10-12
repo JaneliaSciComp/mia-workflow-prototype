@@ -11,7 +11,9 @@ import hashlib
 import json
 import os
 import re
+import logging
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -20,6 +22,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, neutralize, permanent_errors
 from autodev.jobs import read_untrusted
+from autodev.review import WRITE_PERMISSIONS
 
 from . import catalog
 from . import publish as pub
@@ -28,13 +31,16 @@ from .config import HUMAN_LABELS, STAGES
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (SHA_RE, HostsNotAllowed, PinMoved, check_hosts_allowed, crop_job, harness_pin, match_job,
                       match_prompt, smoke_job, snapshot, verify_job)
-from .models import (DatasetState, GalleryResult, JobArgs, JobDone, MatchResult, Pins, PrUpdate, SmokeResult,
-                     VerifyResult)
+from .models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
+                     RoundLimits, SmokeResult, VerifyResult)
 from .publish import CROP_ID_RE, Conflict
 from .seed import ID_RE, MARKER_RE
 from .status import MARKER as STATUS_MARKER, render_crops_table, render_stage, render_status
 
+log = logging.getLogger(__name__)
+
 ROUND_RE = re.compile(r"i\d+-e\d+")
+SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->")  # open_snippet_issue's marker
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 CROP_STATUS = {"pending": "test crops running", "success": "test crops passed", "failure": "test crops failed",
@@ -119,8 +125,8 @@ class Activities:
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))  # csub probe: the policy's patterns
 
     def all(self) -> list:
-        """The main queue's activities; await_job runs on the -await queue. `poll` arrives with Task 17."""
-        return [self.admit, self.set_stage, self.comment, self.prepare_match, self.prepare_job, self.probe_hosts,
+        """The main queue's activities; await_job runs on the -await queue."""
+        return [self.admit, self.limits, self.poll, self.set_stage, self.comment, self.prepare_match, self.prepare_job, self.probe_hosts,
                 self.submit, self.read_match, self.read_smoke, self.read_verify, self.publish_gallery,
                 self.publish_crops, self.refuse_label, self.open_snippet_issue, self.pr_state, self.set_crop_status,
                 self.tree_sha]
@@ -209,6 +215,11 @@ class Activities:
         _write(rd / "downloads.json", json.dumps(entry, indent=1))
         _write(rd / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
         return pins
+
+    @activity.defn(name="limits")
+    async def limits(self) -> RoundLimits:
+        c = self.cfg
+        return RoundLimits(c.crops.test_per_round, c.crops.per_round, c.limits.job_walltime_min)
 
     @activity.defn(name="set_stage")
     @mia_permanent_errors
@@ -389,9 +400,9 @@ class Activities:
 
     @activity.defn(name="read_verify")
     @mia_permanent_errors
-    async def read_verify(self, ws: str) -> VerifyResult:
+    async def read_verify(self, ws: str, crop_ws: str | None = None) -> VerifyResult:
         """verify.json: only crops with ok, a valid id and sha256s for crop.json and raw.png count. Top-level errors
-        or n == 0 mean nothing was verified."""
+        or n == 0 mean nothing was verified. With `crop_ws`, n_effective is the crop report's lowered n."""
         o = _json(ws, "verify.json")
         if not isinstance(o, dict):
             return VerifyResult(0, 0, ["verify.json is missing, unreadable or not a JSON object"], [])
@@ -412,7 +423,9 @@ class Activities:
             errors = ["verify checked no crops"]
         if errors:
             ok = []
-        return VerifyResult(len(ok), n, (errors + failed)[:20], ok)
+        rep = _json(crop_ws, "crops/report.json") if crop_ws else None
+        n_eff = rep.get("n") if isinstance(rep, dict) and type(rep.get("n")) is int and rep["n"] >= 0 else None
+        return VerifyResult(len(ok), n, (errors + failed)[:20], ok, n_eff)
 
     # --- publication -------------------------------------------------------------------------
 
@@ -510,3 +523,73 @@ class Activities:
         if not SHA_RE.fullmatch(sha) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
             raise ValueError(f"bad tree lookup {sha!r}/{name!r}")
         return await self.gh_snippets.dir_sha(f"snippets/{name}", sha)
+
+    # --- the poller --------------------------------------------------------------------------
+
+    @activity.defn(name="poll")
+    @mia_permanent_errors
+    async def poll(self) -> list[str]:
+        """MiaDataPoll (§8): deliver `data:go`/`data:approve` as signals, wake dataset workflows when their
+        snippet PR changes, and pass `mia-data/crops` on PRs that add no snippet (§5.5). One bad issue or PR never
+        skips the rest; the next poll retries it."""
+        from temporalio.service import RPCError, RPCStatusCode
+
+        cfg, gd, gs, did = self.cfg, self.gh_data, self.gh_snippets, []
+        for kind in HUMAN_LABELS:
+            label = cfg.label(kind)
+            for i in await gd.list_issues(labels=label, state="open"):
+                n = i["number"]
+                try:
+                    actor, eid, at = await gd.label_event(n, label)
+                    if not actor or await gd.permission(actor) not in WRITE_PERMISSIONS:
+                        await gd.remove_label(n, label)
+                        m = cfg.marker(f"ignored {label} {eid}")
+                        await self._comment_once(gd, n, f"Ignoring `{label}`: it was added by `{actor or 'unknown'}`, "
+                                                        f"who does not have write access to this repository.\n\n{m}", m)
+                    elif not (eid and at):
+                        log.warning("poll: #%s %s: label event has no id or time", n, label)
+                    elif kind == "go" and "licence-excluded" in {lb["name"] for lb in i.get("labels", [])}:
+                        await self.refuse_label(n, label, "the dataset's licence is not in `crops.licences` "
+                                                          "(`licence-excluded`)", eid)
+                    else:
+                        await self.client.start_workflow(
+                            "MiaDataDataset", DatasetState(n), id=cfg.workflow_id(n), task_queue=cfg.task_queue,
+                            start_signal=kind, start_signal_args=[LabelEvent(kind, eid, actor, at)])
+                        await gd.remove_label(n, label)  # only once the signal is accepted (§8.3)
+                        did.append(f"{kind} #{n}")
+                except Exception:
+                    log.exception("poll: issue #%s %s failed", n, label)
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        # ponytail: the first page (50 most recently updated PRs); paginate if more than 50 are active
+        for p in await gs.list_prs(state="all"):
+            try:
+                head = p["head"]
+                if p["state"] == "open" and not any(s.get("context") == "mia-data/crops"
+                                                    for s in await gs.statuses(head["sha"])):
+                    files = await gs.pr_files(p["number"])
+                    if len(files) < 100 and not any(f.startswith("snippets/") for f in files):  # 100: a full page
+                        await gs.set_status(head["sha"], "mia-data/crops", "success", "no snippet in this PR", None)
+                        did.append(f"status PR #{p['number']}")
+                m = re.fullmatch(r"snippets/issue-(\d+)", head["ref"])
+                if (not m or (head.get("repo") or {}).get("full_name") != gs.repo
+                        or (p["state"] != "open" and datetime.fromisoformat(p["updated_at"]) < recent)):
+                    continue
+                k = await gs.get_issue(int(m.group(1)))
+                mk = SNIPPET_ISSUE_RE.match(k.get("body") or "")
+                if not mk or (k.get("user") or {}).get("login") != self.bot:  # an outsider can copy the marker
+                    continue
+                merged = bool(p.get("merged_at"))
+                u = PrUpdate(p["number"], head["sha"], "merged" if merged else p["state"],
+                             p.get("merge_commit_sha") if merged else None, k["number"],
+                             "snippets:needs-human" in {lb["name"] for lb in k.get("labels", [])})
+                try:
+                    await self.client.get_workflow_handle(cfg.workflow_id(int(mk.group(1)))).signal("pr_update", u)
+                    did.append(f"pr_update PR #{p['number']}")
+                except RPCError as e:
+                    if e.status != RPCStatusCode.NOT_FOUND:  # no dataset workflow (any more): nothing to wake
+                        raise
+            except Exception:
+                log.exception("poll: PR #%s failed", p.get("number"))
+        if did:
+            log.info("poll: %s", ", ".join(did))
+        return did

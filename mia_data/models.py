@@ -115,6 +115,15 @@ class VerifyResult:
     n: int
     errors: list[str]
     crops: list[dict]  # verified crops only: [{"crop_id", "files": {rel: sha256}}]
+    n_effective: int | None = None  # the crop job's n, lowered by capacity (its report.json); None if unknown
+
+
+@dataclass
+class RoundLimits:
+    """The config values a round runs with, read at admission (the workflow can't read config)."""
+    test_n: int
+    per_round: int
+    walltime_min: int
 
 
 @dataclass

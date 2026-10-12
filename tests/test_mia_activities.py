@@ -278,3 +278,15 @@ async def test_publish_crops_into_dataset_folder(tmp_path):
     assert r == {"published": ["c1"], "already": [], "total": 1} and m["crops"][0]["files"] == v["files"]
     with pytest.raises(ApplicationError):  # not this round's workspace
         await t.a.publish_crops(1, "i1-e100", str(cw), [v], SNIP_SHA)
+
+
+async def test_read_verify_reports_the_lowered_n(tmp_path):
+    t = _setup(tmp_path)
+    ws, cw = tmp_path / "vws", tmp_path / "cws"
+    (cw / "crops").mkdir(parents=True)
+    ws.mkdir()
+    (ws / "verify.json").write_text(json.dumps({"crops": [], "n": 0, "errors": []}))
+    assert (await t.a.read_verify(str(ws), str(cw))).n_effective is None  # no report: the caller's n stands
+    (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3}))
+    assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
+    assert (await t.a.read_verify(str(ws))).n_effective is None
