@@ -56,8 +56,15 @@ def permanent_errors(fn):
 
 # --- comment templates ------------------------------------------------------------------------
 
-def render_pr_body(cfg, issue: int) -> str:
-    return f"""Closes #{issue}
+def issue_lead(body: str | None) -> str:
+    """The issue's first paragraph, markers and HTML comments removed, for the PR description."""
+    text = re.sub(r"<!--.*?-->", "", body or "", flags=re.S).strip()
+    lead = re.split(r"\n\s*\n", text, 1)[0].strip()
+    return lead if len(lead) <= 300 else lead[:297].rstrip() + "..."
+
+
+def render_pr_body(cfg, issue: int, lead: str = "") -> str:
+    return f"""Closes #{issue}{": " + lead if lead else ""}
 
 Implemented by **{cfg.deployment}**: Claude Code running in a sandboxed job on the cluster. The agent's own
 summary is the first comment.
@@ -185,7 +192,8 @@ class Activities:
                 pr = existing["number"]
             else:
                 issue = await self.gh.get_issue(a.issue)
-                pr = (await self.gh.create_pr(f"{issue['title']} (#{a.issue})", render_pr_body(self.cfg, a.issue),
+                body = render_pr_body(self.cfg, a.issue, self._clean(issue_lead(issue.get("body"))))
+                pr = (await self.gh.create_pr(issue["title"] or f"Issue #{a.issue}", body,
                                               a.workspace.branch, self.cfg.github.base_branch))["number"]
         markers = [f"round {a.key}-{a.round}"] + ([f"handled {a.feedback_id}"] if a.feedback_id else [])
         body = render_summary(self.cfg, a.round, a.workspace.branch, head, self._clean(summary), cost)
