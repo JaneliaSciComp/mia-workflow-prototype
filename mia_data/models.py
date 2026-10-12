@@ -67,6 +67,7 @@ class DatasetState:
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)
+    links: dict = field(default_factory=dict)  # what the status comment shows: crops table, PR, totals
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -96,6 +97,7 @@ class MatchResult:
     binding_hash: str | None = None
     shapes: dict | None = None  # ineligible
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
+    reasons: list[str] = field(default_factory=list)  # matched/ineligible: the binding's reasons
 
 
 @dataclass
@@ -116,6 +118,7 @@ class VerifyResult:
     errors: list[str]
     crops: list[dict]  # verified crops only: [{"crop_id", "files": {rel: sha256}}]
     n_effective: int | None = None  # the crop job's n, lowered by capacity (its report.json); None if unknown
+    bytes_fetched: int = 0  # the crop job's, from its report.json
 
 
 @dataclass

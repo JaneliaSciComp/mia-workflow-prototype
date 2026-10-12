@@ -11,7 +11,7 @@ from autodev.jobs import CsubJobs
 from autodev_helpers import GIT_ID, run_git
 from mia_data.activities import Activities
 from mia_data.models import DatasetState, JobArgs, job_key
-from mia_helpers import make_cfg
+from mia_helpers import FakeGH, make_cfg
 from test_autodev_agent import FakeCsub
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
@@ -20,67 +20,6 @@ RECORD = {"data": {"download_url": "https://data.example.org/a.zip", "formats": 
 BINDING = {"record": "rec-1", "record_commit": REC_SHA, "snippets_commit": SNIP_SHA, "reasons": ["r"],
            "raw": [{"snippet": "tiff-zip-member", "urls": ["https://data.example.org/a.zip::m.tif"], "params": {}}]}
 ROUND = "i1-e99"
-
-
-class FakeGH:
-    """The GitHub calls the activities make, in memory."""
-
-    def __init__(self, repo, files=None, issues=None, refs=None):
-        self.repo, self.files, self.issues, self.refs = repo, files or {}, issues or {}, refs or {}
-        self.comments, self.created, self.gets, self.puts, self.removed = {}, [], [], [], []
-
-    def tokens(self):
-        return "tok"
-
-    async def get_file(self, path, ref):
-        self.gets.append((path, ref))
-        return self.files.get((path, ref))
-
-    async def request(self, method, path, params=None):
-        tree = [{"type": "blob", "path": p} for p, _ in self.files]
-        return SimpleNamespace(json=lambda: {"tree": tree})
-
-    async def get_ref_sha(self, branch):
-        return self.refs[branch]
-
-    async def get_issue(self, n):
-        return self.issues[n]
-
-    async def list_issues(self, **params):
-        return list(self.issues.values())
-
-    async def add_labels(self, n, labels):
-        self.issues[n]["labels"] += [{"name": x} for x in labels]
-
-    async def edit_comment(self, cid, body):
-        next(c for cs in self.comments.values() for c in cs if c["id"] == cid)["body"] = body
-
-    async def create_issue(self, title, body, labels):
-        n = 100 + len(self.issues)
-        self.created.append((title, body, labels))
-        self.issues[n] = {"number": n, "body": body, "labels": [{"name": x} for x in labels], "user": {"login": "bot"}}
-        return self.issues[n]
-
-    async def issue_comments(self, n):
-        return self.comments.get(n, [])
-
-    async def comment(self, n, body, login="bot"):
-        cs = self.comments.setdefault(n, [])
-        cs.append({"id": 1000 * n + len(cs), "body": body, "user": {"login": login}})
-
-    async def remove_label(self, n, name):
-        self.removed.append((n, name))
-        self.issues[n]["labels"] = [x for x in self.issues[n]["labels"] if x["name"] != name]
-
-    async def ensure_branch(self, branch):
-        pass
-
-    async def upsert_file(self, path, content, branch, message):
-        if path in self.files:
-            return False
-        self.files[path] = content
-        self.puts.append(path)
-        return True
 
 
 def _setup(tmp_path, probe=None):

@@ -127,6 +127,8 @@ class Config(BaseModel):
         for k, v in vars(self.limits).items():
             if not (math.isfinite(v) and v > 0):
                 raise ValueError(f"limits.{k} must be finite and positive")
+        if self.limits.max_stage_attempts != 1:
+            raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")
         if not self.crops.licences:
             raise ValueError("crops.licences must not be empty")
         n = self.network

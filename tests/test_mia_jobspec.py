@@ -164,6 +164,7 @@ def test_verify_job(tmp_path):
     s = verify_job(cfg, ws, _pins(cfg), crops, "binding.yaml", tmp_path / "manifest.json")
     assert s.allow_hosts == [] and str(crops) in s.ro_mounts and str(tmp_path / "manifest.json") in s.ro_mounts
     assert s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_DIR"] == "" and "harness preview" in s.command
+    assert "verify.json; v=$?" in s.command  # preview runs even when a crop fails verification
 
 
 def test_check_hosts_allowed(tmp_path):

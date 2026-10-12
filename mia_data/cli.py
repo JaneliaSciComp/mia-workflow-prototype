@@ -100,11 +100,6 @@ async def cmd_schedule(cfg, args) -> int:
     return 0
 
 
-async def cmd_later(cfg, args) -> int:
-    print(f"mia-data {args.cmd}: not implemented yet", file=sys.stderr)
-    return 2
-
-
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="mia-data", description=__doc__)
     p.add_argument("--config", help="path to mia_data.yaml (default: $MIA_DATA_CONFIG or ./mia_data.yaml)")
@@ -113,13 +108,11 @@ def main(argv=None) -> int:
     sub.add_parser("init-labels", help="create the stage, human and extra labels on the data repo")
     sub.add_parser("worker", help="run the Temporal workers (main and await queues)")
     sub.add_parser("schedule", help="manage the poll Schedule").add_argument("action", choices=["apply"])
-    for name in ("check", "test-pr", "crops-by-snippet", "reindex"):  # Task 18 / 19
-        sub.add_parser(name, help="(not implemented yet)").add_argument("rest", nargs="*")
     args = p.parse_args(argv)
     cfg = load_config(args.config)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     cmd = {"seed": cmd_seed, "init-labels": cmd_init_labels, "worker": cmd_worker, "schedule": cmd_schedule}
-    return asyncio.run(cmd.get(args.cmd, cmd_later)(cfg, args))
+    return asyncio.run(cmd[args.cmd](cfg, args))
 
 
 if __name__ == "__main__":

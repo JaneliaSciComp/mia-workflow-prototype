@@ -17,8 +17,7 @@ from mia_data.activities import Activities
 from mia_data.models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
                              RoundLimits, SmokeResult, VerifyResult)
 from mia_data.workflows import MiaDataDataset
-from mia_helpers import make_cfg
-from test_mia_activities import FakeGH
+from mia_helpers import FakeGH, make_cfg
 
 SHA = "a" * 40
 PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x")
@@ -92,7 +91,7 @@ class Mocks:
         async def read_match(ws: str) -> MatchResult:
             rec("read_match")
             return MatchResult(self.outcome, reason="label class undecidable", binding_path="/s/binding-1.yaml",
-                               binding_hash="bh")
+                               binding_hash="bh", reasons=["axes from conversion.json"])
 
         @activity.defn(name="read_smoke")
         async def read_smoke(ws: str) -> SmokeResult:
@@ -105,7 +104,8 @@ class Mocks:
             prod = "production" in ws
             k, n = (self.prod_ok, 16) if prod else (self.test_ok, 4)
             return VerifyResult(k, n, [] if k == n else ["c9: overlaps c1"],
-                                [{"crop_id": f"c{i}", "files": {}} for i in range(k)], self.n_effective if prod else 4)
+                                [{"crop_id": f"c{i}", "files": {}} for i in range(k)], self.n_effective if prod else 4,
+                                bytes_fetched=1234)
 
         @activity.defn(name="publish_gallery")
         async def publish_gallery(issue: int, round_id: str, kind: str, crop_ws: str, verify_ws: str,
@@ -130,7 +130,7 @@ class Mocks:
             if self.await_failures:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
-            state, code = self.states.get(ws.rsplit("/", 1)[1].split("-")[0], ("DONE", 0))
+            state, code = self.states.get(ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
             return JobDone(job_id, state, code)
 
         return [await_job]
@@ -207,7 +207,9 @@ async def test_match_test_review_approve_crop_done(env):
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
     assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops", "publish_gallery"]
     assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1")
-    assert "table" in m.of("comment")[0][0] and m.of("set_stage")[-1][2]["totals"].startswith("16 new")
+    report = m.of("comment")[0][0]
+    assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
+    assert m.of("set_stage")[-1][2]["totals"].startswith("16 new")
     assert not m.of("refuse_label")
 
 
@@ -293,12 +295,49 @@ async def test_blocked_goes_needs_human(env):
     assert [a[1] for a in m.of("submit")] == ["match"]
 
 
-async def test_failed_job_needs_human_no_retry(env):
-    m = Mocks(states={"match": ("EXIT", 1)})
+@pytest.mark.parametrize("states, stages, published", [
+    ({"match": ("EXIT", 1)}, ["matching", "needs-human"], []),
+    ({"smoke": ("EXIT", 1)}, ["matching", "needs-human"], []),  # even though smoke.json says ok
+    ({f"verify-{SHA}": ("EXIT", 1)}, ["matching", "testing", "needs-human"], []),
+    ({"crop-production": ("EXIT", 1)}, ["matching", "testing", "review", "cropping", "needs-human"], [16]),
+])
+async def test_failed_job_needs_human_no_retry(env, states, stages, published):
+    m = Mocks(states=states)
     async with started(env, m) as h:
+        if "review" in stages:
+            await approve_review(h, m)
         await idle(h, m, "needs-human")
-    assert len(m.of("submit")) == 1 and "read_match" not in m.names()
-    assert "EXIT" in m.of("set_stage")[-1][1]
+    keys = [a[0] for a in m.of("submit")]
+    assert m.stages == stages and len(keys) == len(set(keys)) and "EXIT" in m.of("set_stage")[-1][1]
+    assert [a[1] for a in m.of("publish_crops")] == published  # what passed stays published (§7.5)
+    assert ("read_match" in m.names()) == ("match" not in states)
+
+
+async def test_production_verify_exit_is_judged_by_its_report(env):
+    """harness verify exits 1 whenever a crop fails; production still needs only half of n (§7.5)."""
+    m = Mocks(states={"verify-production": ("EXIT", 1)}, prod_ok=12)
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert m.of("publish_crops")[0][1] == 12
+
+
+async def test_rollover_in_review_then_approve(env, monkeypatch):
+    from temporalio import workflow
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: workflow.info().continued_run_id is None)  # once
+    m = Mocks()
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await until(lambda: m.stages[-1:] == ["review"])
+        for _ in range(500):
+            if (await h.describe()).run_id != h.first_run_id:
+                break
+            await asyncio.sleep(0.02)
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert (await h.describe()).run_id != h.first_run_id
+    assert m.stages == ["matching", "testing", "review", "cropping", "done"] and len(m.of("admit")) == 1
+    assert [a.seed for a in m.jobs() if a.n] == [st.seed + "-t", st.seed + "-p"] and st.links["totals"]
 
 
 async def test_test_crop_failure_never_produces(env):

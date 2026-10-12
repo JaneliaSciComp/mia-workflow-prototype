@@ -23,6 +23,7 @@ def test_defaults(tmp_path):
     {"network": {"package_hosts": ["api.github.com"]}},
     {"network": {"redirect_hosts": {"a.example": ["*.b.example"]}}},
     {"limits": {"max_pr_revisions": 0}},
+    {"limits": {"max_stage_attempts": 2}},  # retries aren't implemented
     {"crops": {"licences": []}},
 ])
 def test_rejected(tmp_path, override):

@@ -181,5 +181,5 @@ def verify_job(cfg, ws, pins, crops_dir, binding_path: str, existing) -> JobSpec
     snippet code: no network, no dataset cache."""
     h, d = _harness(cfg), q(str(crops_dir))
     body = (f"{h} verify {d} --binding {q(binding_path)}" + (f" --existing {q(str(existing))}" if existing else "")
-            + f" --out verify.json && \\\n{h} preview {d} --out preview")
+            + f" --out verify.json; v=$?\n{h} preview {d} --out preview && (exit $v)")  # overlays even if a crop fails
     return _spec(cfg, "verify", ws, pins, body, [], [crops_dir, existing])

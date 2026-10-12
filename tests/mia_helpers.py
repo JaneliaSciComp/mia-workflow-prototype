@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from mia_data.config import Config
 
@@ -19,3 +20,64 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
     for k, v in overrides.items():
         data[k] = {**data[k], **v} if isinstance(v, dict) and isinstance(data.get(k), dict) else v
     return Config(**data)
+
+
+class FakeGH:
+    """The GitHub calls the activities make, in memory."""
+
+    def __init__(self, repo, files=None, issues=None, refs=None):
+        self.repo, self.files, self.issues, self.refs = repo, files or {}, issues or {}, refs or {}
+        self.comments, self.created, self.gets, self.puts, self.removed = {}, [], [], [], []
+
+    def tokens(self):
+        return "tok"
+
+    async def get_file(self, path, ref):
+        self.gets.append((path, ref))
+        return self.files.get((path, ref))
+
+    async def request(self, method, path, params=None):
+        tree = [{"type": "blob", "path": p} for p, _ in self.files]
+        return SimpleNamespace(json=lambda: {"tree": tree})
+
+    async def get_ref_sha(self, branch):
+        return self.refs[branch]
+
+    async def get_issue(self, n):
+        return self.issues[n]
+
+    async def list_issues(self, **params):
+        return list(self.issues.values())
+
+    async def add_labels(self, n, labels):
+        self.issues[n]["labels"] += [{"name": x} for x in labels]
+
+    async def edit_comment(self, cid, body):
+        next(c for cs in self.comments.values() for c in cs if c["id"] == cid)["body"] = body
+
+    async def create_issue(self, title, body, labels):
+        n = 100 + len(self.issues)
+        self.created.append((title, body, labels))
+        self.issues[n] = {"number": n, "body": body, "labels": [{"name": x} for x in labels], "user": {"login": "bot"}}
+        return self.issues[n]
+
+    async def issue_comments(self, n):
+        return self.comments.get(n, [])
+
+    async def comment(self, n, body, login="bot"):
+        cs = self.comments.setdefault(n, [])
+        cs.append({"id": 1000 * n + len(cs), "body": body, "user": {"login": login}})
+
+    async def remove_label(self, n, name):
+        self.removed.append((n, name))
+        self.issues[n]["labels"] = [x for x in self.issues[n]["labels"] if x["name"] != name]
+
+    async def ensure_branch(self, branch):
+        pass
+
+    async def upsert_file(self, path, content, branch, message):
+        if path in self.files:
+            return False
+        self.files[path] = content
+        self.puts.append(path)
+        return True

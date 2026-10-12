@@ -385,7 +385,8 @@ class Activities:
         data = yaml.safe_dump(b, sort_keys=False).encode()
         _write(path := rd / f"binding-{m.group(1)}.yaml", data)
         return MatchResult(kind, binding_path=str(path), binding_hash=hashlib.sha256(data).hexdigest(),
-                           shapes=_small(o.get("shapes")) if kind == "ineligible" else None)
+                           shapes=_small(o.get("shapes")) if kind == "ineligible" else None,
+                           reasons=_texts(b.get("reasons")))
 
     @activity.defn(name="read_smoke")
     @mia_permanent_errors
@@ -424,8 +425,9 @@ class Activities:
         if errors:
             ok = []
         rep = _json(crop_ws, "crops/report.json") if crop_ws else None
-        n_eff = rep.get("n") if isinstance(rep, dict) and type(rep.get("n")) is int and rep["n"] >= 0 else None
-        return VerifyResult(len(ok), n, (errors + failed)[:20], ok, n_eff)
+        rep = rep if isinstance(rep, dict) else {}
+        num = lambda k: rep[k] if type(rep.get(k)) is int and rep[k] >= 0 else None  # noqa: E731
+        return VerifyResult(len(ok), n, (errors + failed)[:20], ok, num("n"), num("bytes_fetched") or 0)
 
     # --- publication -------------------------------------------------------------------------
 
