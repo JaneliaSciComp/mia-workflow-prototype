@@ -7,7 +7,9 @@ import asyncio
 import dataclasses
 import logging
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import json
 from datetime import timedelta
@@ -28,6 +30,14 @@ log = logging.getLogger("mia_data")
 DATA_HOSTS = ["zenodo.org", "ftp.ebi.ac.uk", "www.ebi.ac.uk", "data.broadinstitute.org",
               "files.cryoetdataportal.cziscience.com", "huggingface.co", "*.huggingface.co", "ndownloader.figshare.com",
               "figshare.com", "allencell.s3.amazonaws.com", "s3.amazonaws.com"]
+
+
+def _lsf_queues() -> set[str] | None:
+    """The cluster's LSF queue names, or None where bqueues is not installed (then the check is skipped)."""
+    if not (bq := shutil.which("bqueues")):
+        return None
+    out = subprocess.run([bq, "-w"], capture_output=True, text=True, timeout=60).stdout.splitlines()
+    return {l.split()[0] for l in out[1:] if l.strip()}
 
 
 def _gh(cfg, repo: str, tokens=None) -> GitHub:
@@ -83,6 +93,11 @@ async def cmd_check(cfg, args) -> int:
         if inside := [str(d) for d in mounted if d.is_relative_to(home) or home.is_relative_to(d)]:
             bad.append(f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
                        "(move it out of $HOME)")
+        # a policy queue table named after a queue LSF does not have fails every submit with "No such queue"
+        if (have := await asyncio.to_thread(_lsf_queues)) is not None:
+            if miss := [n for n, q in p.queues.items() if not q.get("gpu") and n not in have]:
+                bad.append(f"not an LSF queue: {', '.join(miss)} (broker.toml: name the CPU [queues.<name>] tables and "
+                           f"[limits] cpu_short_queue/cpu_default_queue after real queues from `bqueues`, e.g. short, local)")
         if bad:
             raise RuntimeError("; ".join(bad))
         return f"broker user {p.user}, {len(want)} hosts ok"

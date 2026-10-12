@@ -45,7 +45,8 @@ TEMPORAL=$(command -v temporal || echo "$HOST/bin/temporal")
 if [ ! -x "$TEMPORAL" ]; then
   curl -sSL "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64" | tar xz -C "$HOST/bin" temporal
 fi
-if tmux has-session -t "$DEPLOY" 2>/dev/null; then echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
+if tmux has-session -t "$DEPLOY" 2>/dev/null; then  # a re-run repairs a run that failed after tmux was up
+  "$PY" -m autodev.cli schedule apply; echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
 
 # Temporal gRPC and UI stay on this host's loopback; the sandboxed worker reaches them via the allowlist proxy.
 # One dev server serves every app: if one is already healthy (started by another up-script), reuse it.

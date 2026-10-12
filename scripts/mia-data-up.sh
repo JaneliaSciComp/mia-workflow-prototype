@@ -44,7 +44,8 @@ if [ ! -x "$TEMPORAL" ]; then
   mkdir -p "$HOST/bin"
   curl -sSL "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64" | tar xz -C "$HOST/bin" temporal
 fi
-if tmux has-session -t "$DEPLOY" 2>/dev/null; then echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
+if tmux has-session -t "$DEPLOY" 2>/dev/null; then  # a re-run repairs a run that failed after tmux was up
+  "$PY" -m mia_data.cli schedule apply; echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
 "$TEMPORAL" operator cluster health --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
   || { echo "no healthy Temporal at $TEMPORAL_ADDRESS: start it with scripts/autodev-up.sh first"; exit 1; }
 "$TEMPORAL" operator namespace describe -n "$NS" --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \

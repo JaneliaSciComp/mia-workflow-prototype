@@ -60,7 +60,7 @@ class _GH:
         pass
 
 
-def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",)):
+def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",), queues=None):
     async def client(cfg):
         return SimpleNamespace(workflow_service=SimpleNamespace(describe_namespace=_aw))
 
@@ -71,7 +71,8 @@ def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",)):
         return "bot"
 
     probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, user="u", env_allow=list(env_allow),
-                            allowed_roots=list(roots))
+                            allowed_roots=list(roots), queues=queues or {"short": {}, "local": {}})
+    monkeypatch.setattr(cli, "_lsf_queues", lambda: {"short", "local", "gpu_a100"})
     monkeypatch.setattr(cli, "GitHub", _GH)
     monkeypatch.setattr(cli, "_client", client)
     monkeypatch.setattr(cli, "bot_login", login)
@@ -140,3 +141,13 @@ def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
     assert 'add "MIA_HARNESS_*" to env_allow' in row
     assert f'add "{cfg.harness.dir}", "{cfg.storage.root}" to allowed_roots' in row
     assert f"home directory {tmp_path.resolve()}" in row and str(cfg.harness.dir) in row.split("home directory")[1]
+
+
+def test_check_flags_policy_queue_lsf_does_not_have(monkeypatch, tmp_path, capsys):
+    _fake_env(monkeypatch, ["*"], queues={"short": {}, "long": {}, "gpu": {"gpu": True}})  # gpu tables are not LSF names
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    assert main(["check"]) == 1
+    row = next(l for l in capsys.readouterr().out.split("\n") if "csub broker" in l)
+    assert row.startswith("BAD") and "not an LSF queue: long" in row and "gpu" not in row.split("not an LSF queue:")[1].split("(")[0]

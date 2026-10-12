@@ -58,7 +58,9 @@ round summary count, so a short prefix approved earlier cannot approve a later h
 1. **Service account** on the cluster with rootless podman / bwrap set up (agentic-sandbox README), a csub
    broker installed for it (csub `deploy/INSTALL.md`), and an LSF billing group in its broker policy.
 2. **Broker policy** (`~svc/.config/csub/broker.toml`): `[agents] claude = ["api.anthropic.com", "claude.ai", "platform.claude.com"]`;
-   `allowed_hosts` ⊇ `agent.allow_hosts`; `allowed_roots` contains `paths.work_root`. Config rejects GitHub
+   `allowed_hosts` ⊇ `agent.allow_hosts`; `allowed_roots` contains `paths.work_root`; the CPU `[queues.<name>]`
+   tables and `cpu_short_queue`/`cpu_default_queue` are named after queues `bqueues` lists (at Janelia `short` and
+   `local`; a made-up name fails every submit with `No such queue`). Config rejects GitHub
    hosts in `agent.allow_hosts`, and `agent.extra_mounts` must be absolute and end in `:ro`.
 3. **Claude** for the service account: `claude auth login` as that account (a team seat).
    `agent.api_key_env` is refused by `autodev-up.sh` for now.
@@ -95,7 +97,8 @@ Prerequisites P1-P4 ([plan](plans/2026-10-11-mia-crops-poc.md)): P1 repos `mia-w
 with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage.root` visible from compute
 nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes `"MIA_HARNESS_*"`;
 `allowed_roots` covers `harness.dir`, `work_root` and `storage.root`, none of them under `$HOME`, which csub never
-mounts; `[agents]`, data hosts, redirect probe; `md check` names what is missing); P4 see the plan.
+mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `md check`
+names what is missing); P4 see the plan.
 
 1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
@@ -105,7 +108,8 @@ mounts; `[agents]`, data hosts, redirect probe; `md check` names what is missing
    `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run md check`.
 3. `scripts/autodev-up.sh` first (it owns the one shared Temporal dev server), then `scripts/mia-data-up.sh`:
    it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and applies the poll schedule.
-   It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Uses `temporal` from PATH
+   Re-running it while the tmux session exists only re-applies the schedule, so a run that failed partway is
+   repaired by running it again. It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Uses `temporal` from PATH
    (or `$TEMPORAL`); otherwise it downloads one into `<state_dir>-host/bin`. The shared Temporal server lives
    in whichever tmux session started it, so `ad down` on that deployment stops it for mia-data too.
 4. `pixi run md init-labels` creates the `data:*` labels; `pixi run md seed` seeds dataset issues from the catalog.
