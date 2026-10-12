@@ -1,0 +1,9 @@
+# synthetic record for the licence-exclusion test
+id: synthetic-gpl
+title: Synthetic GPL dataset
+imaging: {modality: [EM], organism: [Mus musculus], voxel_size_nm: {x: 4, y: 4, z: 4}}
+license: {spdx: GPL-3.0}
+data: {download_url: https://example.org/synthetic.zip}
+technical:
+  arrays:
+    - {role: raw, axes: zyx, shape: [300, 512, 512], dtype: uint8}
