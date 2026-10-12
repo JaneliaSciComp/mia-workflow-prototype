@@ -210,7 +210,7 @@ class Activities:
         done = handled_ids(comments, mp, self.bot)
         fb = [f for f in feedback(reviews, inline, comments, perms, self.bot, allow_self, mp) if f.id not in done]
         ok = approved(head, reviews, comments, perms, self.bot, allow_self, mp, latest_round_at(comments, mp, self.bot))
-        return PrSnapshot(a.pr, "open", head, ok, await self.gh.check_state(head), fb)
+        return PrSnapshot(a.pr, "open", head, ok, await self.gh.check_state(head, self.cfg.github.required_checks), fb)
 
     @activity.defn(name="merge_pr")
     @permanent_errors
@@ -240,7 +240,8 @@ class Activities:
             n = i["number"]
             try:
                 actor = await self.gh.label_actor(n, go)
-                if not actor or await self.gh.permission(actor) not in WRITE_PERMISSIONS:
+                if not actor or (actor not in self.cfg.github.trusted_bots
+                                 and await self.gh.permission(actor) not in WRITE_PERMISSIONS):
                     await self.gh.remove_label(n, go)
                     who = actor or "unknown"
                     marker = self.cfg.marker(f"ignored-label {who}")

@@ -49,9 +49,10 @@ def job_script(cfg, base_sha: str) -> str:
     """Runs inside the csub sandbox with cwd = the round directory."""
     q = shlex.quote
     path = f'export PATH={":".join(q(p) for p in cfg.agent.path_prepend)}:"$PATH"\n' if cfg.agent.path_prepend else ""
+    budget = f" --max-budget-usd {cfg.agent.max_budget_usd}" if cfg.agent.max_budget_usd is not None else ""
     return f"""set -u
 {path}cd repo || exit 1
-claude -p "$(cat ../prompt.md)" --model {q(cfg.agent.model)} --output-format json \\
+claude -p "$(cat ../prompt.md)" --model {q(cfg.agent.model)} --output-format json{budget} \\
   --allowedTools "Bash,Read,Edit,Write,Glob,Grep" > ../result.json 2> ../claude.err
 rc=$?
 git bundle create -q ../result.bundle {q(base_sha)}..HEAD 2>> ../claude.err

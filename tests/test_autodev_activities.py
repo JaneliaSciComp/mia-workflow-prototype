@@ -9,6 +9,7 @@ from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import Activities, neutralize
+from autodev.decide import WAIT, decide
 from autodev.github import GitHub
 from autodev.gitops import GitError, Mirror
 from autodev.models import FailureInput, Feedback, ObserveInput, PublishInput, RoundInput, StageInput
@@ -37,8 +38,8 @@ def gh():
     return GitHub("o/r", lambda: "tok", writes_per_second=1000, sleep=no_sleep)
 
 
-def acts(tmp_path, gh, client=None, origin=None):
-    cfg = make_cfg(tmp_path, github={"git_url": str(origin or tmp_path / "none.git")})
+def acts(tmp_path, gh, client=None, origin=None, **github):
+    cfg = make_cfg(tmp_path, github={"git_url": str(origin or tmp_path / "none.git"), **github})
     mirror = Mirror(tmp_path / "state" / "mirror.git", cfg.git_url)
     return Activities(cfg, gh, mirror, jobs=None, bot="bot", client=client)
 
@@ -60,6 +61,66 @@ async def test_poll_ignores_label_from_reader(tmp_path, gh):
     assert arg.issue == 1 and kw["id"] == "autodev/o/r/issue-1"
     assert kw["id_conflict_policy"] == WorkflowIDConflictPolicy.USE_EXISTING and kw["task_queue"] == "autodev"
     assert unlabel.called and "mallory" in json.loads(note.calls[0].request.content)["body"]
+
+
+def _bot_label(bot_trusted):
+    respx.get(f"{API}{R}/issues").mock(return_value=httpx.Response(200, json=[{"number": 1}]))
+    respx.get(f"{API}{R}/issues/1/events").mock(return_value=httpx.Response(200, json=[
+        {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "mia-bot[bot]"}}]))
+    respx.delete(url__regex=r".*/issues/1/labels/.*").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}{R}/issues/1/comments").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}{R}/issues/1/comments").mock(return_value=httpx.Response(201, json={"id": 1}))
+
+
+@respx.mock
+async def test_trusted_bot_label_starts_workflow(tmp_path, gh):
+    _bot_label(True)
+    temporal = FakeTemporal()
+    assert await acts(tmp_path, gh, temporal, trusted_bots=["mia-bot[bot]"]).poll_issues() == [1]
+
+
+@respx.mock
+async def test_untrusted_bot_label_is_ignored(tmp_path, gh):
+    _bot_label(False)
+    temporal = FakeTemporal()
+    assert await acts(tmp_path, gh, temporal, trusted_bots=["other[bot]"]).poll_issues() == []
+    assert not temporal.started
+
+
+async def _observe_required(tmp_path, gh, runs, statuses):
+    head = "abc1234def"
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={
+        "state": "open", "merged": False, "head": {"sha": head}}))
+    respx.get(f"{API}{R}/pulls/5/reviews").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}{R}/pulls/5/comments").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}{R}/issues/5/comments").mock(return_value=httpx.Response(200, json=[
+        {"id": 10, "user": {"login": "alice"}, "body": "/approve abc1234", "created_at": "2026-10-10T03:00:00Z"}]))
+    respx.get(f"{API}{R}/collaborators/alice/permission").mock(
+        return_value=httpx.Response(200, json={"permission": "write"}))
+    respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": runs}))
+    respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": statuses}))
+    return await acts(tmp_path, gh, required_checks=["mia-data/crops"]).observe_pr(ObserveInput(5))
+
+
+@respx.mock
+async def test_required_check_missing_means_pending(tmp_path, gh):
+    snap = await _observe_required(tmp_path, gh, [{"name": "check", "status": "completed", "conclusion": "success"}], [])
+    assert snap.approved and snap.checks == "pending"
+    assert decide(snap, [], 0, 3)[0] == WAIT
+
+
+@respx.mock
+async def test_required_check_failed_means_failure(tmp_path, gh):
+    snap = await _observe_required(tmp_path, gh, [{"name": "check", "status": "completed", "conclusion": "success"}],
+                                   [{"context": "mia-data/crops", "state": "failure"}])
+    assert snap.checks == "failure"
+
+
+@respx.mock
+async def test_required_check_passed_means_success(tmp_path, gh):
+    snap = await _observe_required(tmp_path, gh, [{"name": "check", "status": "completed", "conclusion": "success"}],
+                                   [{"context": "mia-data/crops", "state": "success"}])
+    assert snap.checks == "success"
 
 
 @respx.mock

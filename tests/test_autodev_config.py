@@ -76,3 +76,14 @@ def test_env_override_into_an_empty_section(tmp_path, monkeypatch):
     p.write_text(f"github: {{repo: o/r}}\npaths: {{work_root: {tmp_path}}}\ntemporal:\n")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "example:7233")
     assert load_config(p).temporal.address == "example:7233"
+
+
+def test_trusted_bots_must_be_apps(tmp_path):
+    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]"]}).github.trusted_bots == ["x[bot]"]
+    with pytest.raises(ValueError, match="trusted_bots"):
+        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
+
+
+def test_max_budget_must_be_positive(tmp_path):
+    with pytest.raises(ValueError, match="max_budget_usd"):
+        make_cfg(tmp_path, agent={"max_budget_usd": 0})

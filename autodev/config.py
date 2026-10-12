@@ -41,6 +41,8 @@ class GitHubCfg(BaseModel):
     api_url: str = "https://api.github.com"
     git_url: str | None = None  # default https://github.com/<repo>.git; tests use a local path
     protected_paths: list[str] = [".github/"]
+    trusted_bots: list[str] = []  # app logins ("name[bot]") whose `go` label counts without a permission lookup
+    required_checks: list[str] = []  # status contexts / check-run names that must be present and green before merge
 
 
 class TemporalCfg(BaseModel):
@@ -64,6 +66,7 @@ class AgentCfg(BaseModel):
     extra_mounts: list[str] = []  # "PATH:ro" only (read-write mounts are not allowed)
     path_prepend: list[str] = []  # dirs put first on PATH inside the job (e.g. where pixi lives)
     max_revisions: int = 3
+    max_budget_usd: float | None = None  # passed to `claude -p --max-budget-usd`
     api_key_env: str | None = None  # bill the API with this env var's key instead of the broker account's login
 
 
@@ -81,6 +84,10 @@ class Config(BaseModel):
         g = self.github
         if g.auth == "app" and not (g.app_id and g.installation_id and g.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
+        if bad := [b for b in g.trusted_bots if not b.endswith("[bot]")]:
+            raise ValueError(f"github.trusted_bots: {bad} must be app logins ending in '[bot]'")
+        if self.agent.max_budget_usd is not None and self.agent.max_budget_usd <= 0:
+            raise ValueError("agent.max_budget_usd must be positive")
         # canonical: csub rejects non-canonical mounts, and round dirs (under work_root) are mounts
         self.paths.state_dir = self.paths.state_dir.expanduser().resolve()
         self.paths.work_root = self.paths.work_root.expanduser().resolve()

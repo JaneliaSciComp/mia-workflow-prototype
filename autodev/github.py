@@ -205,11 +205,11 @@ class GitHub:
     async def pr_review_comments(self, number: int) -> list[dict]:
         return [c async for c in self._paged(f"/repos/{self.repo}/pulls/{number}/comments")]
 
-    async def check_state(self, sha: str) -> str:
+    async def check_state(self, sha: str, required: list[str] = ()) -> str:
         runs = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/check-runs",
                                    params={"per_page": 100})).json()["check_runs"]
         statuses = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status")).json()["statuses"]
-        return combine_checks(runs, statuses)
+        return combine_checks(runs, statuses, required)
 
     async def merge_pr(self, number: int, sha: str) -> tuple[bool, str]:
         """Squash-merge exactly `sha`. GitHub refusing (protection, conflict, moved head) is a result, not an error."""

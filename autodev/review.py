@@ -81,10 +81,12 @@ def handled_ids(comments: list[dict], marker_prefix: str, bot: str) -> set[str]:
     return out
 
 
-def combine_checks(check_runs: list[dict], statuses: list[dict]) -> str:
+def combine_checks(check_runs: list[dict], statuses: list[dict], required: list[str] = ()) -> str:
     states = ["pending" if r.get("status") != "completed" else
               "failure" if r.get("conclusion") in _FAILED else "success" for r in check_runs]
     states += [{"success": "success", "pending": "pending"}.get(s.get("state"), "failure") for s in statuses]
-    if not states:
+    seen = {r.get("name") for r in check_runs} | {s.get("context") for s in statuses}
+    if not states and not required:
         return "none"
-    return next((s for s in ("failure", "pending") if s in states), "success")
+    out = next((s for s in ("failure", "pending") if s in states), "success")
+    return "pending" if out == "success" and not seen.issuperset(required) else out
