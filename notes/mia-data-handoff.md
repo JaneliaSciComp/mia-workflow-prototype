@@ -51,10 +51,12 @@ on your behalf are listed at the end: read them, they are the decisions you did 
    (the broker must be running for the csub row: start it with step 5 first if needed).
 5. **Bring up.** `pixi run ad up` (Temporal dev server + autodev), then `scripts/mia-data-up.sh` (broker,
    sandboxed worker, schedule). `pixi run md init-labels`; `pixi run md seed --dry-run`; `pixi run md seed`.
-6. **First real check.** Open the two snippet PRs (or merge them by review; they are human-authored), then
-   `pixi run md test-pr <pr> --binding snippets/tiff-zip-member/examples/bbbc034-hipsc-nuclei-3d.yaml --record bbbc034-hipsc-nuclei-3d`.
+6. **First real check (optional).** Both snippets are already on `main`, so there is no snippet PR to test.
+   To exercise `test-pr` anyway, open a throwaway PR that touches anything under `snippets/tiff-zip-member/`,
+   then `pixi run md test-pr <pr> --binding snippets/tiff-zip-member/examples/bbbc034-hipsc-nuclei-3d.yaml --record bbbc034-hipsc-nuclei-3d`.
    The PR comment should show four crops with nucleus overlays inline. This is also the first check that
-   `?raw=true` images render in the private repo, as zarr-doctor's did.
+   `?raw=true` images render in the private repo, as zarr-doctor's did. Otherwise skip to step 7, which runs the
+   same crop test through the issue path.
 7. **Milestone 3.** Add `data:go` to the bbbc034 issue: expect `matching → testing → review` with the crops in
    the issue; add `data:approve`; expect `cropping → done` with 16 crops. Then add `data:go` again after `done`:
    the second round must submit a crop job with `--existing` (exercises the manifest-directory mount fix).
