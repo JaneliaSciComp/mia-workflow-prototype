@@ -1,7 +1,7 @@
 # MIA crops: snippets, development and production cropping — Spec
 
-**Status:** draft v0.5 · 2026-10-11 · not yet approved. A proof of concept: 2D PNG crops only.
-**Repos:** this repo (orchestration, new package `mia_data/`), [JaneliaSciComp/mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) (issues only),
+**Status:** draft v0.8 · 2026-10-11 · not yet approved. A proof of concept: 2D PNG crops only.
+**Repos:** this repo (orchestration, new package `mia_data/`), [JaneliaSciComp/mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) (issues and crop galleries),
 [JaneliaSciComp/mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) (conversion snippets + their harness), [AI-HHMI/mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) (read-only input)
 
 ## 0. Summary
@@ -16,8 +16,8 @@ issue in `mia-workflow-data`. A human triggers the issue, and a durable Temporal
    writes a binding: which files to read, with which parameters.
 2. **Develop** (only if no snippet fits). The worker opens an issue in `mia-snippets`, and autodev turns it
    into a PR adding a new snippet together with the binding it was tested on.
-3. **Test and review.** Test crops are extracted, and a link to view them is posted. **A human approves every
-   binding before production.**
+3. **Test and review.** Test crops are extracted, committed to a `galleries` branch of `mia-workflow-data`
+   and shown in the issue. **A human approves every binding before production.**
    - A new snippet is approved by reviewing its PR. The worker publishes a required check on the PR's exact
      head commit, and after the merge a tree-hash comparison confirms that the merged snippet is the one that
      was tested.
@@ -47,7 +47,7 @@ are not specific to 2D: the same readers will serve the 3D crops later.
   at test crops made from that exact binding and snippet commit. New snippets are approved by a PR review that
   is tied to a passing crop check on the same head. Matched bindings are approved with `data:approve` on the
   data issue.
-- **The data issue always shows where the dataset stands**, with links to the PR and to the sample crops.
+- **The data issue always shows where the dataset stands**, with a link to the PR and the sample crops inline.
 - **Crops are reproducible and carry provenance.** Every crop can be regenerated from its recorded seed and
   coordinates, and records the dataset record and its commit, licence, source file and its validators, plane,
   box, and the snippet and harness versions that produced it.
@@ -107,7 +107,7 @@ are not specific to 2D: the same readers will serve the 3D crops later.
 
 | where | what | changes |
 |---|---|---|
-| `mia-workflow-data` | one issue per dataset; labels show its stage (§4) | new repo, issues only |
+| `mia-workflow-data` | one issue per dataset; labels show its stage (§4); a `galleries` branch holds the test and production crops (§7.4) | new repo |
 | `mia-snippets` | `SPEC.md`, `harness/`, `snippets/<name>/`, `WITHDRAWN.yaml`, CI checks | new repo |
 | this repo, `mia_data/` | seed CLI, `MiaDataDataset`, `MiaDataPoll`, activities, match prompt, `test-pr` | new package |
 | this repo, `autodev/` | GitHub client and app auth, csub job runner, await-queue pattern | reused by import (§12) |
@@ -147,7 +147,7 @@ any stage ──> data:needs-human (comment says why) · data:ineligible (no pla
 
   A finished dataset gets additional crops this way. The system never deletes a crop (§5.6).
 - **Status comment.** One bot comment per issue is edited in place (found by a hidden marker). It shows the
-  stage, the binding (§5.4) and its hash, the snippet PR link, the sample-crop link and production totals. It is
+  stage, the binding (§5.4) and its hash, the snippet PR link, the latest crops and production totals. It is
   a display, not where execution state is stored (§8.1). Every stage change also posts a short new comment, so
   the history stays readable.
 
@@ -329,7 +329,7 @@ harness smoke   <binding.yaml> --snippets <dir> --record <record.yaml>   # open 
 harness crop    <binding.yaml> --snippets <dir> --record <record.yaml> --n N --seed S --round R --batch B
                 --out DIR [--existing MANIFEST]                        # sample + write crops (§6.2, §6.3)
 harness verify  DIR --binding <binding.yaml> [--existing MANIFEST]     # §6.4 checks; loads no snippet code
-harness preview DIR --out PREVIEW                                      # overlay PNG per crop + index.html
+harness preview DIR --out PREVIEW                                      # label overlay PNG per crop (§6.7)
 ```
 
 `--snippets` is a read-only snapshot of the exact SHA recorded in the workflow, never a branch resolved again.
@@ -383,11 +383,25 @@ are unique.
 
 **Raw to PNG.** PNG holds only unsigned 8- or 16-bit greyscale, so every mapping is recorded in `crop.json`:
 
-| source dtype | PNG | mapping |
-|---|---|---|
-| uint8, uint16 | 8-bit, 16-bit | none |
-| int8, int16 | 8-bit, 16-bit | `+128` / `+32768` (lossless, offset recorded) |
-| float and anything else | 16-bit | linear from the crop's finite min→0 to finite max→65535 (lossy; min/max recorded). `+inf`→65535, `-inf`→0, NaN→0; counts of each recorded. A constant crop is already rejected (§6.2). |
+One mapping for every source dtype: **a per-crop percentile stretch to 16-bit.** `lo` = p0.1 and `hi` = p99.9
+of the crop's finite values; `(v - lo) / (hi - lo)` is clipped to 0–1 and scaled to 0–65535. `+inf` maps to
+65535, `-inf` and NaN to 0. `crop.json` records the source dtype, `lo`, `hi`, the percentiles used and the
+non-finite counts. A constant crop is already rejected (§6.2), so `hi > lo`.
+
+The stretch is adapted from zarrcade's `stretch_with_max_gain_bg_guard`
+([`zarrcade/core/thumbnails.py`](https://github.com/JaneliaSciComp/zarrcade/blob/main/zarrcade/core/thumbnails.py)).
+What is kept: the p0.1–p99.9 percentile stretch and the 16-bit target. What is dropped, and why:
+- **The gain cap (`max_gain=8`)** assumes input already spans a 16-bit range. On uint8 data the gain is 257, so
+  the cap would leave the image black; on 12-bit camera data it would halve the brightness. Its purpose, not
+  amplifying noise in near-empty patches, is served by the content filter (§6.2).
+- **The MAD black-level guard** is disabled by default in zarrcade (`k_bg=-inf`) and needs scipy. Not needed
+  with the flat-patch filter.
+- MIP, multiscale selection, colorify, CLAHE and matplotlib don't apply to a single-channel 256×256 patch.
+
+The result is a numpy-only function of a few lines. It is lossy by design: 0.2% of values are clipped and
+integer data is rescaled, which is the point of the question this answers (float data has no natural range)
+and makes `raw.png` directly viewable in a browser and in a GitHub comment. Exact source values are always
+recoverable by re-reading the recorded box from the source, and approximately from `lo` and `hi`.
 
 **Labels to PNG.**
 
@@ -402,7 +416,7 @@ are unique.
 - the source volume id (raw index and URL(s)), plus each source file's validators from `io`
 - the plane `{z, c}` and box `{y, x, h: 256, w: 256}`
 - `voxel_size_nm` and the physical extent in µm
-- the source dtype and its PNG mapping
+- the source dtype and the stretch (`lo`, `hi`, percentiles, non-finite counts)
 - raw intensity statistics over finite values: min, p1, p50, p99, max
 - the label keys and their PNG mappings
 - the snippet name and `snippets_commit` for each array, plus the harness commit and environment digest
@@ -427,7 +441,7 @@ the verify job's report, never the crop job's. Every crop must pass these checks
 - the raw PNG's checksum is unique within the dataset, except that the same `crop_id` with the same checksum
   counts as already published
 
-The verify job then runs `harness preview` to build the gallery.
+The verify job then runs `harness preview` to draw the label overlays (§6.7).
 
 ### 6.5 Limits
 
@@ -463,6 +477,14 @@ cache, `work_root/_cache/<record-id>/`, keyed by the sha256 of URL + validators.
 - **Retention** is configuration (§10). `ponytail:` no eviction yet; the cache is deleted by hand once a
   dataset is `done`.
 
+### 6.7 Label overlays
+
+`raw.png` is already viewable: the stretch in §6.3 is the same one a thumbnail would get. Label PNGs are not,
+since instance IDs and class values render as near-black. So `harness preview` writes one `overlay.png` per
+crop: `raw.png` with every paired label's boundaries drawn on it, one colour per label key, 8-bit RGB. The
+colours and the boundary width are harness constants. There are no separate thumbnails and no contact sheet;
+the comment embeds `raw.png` and `overlay.png` directly (§7.4).
+
 ## 7. Steps in detail
 
 ### 7.1 Seed: `mia-data seed [--dry-run]`
@@ -479,8 +501,8 @@ cache, `work_root/_cache/<record-id>/`, keyed by the sha256 of URL + validators.
      `maybe-small` when no recorded raw shape has Y and X ≥ 256; it is a hint only, and §4.1 decides.
    - **Licence.** If `license.spdx` is not in `crops.licences` (default `[CC0-1.0, CC-BY-4.0, CC-BY-3.0, MIT]`),
      the issue is created with `data:ineligible` and `licence-excluded`, and a `go` on it is refused with a
-     comment. Today that covers 8 datasets (custom, NC, GPL). Crops are served from `public_url`, and
-     recording a licence doesn't make serving it compliant.
+     comment. Today that covers 8 datasets (custom, NC, GPL). Crops are committed to a GitHub repo, and
+     recording a licence doesn't make publishing them compliant.
 4. Rate limits: `autodev.github.GitHub` already throttles creates. Re-running only adds what's new.
 
 ### 7.2 Match (agent job)
@@ -555,7 +577,10 @@ PR head, a merge commit, or a matched binding's `snippets_commit`):
 1. **crop job:** `harness crop --n 4` (`test_per_round`)
 2. **verify job:** `harness verify`, then `harness preview` (no snippet code, §6.4)
 
-Output goes to `<storage.root>/_tests/<record-id>/<round-id>/<sha>/`. Before adopting a PR's example binding,
+Output goes to `<storage.root>/_tests/<record-id>/<round-id>/<sha>/`: the crop job's workspace is its `crops/`
+subdirectory, and the verify job writes `preview/` beside it (§6.7). Only files the verify job checked
+(`raw.png`, which must decode as a 256×256 16-bit PNG) or wrote (`overlay.png`) leave the cluster; anything
+else a PR-head snippet drops in `crops/` is never published. `storage.root` must be under the csub policy's `allowed_roots`. Before adopting a PR's example binding,
 the worker validates it: same record, URLs from the record, valid schema.
 
 **Report.** The worker posts on the data issue, and on the PR if there is one:
@@ -563,16 +588,26 @@ the worker validates it: same record, URLs from the record, valid schema.
 - the bytes fetched
 - a table of crop planes and boxes
 - the binding and its `reasons`
-- **a link to view the sample crops**: `storage.public_url` plus the path to the test's `index.html` gallery
-  (§10)
+- **the crops, inline.** The worker commits each crop's `raw.png` and `overlay.png` to the `galleries` branch
+  of `mia-workflow-data` under `galleries/<record-id>/<round-id>/<sha>/<crop_id>/`, with the binding and the
+  verify report beside them, and embeds them in the comment as a two-column table (raw, overlay; one row per
+  crop, captioned with `crop_id`, plane and box) using
+  `![…](https://github.com/<org>/mia-workflow-data/blob/galleries/<path>?raw=true)`. This is zarr-doctor's
+  results path, which already rendered PNGs in issue comments from this codebase: an orphan branch created on
+  first use, one Contents API `PUT` per file guarded by an existence check and an in-process lock (concurrent
+  PUTs to one branch race with 409), and the `?raw=true` blob URL. The code is in git history at
+  `7abe195~1:zarr_doctor/github_api.py` (`ensure_branch`, `file_exists`, `upsert_file`) and
+  `zarr_doctor/activities.py` (`publish_results`); it was dropped when the client was folded into autodev, so
+  restore it rather than rewrite it. Four test crops are eight files of about 100 KB each. `ponytail:` PNGs on
+  a branch is fine for a demo; move to real hosting (§15) before the branch reaches a few hundred MB.
 
 For a PR head, the worker also publishes the `mia-data/crops` status (pending, then success or failure) on that
-exact SHA, with the gallery link. A result for an old head or an old round stays visible as history, but never
+exact SHA, with the comment's URL as the status target. A result for an old head or an old round stays visible as history, but never
 advances the stage or overwrites the current status.
 
 **Next stage:**
-- **Current PR head passes:** `data:pr-ready`, with the PR link and the gallery link.
-- **Matched snippet passes:** `data:review`. A human looks at the gallery and the binding, then adds
+- **Current PR head passes:** `data:pr-ready`, with the PR link and the crops.
+- **Matched snippet passes:** `data:review`. A human looks at the crops and the binding, then adds
   `data:approve`, which moves the issue to `cropping`. If something is wrong, they comment and re-trigger, or
   leave it.
 - **Merge commit passes** (only when tree hashes differed): `cropping`.
@@ -595,7 +630,9 @@ galleries show they're needed (§15).
 **Worker.** After the job ends:
 1. It runs the verify job.
 2. It publishes every crop that passes (§7.6).
-3. It posts the totals and the gallery link.
+3. It commits the published crops' `raw.png` and `overlay.png` under
+   `galleries/<record-id>/<round-id>/production/<crop_id>/` on the `galleries` branch and posts the totals with
+   the table of crops inside a `<details>` block.
 4. It sets `data:done`, or `needs-human` if fewer than half of the (lowered) `n` passed.
 
 **Partial results stay published.** Crops that passed verification are published even when the round ends in
@@ -612,7 +649,8 @@ from the verify job's report.
      skip it.
    - If it exists with different checksums, stop and go to `needs-human`.
    - Otherwise copy the crop into a temporary directory named per attempt,
-     `<dataset folder>/.tmp-<crop_id>-<activity attempt id>/`, check the checksums, and rename it into place.
+     `<dataset folder>/.tmp-<crop_id>-<uuid4>/` (a fresh UUID, not Temporal's attempt number, which restarts
+     at 1 when the Activity is scheduled again), check the checksums, and rename it into place.
 2. Rebuild `manifest.json` from the `crop.json` files and `WITHDRAWN.yaml`: write it to a temporary file, then
    rename.
 
@@ -694,8 +732,9 @@ heartbeat, and a worker restart reattaches to the same job.
   state and merge SHA from GitHub, so a delayed signal can never replace a newer head.
 - **Results must match the expected test.** A test result advances the stage only if its round, SHA and test
   ID all match the test the workflow is waiting for. A stale result is kept as history and nothing more.
-- **GitHub writes** (issues, comments, statuses) carry hidden markers or are naturally idempotent (a status is
-  set per SHA and context), so a retry finds the earlier write instead of repeating it.
+- **GitHub writes** (issues, comments, statuses, gallery files) carry hidden markers or are naturally idempotent
+  (a status is set per SHA and context; a gallery file is written by path and skipped when it already exists
+  with the same content), so a retry finds the earlier write instead of repeating it.
 
 ### 8.4 Continue-As-New
 
@@ -748,7 +787,8 @@ github:   {data_repo: JaneliaSciComp/mia-workflow-data, snippets_repo: JaneliaSc
            catalog_repo: AI-HHMI/mia-agentic-search, auth: app, …}
 temporal: {address: …, namespace: mia-data}
 paths:    {state_dir: /shared/TBD/mia-data-state, work_root: /shared/TBD/mia-data-work}
-storage:  {root: /shared/TBD/mia-crops, public_url: null}   # public_url: HTTP base serving root (e.g. fileglancer)
+storage:  {root: /shared/TBD/mia-crops}
+gallery:  {branch: galleries}                               # orphan branch of github.data_repo (§7.4)
 crops:    {size: 256, per_round: 16, test_per_round: 4, per_plane: 4, per_file: 8,
            licences: [CC0-1.0, CC-BY-4.0, CC-BY-3.0, MIT]}
 limits:   {job_bytes: 5e9, job_walltime_min: 120, agent_max_budget_usd: 5,
@@ -804,6 +844,8 @@ with stub Activities.
 - **Hosts:** a binding host missing from the probed policy → no submission, and `needs-human` naming the
   host. A redirect host is added to the job's request from `network.redirect_hosts`. A GitHub host is never
   requested.
+- **Gallery commits:** writing the same file twice makes one commit; a retry after a crash completes the set;
+  the branch is created once (zarr-doctor's `test_github_api.py` at `7abe195~1` covered this).
 - **Pinning:** changing config, `main` or the harness between retries doesn't change an admitted round.
 - **The status comment** renders correctly, and the **replay test** passes on recorded histories for both
   paths.
@@ -812,7 +854,10 @@ with stub Activities.
 - harness unit tests:
   - sampling reproducibility, the plane and file batching, capacity lowering, and the shared redraw budget
   - the content filter (including non-finite values) and overlap rejection
-  - the PNG mappings for every row of §6.3, including 0/255 binary masks and NaN/inf floats
+  - the raw stretch of §6.3 on uint8, uint16, int16 and float patches, with hot pixels, NaN and inf: a
+    deterministic 16-bit result, `lo`/`hi` recorded, 0.2% clipped; the label mappings, including 0/255 binary
+    masks
+  - `preview` draws one overlay per crop with a boundary colour per label key
   - the byte cap, `io` range and cache behaviour against a local HTTP server, and refusing a server that
     ignores `Range`
   - a redirect to a host outside `MIA_HARNESS_ALLOWED_HOSTS` raises `HostNotAllowed` with the chain, before
@@ -845,7 +890,9 @@ candidate: a zip member with labels and 1024×1024 planes. Before scaling out, a
    - `github.required_checks: [mia-data/crops]`. A required context that is missing or pending counts as
      pending, so autodev waits instead of attempting a merge that branch protection would refuse.
    - The GitHub client gains commit statuses, tree SHAs of a directory at a ref, raw file reads, and issues and
-     comments found by marker.
+     comments found by marker. It gets back zarr-doctor's `ensure_branch`, `file_exists` and `upsert_file`
+     (with its commit lock) from `7abe195~1:zarr_doctor/github_api.py` for the gallery files. The mia-data app
+     needs Contents RW on `mia-workflow-data`.
    - A `snippets` deployment config with `agent.allow_hosts` set to the catalog's data hosts and their redirect
      hosts, and `extra_mounts`
      giving read-only access to the pinned harness checkout, so its agent can run `harness smoke` on real data.
@@ -856,27 +903,25 @@ candidate: a zip member with labels and 1024×1024 planes. Before scaling out, a
 5. **Network setup** (one-time, then again for every new host):
    - Enable the `[agents]` `claude` table in the service account's `broker.toml`.
    - Add every catalog data host to `allowed_hosts`.
-   - **Redirect probe.** From inside a csub job, run `curl -sIL` on each binding or sample URL, and record the
-     redirect chain. Add every host in the chain to the policy, and add the hops that aren't the record's own
+   - **Redirect probe.** From a host with normal egress (the worker host, not a sandboxed job: the proxy would
+     block the very hop you are trying to discover), run `curl -sIL` on each binding or sample URL, and record
+     the redirect chain. If only sandboxed egress is available, iterate: allow one hop, re-run, repeat. Add every host in the chain to the policy, and add the hops that aren't the record's own
      host to `network.redirect_hosts`. Keep the probe output in the runbook so the next person can see why a
      host is there.
    - Confirm that FTP is unusable and that the EMPIAR records' https mirrors work.
 
 ## 13. Open questions (defaults in bold)
 
-1. **Float to PNG:** **per-crop min/max** / per-dataset percentiles (needs a stats pass first).
-2. **Gallery hosting:** where `storage.public_url` points (fileglancer over the storage root?). Until it's
-   set, comments give file paths.
-3. **Byte cap for agent downloads:** can the agentic-sandbox allowlist proxy count bytes per job? If not,
+1. **Byte cap for agent downloads:** can the agentic-sandbox allowlist proxy count bytes per job? If not,
    walltime is the bound (§6.5).
-4. **Who maintains the csub policy, and how quickly?** A dataset on a new host, or one behind a new redirect
-   target, stops at `needs-human` until an operator edits `broker.toml` on the service account (§9). Default:
-   **the comment names the host; an operator probes it, edits the policy and re-triggers.** Automating the
-   probe, e.g. a `mia-data probe-hosts <record>` command that runs the §12.5 job and prints the policy lines
-   to add, is cheap if this happens often. The policy edit itself stays manual.
-5. **Review fatigue on the matched path:** every matched binding needs a `data:approve` today. If galleries
-   for default bindings (empty `params`, no overrides in `reasons`) are routinely fine, they could skip review.
+2. **Review fatigue on the matched path:** every matched binding needs a `data:approve` today. If crops for
+   default bindings (empty `params`, no overrides in `reasons`) are routinely fine, they could skip review.
    Keep the gate until there is evidence.
+
+Decided on 2026-10-11: every raw crop is stored with zarrcade's percentile stretch to 16-bit, so `raw.png` is
+both the data and the preview (§6.3); crops are committed per file to a `galleries` branch of
+`mia-workflow-data` and embedded in the issue, as zarr-doctor did (§7.4); the csub policy is edited by hand
+for now (§15).
 
 ## 14. Build order
 
@@ -885,7 +930,7 @@ candidate: a zip member with labels and 1024×1024 planes. Before scaling out, a
 | 0 | step 0 (§12.1–12.3) | one Temporal server with `mia-data` and `snippets` namespaces; job runner split; autodev tests green |
 | 1 | `mia-snippets`: `SPEC.md`, harness (`smoke`, `crop`, `verify`, `preview`, `io`, dataset cache), CI check, two hand-written snippets (`tiff-zip-member`, `mrc-http`) | harness tests pass; `test-pr` posts a passing `mia-data/crops` on both PR heads before human merge |
 | 2 | `mia-data seed` | 49 issues in `mia-workflow-data` (8 licence-excluded); a re-run creates none |
-| 3 | `MiaDataDataset`: match → test → review → approve → crop → publish (no develop path) | bbbc034 reaches `data:done` with 16 verified PNG crops and a gallery; a redelivered `go`, a worker restart and an interrupted publication don't duplicate anything |
+| 3 | `MiaDataDataset`: match → test → review → approve → crop → publish (no develop path) | bbbc034 reaches `data:done` with 16 verified PNG crops shown in its issue; a redelivered `go`, a worker restart and an interrupted publication don't duplicate anything |
 | 4 | develop path: autodev `snippets` deployment (§12.3), PR detection, head-bound test crops, tree-hash merge check | one dataset gets a new snippet through a PR, human approval and production; a stale head's result can't pass a gate |
 | 5 | run over all eligible datasets | every issue is `done`, `ineligible` or `needs-human` with a reason |
 
@@ -901,6 +946,14 @@ environment.
 - **2D datasets from the catalog**, not just planes of 3D volumes.
 - **A label-alignment check or an agent quality review** in production, if the galleries show bad crops get
   through.
+- **Gallery hosting off GitHub** (fileglancer or an HTTP server over `storage.root`) with an `index.html`,
+  once the `galleries` branch outgrows a demo.
+- **Per-dataset stretch** (percentiles over the whole volume instead of per crop), if per-crop stretching
+  turns out to flatten contrast between crops of one dataset.
+- **csub policy maintenance.** For now a human edits `broker.toml` on the service account whenever a dataset
+  needs a new host or redirect target, and `needs-human` names the host (§9). If that happens often, add
+  `mia-data probe-hosts <record>`, which runs the §12.5 probe and prints the policy lines to add. The edit
+  itself stays manual.
 - **Resuming killed agent sessions** (`claude -p --resume`) if match jobs become long and costly.
 - **Byte metering across a whole round**, and **dataset-cache eviction**.
 - **Licences beyond the default allowlist**, once their terms for redistribution and training are settled.
