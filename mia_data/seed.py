@@ -11,14 +11,16 @@ log = logging.getLogger(__name__)
 MARKER = "<!-- mia-data:record={} -->"
 MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
 
+ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
+
 
 def _c(x) -> str:
     """Record text is data: no forged markers, no table/line breaks."""
     return " ".join(str(x).split()).replace("<!--", "&lt;!--").replace("|", "\\|")
 
 
-def render_issue(rec: dict, entry: dict, licences: list[str], repo: str = "", path: str = "") -> tuple[str, str, list[str]]:
-    id_, img, spdx = rec["id"], rec.get("imaging") or {}, (rec.get("license") or {}).get("spdx")
+def render_issue(rec: dict, entry: dict, licences: list[str], repo: str = "", path: str = "", id_: str | None = None) -> tuple[str, str, list[str]]:
+    id_, img, spdx = id_ or rec["id"], rec.get("imaging") or {}, (rec.get("license") or {}).get("spdx")
     arrays = (rec.get("technical") or {}).get("arrays") or []
     family = (img.get("modality") or ["unknown"])[0]
     labels = ["data:new" if spdx in licences else "data:ineligible", f"modality:{family}"]
@@ -60,11 +62,17 @@ async def seed(cfg, gh_data, gh_catalog, dry_run: bool = False) -> list[str]:
     for id_, entry in sorted((await catalog.downloaded(gh_catalog)).items()):
         if id_ in have:
             continue
+        if not ID_RE.fullmatch(id_):
+            log.warning("seed: bad record id %r; skipping", id_)
+            continue
         if id_ not in paths:
             log.warning("seed: %s is downloaded but not on main; skipping", id_)
             continue
         rec = await catalog.record(gh_catalog, paths[id_], "main")
-        title, body, labels = render_issue(rec, entry, cfg.crops.licences, gh_catalog.repo, paths[id_])
+        if rec.get("id") not in (None, id_):
+            log.warning("seed: %s has id %r inside; skipping", id_, rec["id"])
+            continue
+        title, body, labels = render_issue(rec, entry, cfg.crops.licences, gh_catalog.repo, paths[id_], id_)
         print(f"{'would create' if dry_run else 'creating'} {title} {labels}", flush=True)
         if not dry_run:
             await gh_data.create_issue(title, body, labels)

@@ -149,3 +149,17 @@ async def test_forged_marker_in_record_text_does_not_block_another(tmp_path, gh_
     # an existing issue's forged marker later in its body is not a marker either
     from mia_data.seed import MARKER_RE
     assert MARKER_RE.match("intro\n<!-- mia-data:record=x -->") is None
+
+
+@respx.mock
+async def test_record_with_other_id_inside_is_skipped(tmp_path, gh_data, gh_catalog, caplog):
+    route = mock_catalog(ids={"bbbc034-hipsc-nuclei-3d", "hf-pytc-zebrafinch-j0126-ffn-em"})
+    rec = (FIX / "records" / "bbbc034-hipsc-nuclei-3d.yaml").read_text().replace(
+        "id: bbbc034-hipsc-nuclei-3d", "id: hf-pytc-zebrafinch-j0126-ffn-em", 1)
+    assert "id: hf-pytc" in rec
+    respx.get(f"{API}/repos/o/catalog/contents/datasets/3D/fluorescence-other/bbbc034-hipsc-nuclei-3d.yaml",
+              params={"ref": "main"}).respond(200, content=rec.encode())
+    assert await seed(make_cfg(tmp_path), gh_data, gh_catalog, False) == ["hf-pytc-zebrafinch-j0126-ffn-em"]
+    (b,) = bodies(route)
+    assert b["title"].startswith("hf-pytc-zebrafinch") and b["body"].count("mia-data:record=") == 1
+    assert "bbbc034" in caplog.text
