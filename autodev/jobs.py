@@ -73,13 +73,16 @@ class CsubJobs:
             self._client = self._factory()
         return self._client
 
-    async def submit(self, key: str, spec: JobSpec) -> str:
-        """Submit at most once per key: id file -> cwd lookup -> submit. Returns the job id."""
+    async def submit(self, key: str, spec: JobSpec | Callable[[], JobSpec]) -> str:
+        """Submit at most once per key: id file -> cwd lookup -> submit. Returns the job id.
+
+        A callable spec is built only when the id file is missing (it holds the workspace the cwd lookup needs)."""
         if not JOB_KEY_RE.fullmatch(key):
             raise ValueError(f"invalid job key {key!r}: want {JOB_KEY_RE.pattern}")
         f = self.id_dir / f"{key}.id"
         if f.exists():
             return f.read_text().strip()
+        spec = spec() if callable(spec) else spec
         found = [s for s in await asyncio.to_thread(self.client.status) if os.path.realpath(getattr(s, "cwd", None) or "/nonexistent") == os.path.realpath(spec.workspace)]
         if found:  # same workspace (unique per job): submitted, then the worker died before writing the id file
             job_id = found[0].job_id

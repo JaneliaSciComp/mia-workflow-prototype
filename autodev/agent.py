@@ -95,7 +95,7 @@ class AgentJobs:
         """Submit once per (issue, key, round); a retry returns the same job."""
         a = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{rnd}"
-        spec = jobs.JobSpec(
+        spec = lambda: jobs.JobSpec(  # noqa: E731  built lazily: env is read only when no id file exists
             name=f"autodev-{issue}-r{rnd}",  # csub rejects names containing the username (autodev-<you>); session = deployment
             command=job_script(self.cfg, ws.base_sha), workspace=ws.dir, walltime_min=a.walltime_min, cpus=a.cpus,
             mem_mb=a.mem_mb, allow_hosts=list(a.allow_hosts), claude=True,

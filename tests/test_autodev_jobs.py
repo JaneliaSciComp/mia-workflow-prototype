@@ -51,3 +51,15 @@ async def test_wait_reads_exit_code_when_csub_forgot_the_job(tmp_path):
     (tmp_path / "exit_code").write_text("3\n")
     out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", str(tmp_path), lambda s: None)
     assert (out.state, out.exit_code) == ("EXIT", 3)
+
+
+async def test_recorded_id_skips_building_the_spec(tmp_path, monkeypatch):
+    from autodev.agent import AgentJobs
+    from autodev.models import Workspace
+    from autodev_helpers import K, make_cfg
+
+    monkeypatch.delenv("UNSET_KEY", raising=False)
+    j = AgentJobs(make_cfg(tmp_path, agent={"api_key_env": "UNSET_KEY"}), client_factory=lambda: pytest.fail("client used"))
+    (j.cfg.paths.state_dir / "jobs").mkdir(parents=True)
+    (j.cfg.paths.state_dir / "jobs" / f"issue-7-{K}-r1.id").write_text("444")
+    assert (await j.submit(7, K, 1, Workspace(str(tmp_path), "a", "b"))).job_id == "444"
