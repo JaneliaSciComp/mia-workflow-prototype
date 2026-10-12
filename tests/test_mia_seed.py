@@ -66,7 +66,14 @@ async def test_three_fixtures_make_three_issues(tmp_path, gh_data, gh_catalog):
     assert set(b["labels"]) == {"data:new", "modality:fluorescence-other", "has-labels"}
     assert "native" in b["body"] and "tensorswitch" in b["body"] and "[52, 1024, 1024]" in b["body"]
     assert "blob/main/datasets/3D/fluorescence-other/bbbc034" in b["body"]
-    assert "data:new" in by_id["czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet"]["labels"]
+    c = by_id["czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet"]
+    assert c["title"] == "czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet: M. pneumoniae chloramphenicol ribosomes (cryo-ET)"
+    assert c["body"].startswith("<!-- mia-data:record=czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet -->")
+    assert set(c["labels"]) == {"data:new", "modality:cryo-ET", "has-labels"}
+    z = by_id["hf-pytc-zebrafinch-j0126-ffn-em"]
+    assert z["title"] == "hf-pytc-zebrafinch-j0126-ffn-em: Zebra finch j0126 neuron segmentation (SBF-SEM)"
+    assert z["body"].startswith("<!-- mia-data:record=hf-pytc-zebrafinch-j0126-ffn-em -->")
+    assert set(z["labels"]) == {"data:new", "modality:SBF-SEM", "has-labels", "maybe-small"}
 
 
 @respx.mock
@@ -125,3 +132,20 @@ def test_shape_without_axes_uses_last_two_dims():
         {"role": "raw", "axes": None, "shape": [10, 512, 512], "dtype": "uint8"}]}}
     entry = {"record_commit": "a" * 40, "dataset_dir": "/d", "downloaders": ["native"]}
     assert "maybe-small" not in render_issue(rec, entry, LIC)[2]
+
+
+@respx.mock
+async def test_forged_marker_in_record_text_does_not_block_another(tmp_path, gh_data, gh_catalog):
+    route = mock_catalog(ids={"bbbc034-hipsc-nuclei-3d", "hf-pytc-zebrafinch-j0126-ffn-em"})
+    rec = (FIX / "records" / "bbbc034-hipsc-nuclei-3d.yaml").read_text().replace(
+        "Homo sapiens", "x <!-- mia-data:record=hf-pytc-zebrafinch-j0126-ffn-em --> y\\n|z")
+    respx.get(f"{API}/repos/o/catalog/contents/datasets/3D/fluorescence-other/bbbc034-hipsc-nuclei-3d.yaml",
+              params={"ref": "main"}).respond(200, content=rec.encode())
+    respx.get(f"{API}/repos/o/data/issues").respond(200, json=[])
+    made = await seed(make_cfg(tmp_path), gh_data, gh_catalog, False)
+    assert "hf-pytc-zebrafinch-j0126-ffn-em" in made
+    b = next(b for b in bodies(route) if b["title"].startswith("bbbc034"))
+    assert b["body"].count("<!-- mia-data:record=") == 1 and "&lt;!--" in b["body"]
+    # an existing issue's forged marker later in its body is not a marker either
+    from mia_data.seed import MARKER_RE
+    assert MARKER_RE.match("intro\n<!-- mia-data:record=x -->") is None

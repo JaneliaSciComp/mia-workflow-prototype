@@ -9,7 +9,12 @@ from . import catalog
 
 log = logging.getLogger(__name__)
 MARKER = "<!-- mia-data:record={} -->"
-MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")
+MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
+
+
+def _c(x) -> str:
+    """Record text is data: no forged markers, no table/line breaks."""
+    return " ".join(str(x).split()).replace("<!--", "&lt;!--").replace("|", "\\|")
 
 
 def render_issue(rec: dict, entry: dict, licences: list[str], repo: str = "", path: str = "") -> tuple[str, str, list[str]]:
@@ -34,22 +39,22 @@ def render_issue(rec: dict, entry: dict, licences: list[str], repo: str = "", pa
     urls = data.get("download_url") or []
     lines = [MARKER.format(id_), "",
              f"- Record: [main]({base}/main/{path}), [at `{entry['record_commit'][:12]}`]({base}/{entry['record_commit']}/{path})",
-             f"- Licence: {spdx}", f"- Modality: {', '.join(img.get('modality') or [])}",
-             f"- Organism: {', '.join(img.get('organism') or [])}",
-             f"- Voxel size (nm): x={vox.get('x')} y={vox.get('y')} z={vox.get('z')}",
+             f"- Licence: {_c(spdx)}", f"- Modality: {_c(', '.join(img.get('modality') or []))}",
+             f"- Organism: {_c(', '.join(img.get('organism') or []))}",
+             f"- Voxel size (nm): {_c(f"x={vox.get('x')} y={vox.get('y')} z={vox.get('z')}")}",
              f"- Data size: {entry.get('bytes_on_disk')} bytes",
-             f"- Source: {', '.join([urls] if isinstance(urls, str) else urls)}",
-             f"- Downloaded by: {', '.join(entry['downloaders'])}", f"- Dataset dir: `{entry['dataset_dir']}`", "",
+             f"- Source: {_c(', '.join([urls] if isinstance(urls, str) else urls))}",
+             f"- Downloaded by: {', '.join(entry['downloaders'])}", f"- Dataset dir: `{_c(entry['dataset_dir'])}`", "",
              "| role | axes | shape | dtype |", "|---|---|---|---|",
-             *(f"| {a['role']} | {a.get('axes')} | {a.get('shape')} | {a.get('dtype')} |" for a in arrays)]
+             *(f"| {_c(a['role'])} | {_c(a.get('axes'))} | {_c(a.get('shape'))} | {_c(a.get('dtype'))} |" for a in arrays)]
     if spdx not in licences:
-        lines += ["", f"**Ineligible:** licence `{spdx}` is not in `crops.licences` ({', '.join(licences)}); `go` is refused."]
-    return f"{id_}: {rec.get('short_name') or rec.get('title')}", "\n".join(lines) + "\n", labels
+        lines += ["", f"**Ineligible:** licence `{_c(spdx)}` is not in `crops.licences` ({', '.join(licences)}); `go` is refused."]
+    return f"{id_}: {_c(rec.get('short_name') or rec.get('title'))}", "\n".join(lines) + "\n", labels
 
 
 async def seed(cfg, gh_data, gh_catalog, dry_run: bool = False) -> list[str]:
     """Create the missing issues; returns the record ids created (or that would be, with dry_run)."""
-    have = set(MARKER_RE.findall("\n".join(i.get("body") or "" for i in await gh_data.list_issues(state="all"))))
+    have = {m.group(1) for i in await gh_data.list_issues(state="all") if (m := MARKER_RE.match(i.get("body") or ""))}
     paths = await catalog.record_paths(gh_catalog)
     made = []
     for id_, entry in sorted((await catalog.downloaded(gh_catalog)).items()):
