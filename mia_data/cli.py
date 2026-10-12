@@ -144,7 +144,7 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
     """§12.4: §7.4 on PR <pr>'s head in the snippets repo, synchronously, with `mia-data/crops` on that SHA."""
     from . import catalog
     from .activities import _catalog, _write
-    from .binding import check_binding
+    from .binding import check_binding, https
     from .crop_test import run_crop_test
     from .jobspec import SHA_RE, harness_pin
     from .models import Pins
@@ -155,6 +155,15 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
         raise ValueError(f"bad record id {record_id!r}")
     cfg, gs, gc = acts.cfg, acts.gh_snippets, acts.gh_catalog
     head = (await gs.get_pr(pr))["head"]["sha"]
+    rd = acts._round_dir(rid := f"i0-e{int(pr)}-{head[:7]}")
+    b = yaml.safe_load(binding_file.read_text())
+    for a in [x for k in ("raw", "labels") if isinstance(b, dict) and isinstance(b.get(k), list) for x in b[k]]:
+        if isinstance(a, dict) and isinstance(a.get("urls"), list):  # check_binding's s3:// -> https rewrite
+            a["urls"] = [https(u) if isinstance(u, str) else u for u in a["urls"]]
+    text = yaml.safe_dump(b, sort_keys=False)
+    if (rd / "binding.yaml").is_file() and (rd / "binding.yaml").read_text() != text:  # its jobs would be reused
+        print(f"{head} was already tested with another binding ({rd}); push a new head to test this one")
+        return 1  # the head's status stays as it is
     await acts.set_crop_status(head, "pending", None, "crop test running")
     try:
         rc, note = ((await catalog.downloaded(gc)).get(record_id) or {}).get("record_commit"), ""
@@ -165,15 +174,10 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
             raise ValueError(f"{record_id}: no record on the catalog's main")
         rec = await catalog.record(gc, path, rc)
         pins = Pins(record_id, rc, head, *harness_pin(cfg))
-        b = yaml.safe_load(binding_file.read_text())
         if errs := check_binding(b, rec, set(_catalog(await acts._snapshot(head))), pins=pins):
             print("binding check failed:", *errs, sep="\n  ")
             await acts.set_crop_status(head, "failure", None, "binding check failed")
             return 1
-        rid, text = f"i0-e{int(pr)}-{head[:7]}", yaml.safe_dump(b, sort_keys=False)  # as checked: s3:// now https
-        rd = acts._round_dir(rid)
-        if (rd / "binding.yaml").is_file() and (rd / "binding.yaml").read_text() != text:  # its jobs would be reused
-            raise ValueError(f"{head} was already tested with another binding ({rd}); push a new head to test this one")
         _write(rd / "record.yaml", yaml.safe_dump(rec, sort_keys=False))
         _write(rd / "binding.yaml", text)
         _write(rd / "pins.json", json.dumps(dataclasses.asdict(pins)))
@@ -186,7 +190,13 @@ async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
                           f"the crop job fetched {v.bytes_fetched} bytes.{note}", *(f"- {x}" for x in bad + v.errors),
                           "", g.table if g else ""])
         m = cfg.marker(f"test-pr {head}")
-        url = (await acts._comment_once(gs, pr, f"{acts._clean(body)}\n\n{m}", m)).get("html_url")
+        body = f"{acts._clean(body)}\n\n{m}"
+        if c := await acts._bot_comment(gs, pr, m):  # a rerun: the comment shows the latest result
+            if c.get("body") != body:
+                await gs.edit_comment(c["id"], body)
+        else:
+            c = await gs.comment(pr, body)
+        url = c.get("html_url")
         await acts.set_crop_status(head, "success" if passed else "failure", url, summary)
     except Exception as e:  # never leave the required status pending
         await acts.set_crop_status(head, "error", None, acts._clean(f"{type(e).__name__}: {e}"))

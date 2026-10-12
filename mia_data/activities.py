@@ -142,8 +142,9 @@ class Activities:
         return next((c for c in await gh.issue_comments(n)
                      if (c.get("user") or {}).get("login") == self.bot and marker in (c.get("body") or "")), None)
 
-    async def _comment_once(self, gh, n: int, body: str, marker: str) -> dict:
-        return await self._bot_comment(gh, n, marker) or await gh.comment(n, body)
+    async def _comment_once(self, gh, n: int, body: str, marker: str) -> None:
+        if not await self._bot_comment(gh, n, marker):
+            await gh.comment(n, body)
 
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""

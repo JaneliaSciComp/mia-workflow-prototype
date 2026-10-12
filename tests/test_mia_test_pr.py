@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from mia_data.cli import run_test_pr
@@ -58,11 +57,13 @@ async def test_test_pr_passes(tmp_path, capsys):
     assert crop["cwd"].startswith(str(t.cfg.paths.work_root / "test-pr" / str(PR) / SNIP_SHA))
     assert all(m["mode"] == "ro" for m in crop["mounts"] if "_cache" in m["path"])  # a PR head is not trusted
     assert "moved" not in capsys.readouterr().out
-    assert await run_test_pr(t.a, PR, b, "rec-1") == 0 and len(t.snip.comments[PR]) == 1  # a rerun reattaches
+    c["body"] = f"stale <!-- mia-data: test-pr {SNIP_SHA} -->"
+    assert await run_test_pr(t.a, PR, b, "rec-1") == 0 and len(t.csub.submitted) == 2  # a rerun reattaches
+    assert len(t.snip.comments[PR]) == 1 and "1 of 1 crops verified" in c["body"]  # and edits the comment
     b.write_text(yaml.safe_dump({**BINDING, "reasons": ["other"]}))
-    with pytest.raises(ValueError, match="another binding"):  # ... so another binding on this head is refused
-        await run_test_pr(t.a, PR, b, "rec-1")
-    assert log[-1][2] == "error" and len(t.csub.submitted) == 2
+    n = len(log)
+    assert await run_test_pr(t.a, PR, b, "rec-1") == 1  # ... so another binding on this head is refused,
+    assert len(log) == n and "another binding" in capsys.readouterr().out  # leaving the status alone
 
 
 async def test_test_pr_verify_fails(tmp_path):
