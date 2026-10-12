@@ -22,7 +22,7 @@ BINDING = {"record": "rec-1", "record_commit": REC_SHA, "snippets_commit": SNIP_
 ROUND = "i1-e99"
 
 
-def _setup(tmp_path, probe=None):
+def _setup(tmp_path, probe=None, csub=None):
     cfg = make_cfg(tmp_path, network={"redirect_hosts": {}})
     h = cfg.harness.dir
     (h / "harness").mkdir()
@@ -44,7 +44,7 @@ def _setup(tmp_path, probe=None):
         (snap / "snippets" / name / "snippet.yaml").write_text(f"name: {name}\n")
     (snap / "WITHDRAWN.yaml").write_text("- {name: old-tiff, reason: transposes yx}\n")
     (snap / "SPEC.md").write_text("spec\n")
-    csub = FakeCsub()
+    csub = csub or FakeCsub()
     jobs = CsubJobs("mia-data", cfg.paths.state_dir / "jobs", client_factory=lambda: csub)
     a = Activities(cfg, data, snip, cat, jobs, bot="bot",
                    probe=probe or (lambda: ["*.example.org", *cfg.network.package_hosts]))

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import signal
 import sys
 import json
 from datetime import timedelta
+from pathlib import Path
+
+import yaml
 
 from autodev.auth import bot_login, token_fn
 from autodev.cli import _client, _setup_logging
@@ -136,6 +140,78 @@ async def cmd_init_labels(cfg, args) -> int:
     return 0
 
 
+async def run_test_pr(acts, pr: int, binding_file: Path, record_id: str) -> int:
+    """§12.4: §7.4 on PR <pr>'s head in the snippets repo, synchronously, with `mia-data/crops` on that SHA."""
+    from . import catalog
+    from .activities import _catalog, _write
+    from .binding import check_binding
+    from .crop_test import run_crop_test
+    from .jobspec import SHA_RE, harness_pin
+    from .models import Pins
+    from .seed import ID_RE
+    from .workflows import _failed, _ok
+
+    if not ID_RE.fullmatch(record_id):
+        raise ValueError(f"bad record id {record_id!r}")
+    cfg, gs, gc = acts.cfg, acts.gh_snippets, acts.gh_catalog
+    head = (await gs.get_pr(pr))["head"]["sha"]
+    await acts.set_crop_status(head, "pending", None, "crop test running")
+    try:
+        rc, note = ((await catalog.downloaded(gc)).get(record_id) or {}).get("record_commit"), ""
+        if not SHA_RE.fullmatch(str(rc)):
+            rc = await gc.get_ref_sha("main")
+            note = f" `{record_id}` is not in the downloads state: its record was read at the catalog's main, `{rc}`."
+        if (path := (await catalog.record_paths(gc)).get(record_id)) is None:
+            raise ValueError(f"{record_id}: no record on the catalog's main")
+        rec = await catalog.record(gc, path, rc)
+        pins = Pins(record_id, rc, head, *harness_pin(cfg))
+        b = yaml.safe_load(binding_file.read_text())
+        if errs := check_binding(b, rec, set(_catalog(await acts._snapshot(head))), pins=pins):
+            print("binding check failed:", *errs, sep="\n  ")
+            await acts.set_crop_status(head, "failure", None, "binding check failed")
+            return 1
+        rid, text = f"i0-e{int(pr)}-{head[:7]}", yaml.safe_dump(b, sort_keys=False)  # as checked: s3:// now https
+        rd = acts._round_dir(rid)
+        if (rd / "binding.yaml").is_file() and (rd / "binding.yaml").read_text() != text:  # its jobs would be reused
+            raise ValueError(f"{head} was already tested with another binding ({rd}); push a new head to test this one")
+        _write(rd / "record.yaml", yaml.safe_dump(rec, sort_keys=False))
+        _write(rd / "binding.yaml", text)
+        _write(rd / "pins.json", json.dumps(dataclasses.asdict(pins)))
+        v, g, jobs = await run_crop_test(acts, issue=0, round_id=rid, pins=pins, sha=head, trusted=False,
+                                         binding_path=str(rd / "binding.yaml"), seed=f"test-pr-{pr}-{head}")
+        bad = [_failed(k, j) for k, j in zip(("crop", "verify"), jobs) if not _ok(j)]
+        passed = not bad and v.ok_count > 0 and not v.errors
+        summary = f"{v.ok_count} of {v.n} crops verified"
+        body = "\n".join([f"Crop test of `{head}` with `{record_id}`: **{'passed' if passed else 'failed'}**, {summary}; "
+                          f"the crop job fetched {v.bytes_fetched} bytes.{note}", *(f"- {x}" for x in bad + v.errors),
+                          "", g.table if g else ""])
+        m = cfg.marker(f"test-pr {head}")
+        url = (await acts._comment_once(gs, pr, f"{acts._clean(body)}\n\n{m}", m)).get("html_url")
+        await acts.set_crop_status(head, "success" if passed else "failure", url, summary)
+    except Exception as e:  # never leave the required status pending
+        await acts.set_crop_status(head, "error", None, acts._clean(f"{type(e).__name__}: {e}"))
+        raise
+    print(f"PR #{pr} at {head}: {'passed' if passed else 'failed'}, {summary}: {url}")
+    if (now := (await gs.get_pr(pr))["head"]["sha"]) != head:
+        print(f"the PR head moved to {now} during the test; the status is on {head} only")
+    return 0 if passed else 1
+
+
+async def cmd_test_pr(cfg, args) -> int:
+    from autodev.jobs import CsubJobs
+
+    from .activities import Activities
+
+    tokens, g = token_fn(cfg), cfg.github
+    ghs = [_gh(cfg, r, tokens) for r in (g.data_repo, g.snippets_repo, g.catalog_repo)]
+    try:
+        acts = Activities(cfg, *ghs, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), await bot_login(cfg))
+        return await run_test_pr(acts, args.pr, Path(args.binding), args.record)
+    finally:
+        for gh in ghs:
+            await gh.aclose()
+
+
 async def cmd_worker(cfg, args) -> int:
     from temporalio.worker import Worker
 
@@ -198,12 +274,16 @@ def main(argv=None) -> int:
     sub.add_parser("reindex", help="rebuild manifest.json with current WITHDRAWN marks").add_argument("dataset", nargs="?")
     sub.add_parser("seed", help="create one issue per downloaded dataset").add_argument("--dry-run", action="store_true")
     sub.add_parser("init-labels", help="create the stage, human and extra labels on the data repo")
+    t = sub.add_parser("test-pr", help="run the test crops on a snippets PR head and post mia-data/crops")
+    t.add_argument("pr", type=int)
+    t.add_argument("--binding", required=True, help="binding YAML to test (e.g. the PR's examples/<record>.yaml)")
+    t.add_argument("--record", required=True, help="catalog record id")
     sub.add_parser("worker", help="run the Temporal workers (main and await queues)")
     sub.add_parser("schedule", help="manage the poll Schedule").add_argument("action", choices=["apply"])
     args = p.parse_args(argv)
     cfg = load_config(args.config)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
-    cmd = {"check": cmd_check, "crops-by-snippet": cmd_crops_by_snippet, "reindex": cmd_reindex, "seed": cmd_seed, "init-labels": cmd_init_labels, "worker": cmd_worker, "schedule": cmd_schedule}
+    cmd = {"check": cmd_check, "crops-by-snippet": cmd_crops_by_snippet, "reindex": cmd_reindex, "seed": cmd_seed, "init-labels": cmd_init_labels, "worker": cmd_worker, "test-pr": cmd_test_pr, "schedule": cmd_schedule}
     return asyncio.run(cmd[args.cmd](cfg, args))
 
 

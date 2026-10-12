@@ -25,9 +25,10 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
 class FakeGH:
     """The GitHub calls the activities make, in memory."""
 
-    def __init__(self, repo, files=None, issues=None, refs=None):
+    def __init__(self, repo, files=None, issues=None, refs=None, prs=None):
         self.repo, self.files, self.issues, self.refs = repo, files or {}, issues or {}, refs or {}
-        self.comments, self.created, self.gets, self.puts, self.removed = {}, [], [], [], []
+        self.prs = prs or {}  # PR number -> heads, one per get_pr call (the last one repeats)
+        self.comments, self.created, self.gets, self.puts, self.removed, self.posted = {}, [], [], [], [], []
 
     def tokens(self):
         return "tok"
@@ -66,7 +67,16 @@ class FakeGH:
 
     async def comment(self, n, body, login="bot"):
         cs = self.comments.setdefault(n, [])
-        cs.append({"id": 1000 * n + len(cs), "body": body, "user": {"login": login}})
+        cs.append(c := {"id": 1000 * n + len(cs), "body": body, "user": {"login": login},
+                        "html_url": f"https://github.com/{self.repo}/issues/{n}#c{len(cs)}"})
+        return c
+
+    async def get_pr(self, n):
+        heads = self.prs[n]
+        return {"number": n, "head": {"sha": heads.pop(0) if len(heads) > 1 else heads[0]}}
+
+    async def set_status(self, sha, context, state, description, target_url):
+        self.posted.append((sha, context, state, description, target_url))
 
     async def remove_label(self, n, name):
         self.removed.append((n, name))

@@ -39,7 +39,8 @@ from .status import MARKER as STATUS_MARKER, render_crops_table, render_stage, r
 
 log = logging.getLogger(__name__)
 
-ROUND_RE = re.compile(r"i\d+-e\d+")
+TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round: PR <n> at a head, no data issue
+ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
 SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->")  # open_snippet_issue's marker
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -141,9 +142,8 @@ class Activities:
         return next((c for c in await gh.issue_comments(n)
                      if (c.get("user") or {}).get("login") == self.bot and marker in (c.get("body") or "")), None)
 
-    async def _comment_once(self, gh, n: int, body: str, marker: str) -> None:
-        if not await self._bot_comment(gh, n, marker):
-            await gh.comment(n, body)
+    async def _comment_once(self, gh, n: int, body: str, marker: str) -> dict:
+        return await self._bot_comment(gh, n, marker) or await gh.comment(n, body)
 
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""
@@ -154,18 +154,25 @@ class Activities:
     def _pins(self, round_id: str) -> Pins:
         return Pins(**json.loads((self._round_dir(round_id) / "pins.json").read_text()))
 
+    def _round_ws(self, issue: int, round_id: str) -> Path:
+        """work_root/issue-<n>/<round>, the parent of the round's workspaces; a test-pr round's is
+        work_root/test-pr/<pr>/<head>."""
+        rd = self._round_dir(round_id)
+        if m := TEST_PR_RE.fullmatch(round_id):
+            return self.cfg.paths.work_root / "test-pr" / m.group(1) / self._pins(round_id).snippets_commit
+        return self.cfg.paths.work_root / f"issue-{int(issue)}" / rd.name
+
     def _ws(self, issue: int, round_id: str, kind: str, attempt: int) -> Path:
-        self._round_dir(round_id)
         if not (KIND_RE.fullmatch(kind) and type(attempt) is int and attempt >= 1):
             raise ValueError(f"bad job kind/attempt {kind!r}/{attempt!r}")
-        ws = self.cfg.paths.work_root / f"issue-{int(issue)}" / round_id / f"{kind}-{attempt}"
+        ws = self._round_ws(issue, round_id) / f"{kind}-{attempt}"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
     def _job_ws(self, issue: int, round_id: str, ws: str) -> Path:
         """A workspace of this issue's round, as prepare_* made it."""
         p = Path(ws)
-        if p.parent != self.cfg.paths.work_root / f"issue-{int(issue)}" / self._round_dir(round_id).name or p.is_symlink():
+        if p.parent != self._round_ws(issue, round_id) or p.is_symlink():
             raise ValueError(f"{ws} is not a workspace of issue {issue} round {round_id}")
         return p
 
@@ -436,11 +443,13 @@ class Activities:
     async def publish_gallery(self, issue: int, round_id: str, kind: str, crop_ws: str, verify_ws: str,
                               verified: list[dict]) -> GalleryResult:
         """raw.png + overlay.png of the verified crops, with the binding and verify report, under
-        galleries/<record>/<round>/<kind> (kind = the tested SHA, or production) on the galleries branch (§7.4)."""
+        galleries/<record>/<round>/<kind> (kind = the tested SHA, or production) on the galleries branch (§7.4); a
+        test-pr round's under galleries/_test-pr/<record>/<pr>/<kind>."""
         if not (kind == "production" or SHA_RE.fullmatch(kind)):
             raise ValueError(f"bad gallery kind {kind!r}")
         cw, vw = self._job_ws(issue, round_id, crop_ws), self._job_ws(issue, round_id, verify_ws)
-        prefix = f"galleries/{self._pins(round_id).record}/{round_id}/{kind}"
+        rec, m = self._pins(round_id).record, TEST_PR_RE.fullmatch(round_id)
+        prefix = f"galleries/_test-pr/{rec}/{m.group(1)}/{kind}" if m else f"galleries/{rec}/{round_id}/{kind}"
         files = await asyncio.to_thread(gallery_files, cw, vw, verified)
         urls = await publish_gallery(self.gh_data, self.cfg.gallery.branch, prefix, files)
         rows = []
