@@ -52,6 +52,11 @@ def test_job_script_runs_claude_and_bundles(tmp_path):
     assert run_git("bundle", "list-heads", str(d / "result.bundle"), cwd=d)
 
 
+def test_job_script_budget_flag(tmp_path):
+    assert "--max-budget-usd 5.0" in job_script(make_cfg(tmp_path, agent={"max_budget_usd": 5}), "abc")
+    assert "--max-budget-usd" not in job_script(make_cfg(tmp_path), "abc")
+
+
 def test_read_result_tolerates_garbage(tmp_path):
     assert read_result(tmp_path)[0].startswith("(the agent left no readable result.json")
     (tmp_path / "result.json").write_text("[1, 2]")
@@ -107,7 +112,7 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert ref.job_id == "777" and await j.submit(7, K, 1, ws) == ref
     assert len(fake.submitted) == 1
     spec = fake.submitted[0]
-    assert spec["claude"] is True and spec["shell"] is True and spec["cwd"] == ws.dir
+    assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
 

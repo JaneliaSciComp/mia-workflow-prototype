@@ -1,0 +1,169 @@
+# The mia-data workflow
+
+How a dataset in the MIA catalog becomes a set of verified, published image crops, and which component does
+each step. The authoritative design is [`notes/mia-crops-spec.md`](../notes/mia-crops-spec.md); the setup
+checklist is the mia-data section of [`notes/autodev-runbook.md`](../notes/autodev-runbook.md).
+
+```mermaid
+flowchart TD
+    catalog[("mia-agentic-search<br/>records + downloads state")]
+    seed["md seed"] -->|one issue per downloaded dataset| issue
+    catalog --> seed
+
+    subgraph gh["GitHub: mia-workflow-data"]
+        issue["dataset issue<br/>data:new"]
+        go{{"human adds data:go"}}
+        approve{{"human adds data:approve"}}
+        gallery[("galleries branch<br/>test + production PNGs")]
+    end
+
+    issue --> go
+    go -->|poll every 2 min| poll["MiaDataPoll<br/>(Temporal schedule)"]
+    poll -->|signal| wf["MiaDataDataset<br/>(one Temporal workflow per issue)"]
+
+    subgraph cluster["LSF via csub, each job in its own sandbox"]
+        match["match: Claude agent<br/>picks a snippet, writes the binding"]
+        smoke["smoke: harness smoke<br/>checks the agent's claim"]
+        tcrop["test crops: harness crop --n 4<br/>+ harness verify"]
+        pcrop["production: harness crop --n 16<br/>+ harness verify"]
+    end
+
+    wf -->|data:matching| match --> smoke
+    smoke -->|matched| tcrop
+    smoke -->|no snippet fits| dev
+    tcrop -->|passed, crops shown in the issue| review["data:review"]
+    tcrop --> gallery
+    review --> approve
+    approve -->|data:cropping| pcrop
+    pcrop --> publish["publish: copy verified crops<br/>to paths.storage_root"]
+    pcrop --> gallery
+    publish -->|data:done| done["issue comment:<br/>crop table, totals, folder links"]
+
+    subgraph snippets["GitHub: mia-snippets"]
+        dev["mia-snippets issue<br/>snippets:go"]
+        pr["PR adding snippets/&lt;name&gt;/<br/>(autodev's Claude agent)"]
+        merge{{"human reviews + merges"}}
+    end
+
+    dev --> pr
+    pr -->|each new head| tcrop
+    pr --> merge
+    merge -->|tree matches the tested head| pcrop
+```
+
+## Overview
+
+Every dataset that [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has downloaded under an
+allowed licence gets one issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data). A
+human starts work on it by adding a label. From there a durable [Temporal](https://temporal.io) workflow owns
+the issue: it runs cluster jobs, posts results back to the issue, and waits, for hours or days, for a human to
+approve before anything is published. The result is a folder of 256×256 PNG crops per dataset, with matching
+label overlays, verified by a job that runs no snippet code.
+
+The pieces, and where they live:
+
+| component | repo | role |
+|---|---|---|
+| `mia_data/` package, `md` CLI | [mia-workflow-prototype](https://github.com/JaneliaSciComp/mia-workflow-prototype) (this repo) | the workflow, its activities, the poller, seed and devops commands |
+| `autodev/` package | this repo | GitHub client and App auth, the csub job runner, the await-queue pattern; also the agent that writes new snippets |
+| snippets and harness | [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) | one small immutable reader per source format, and the `harness` CLI (`smoke`, `crop`, `verify`, `preview`) |
+| dataset issues and galleries | [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) | the user interface: one issue per dataset, labels as state, a `galleries` branch of PNGs for review |
+| catalog | [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) | dataset records on `main`, download state on `state`; read-only here |
+| job submission | [csub](https://github.com/krokicki/csub) | submits each job to LSF through a broker that enforces the service account's policy: allowed hosts, roots, agents |
+| sandboxing | [agentic-sandbox](https://github.com/JaneliaSciComp/agentic-sandbox) | wraps the worker and every job: read-only code, read-write only its own directories, a network allowlist |
+| orchestration | [Temporal](https://temporal.io) | one dev server shared with autodev; namespace `mia-data`, task queues `mia-data` and `mia-data-await` |
+| folder links | [Fileglancer](https://github.com/JaneliaSciComp/fileglancer) | issue comments link the round's workspace and the dataset's crops folder when `paths.*.url` is set |
+
+## The steps
+
+### 1. Seed
+
+`pixi run md seed` reads the downloads state from mia-agentic-search and creates one issue per downloaded
+dataset in mia-workflow-data, labelled `data:new` plus `modality:<family>`, `has-labels` and `maybe-small` as
+hints. A dataset whose licence is not in `crops.licences` is created as `data:ineligible` and
+`licence-excluded`. Re-running only adds what is new. Components: the `md` CLI and the GitHub client, no
+Temporal, no cluster.
+
+### 2. Trigger
+
+A person with write access adds `data:go`. `MiaDataPoll`, a Temporal schedule firing every two minutes, lists
+issues carrying `data:go` or `data:approve`, checks the labeler's permission, delivers the label as a signal to
+that issue's `MiaDataDataset` workflow (starting it if needed), and removes the label. Someone without write
+access gets an "ignored" comment instead. Components: the poller activity, the GitHub client, Temporal.
+
+### 3. Match
+
+The workflow sets `data:matching` and submits the **match job**: a Claude agent, run through csub in a sandbox
+with the record, the downloads entry, a read-only snapshot of mia-snippets at a pinned commit and the harness
+CLI. It picks a snippet for each raw and label array and writes a **binding**, a small YAML saying which files
+to read with which snippet and parameters, with reasons. It may run `harness smoke` to try bindings, but may
+not change snippet code. Its outcome is `matched`, `needs_snippet`, `ineligible` or `blocked`.
+
+The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
+record, https only, snippets exist) and runs its own **smoke job**, a plain `harness smoke` with no agent. Only
+if both agree does the round continue. Components: `autodev.jobs` (the csub runner), csub broker and LSF,
+agentic-sandbox, the harness from mia-snippets.
+
+### 4. Develop (only when no snippet fits)
+
+When the agent answers `needs_snippet`, the worker opens an issue in mia-snippets labelled `snippets:go`, with
+the draft binding and what failed. A second autodev deployment, `snippets`, turns that issue into a PR adding
+`snippets/<name>/` and an example binding. The data issue sits in `data:developing` and wakes up whenever the
+PR changes. Every new PR head gets test crops (step 5) and a required `mia-data/crops` commit status on that
+exact commit. A human reviews and merges the PR; after the merge, a tree-hash comparison confirms the merged
+snippet is the one that was tested, or the merge commit is tested again. Components: autodev (its own
+namespace; the two workflows interact only through GitHub), mia-snippets CI, the GitHub client.
+
+### 5. Test crops and review
+
+Two plain jobs at the pinned snippets commit: `harness crop --n 4` with the round's test seed, then
+`harness verify` and `harness preview` in a separate workspace that loads no snippet code. Verify checks each
+crop is a 256×256 16-bit PNG with matching labels and writes overlay PNGs. The passing crops' `raw.png` and
+`overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a comment on the issue shows
+them inline with the binding and the agent's reasons. The issue moves to `data:review`.
+
+**A human approves every binding before production.** For a matched binding that is `data:approve` on the
+data issue; for a new snippet it is the PR review. A `data:approve` counts only while the issue is in review
+and only if it is newer than the round's test result. Components: the harness, csub, the gallery publisher,
+the status comments.
+
+### 6. Production and publication
+
+On approval the issue goes to `data:cropping` and one plain `harness crop` job extracts the production set
+(default 16, lowered when the dataset is small) with the round's production seed and `--existing` pointing at
+the dataset's current manifest, so repeated rounds add crops rather than duplicate them. A verify job judges
+them. Every crop that passes is copied into `paths.storage_root/<dataset>/<crop_id>/` by an idempotent
+publication activity (a retry never duplicates or overwrites), the dataset's `manifest.json` is rebuilt, and
+the PNGs go to the `galleries` branch. The final comment carries the crop table, the totals, and links to the
+crops folder, its gallery and the round's workspace. The issue is `data:done`; a new `data:go` later starts
+another round and adds more crops. If fewer than half pass, the passing ones are still published and the issue
+is `data:needs-human` with the reason.
+
+## How the issue reads
+
+Every stage change posts a new comment, never an edit: the stage, what it produced, and the folders to look at.
+Labels show the current stage, exactly one `data:*` at a time, set only by the worker. Anything the system
+cannot handle ends in `data:needs-human` with a comment saying why and what to change; a `data:go` afterwards
+retries from the start with a new seed.
+
+## Trust boundaries in one paragraph
+
+Agents never hold GitHub credentials or reach GitHub; the worker does every GitHub write. Each job asks csub
+only for the hosts in its binding, and the broker's policy is the ceiling: a host missing from the policy fails
+the round before submission, with a comment naming it. Unreviewed snippet code from a PR head runs only inside
+job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs human
+approval of the exact head plus the required statuses; publishing a matched binding needs `data:approve`.
+Details: spec §9.
+
+## Operating it
+
+```
+pixi run md check       # repos, Temporal, csub policy, directories, harness pin
+pixi run ad up          # the shared Temporal dev server (autodev's)
+pixi run md up          # mia-data broker, sandboxed worker, poll schedule
+pixi run md ps | logs -f | attach | down | restart
+pixi run md seed --dry-run
+```
+
+Config is `mia_data.yaml` (see `mia_data.yaml.example`). `paths.work_root` and `paths.storage_root` take a
+path or `{path, url}`; with a Fileglancer URL the comments link the folders they mention.

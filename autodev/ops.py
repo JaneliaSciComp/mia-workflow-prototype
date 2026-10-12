@@ -1,4 +1,5 @@
-"""Deployment management: start, stop, status and logs for this deployment's tmux session (name from autodev.yaml)."""
+"""Deployment management: start, stop, status and logs for a deployment's tmux session (autodev and mia-data). The
+CLI sets args.config_path, args.up_script and args.config_env; the session is named after cfg.deployment."""
 
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ def _tmux(*args: str, **kw) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(["tmux", *args], text=True, **kw)
     except FileNotFoundError:
-        sys.exit("autodev: tmux not found on PATH")
+        sys.exit("tmux not found on PATH")
 
 
 def is_running(cfg) -> bool:
@@ -31,7 +32,8 @@ def is_running(cfg) -> bool:
 
 
 def cmd_up(cfg, args) -> int:
-    return subprocess.run([str(UP_SCRIPT)], env={**os.environ, "AUTODEV_CONFIG": str(args.config_path)}).returncode
+    script, env = getattr(args, "up_script", UP_SCRIPT), getattr(args, "config_env", "AUTODEV_CONFIG")
+    return subprocess.run([str(script)], env={**os.environ, env: str(args.config_path)}).returncode
 
 
 def cmd_down(cfg, args) -> int:
@@ -57,20 +59,21 @@ def cmd_ps(cfg, args) -> int:
               capture_output=True)
     print(r.stdout, end="")
     for name, path in log_files(cfg).items():
-        print(f"  log {name}: {path}")
+        if path.is_file():
+            print(f"  log {name}: {path}")
     return 0
 
 
 def cmd_attach(cfg, args) -> int:
     if not is_running(cfg):
-        sys.exit(f"autodev: {cfg.deployment} is not running (autodev up)")
+        sys.exit(f"{cfg.deployment} is not running (run `up` first)")
     return _tmux("attach", "-t", f"={cfg.deployment}").returncode
 
 
 def cmd_logs(cfg, args) -> int:
     path = log_files(cfg)[args.name]
     if not path.is_file():
-        sys.exit(f"autodev: no log at {path}")
+        sys.exit(f"no log at {path}")
     cmd = ["tail", "-n", str(args.lines), *(["-F"] if args.follow else []), str(path)]
     try:
         return subprocess.run(cmd).returncode

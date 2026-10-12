@@ -53,9 +53,9 @@ async def _client(cfg):
 
 
 def _csub_problems(cfg, p) -> list[str]:
-    need = set(cfg.agent.allow_hosts) | {"api.anthropic.com", "claude.ai", "platform.claude.com"}
+    need = set(cfg.agent.allow_hosts)  # Anthropic hosts come from the policy's [agents] claude entry
     work = cfg.paths.work_root.resolve()
-    return [*([] if p.allow_claude else ["allow_claude is false"]),
+    return [*([] if "claude" in p.agents else ['agent "claude" not in the policy [agents] table']),
             *(f"host not allowed: {h}" for h in sorted(need - set(p.allowed_hosts))),
             *([] if any(work.is_relative_to(Path(r).resolve()) for r in p.allowed_roots)
               else [f"work_root {work} not under allowed_roots {p.allowed_roots}"])]

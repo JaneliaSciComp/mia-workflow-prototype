@@ -12,6 +12,8 @@ github:
   installation_id: null      # auth: app
   private_key_path: null     # auth: app; PEM readable only by the service account
   protected_paths: [".github/"]
+  # trusted_bots: ["some-app[bot]"]          # app logins whose `go` label starts work (no permission lookup)
+  # required_checks: ["mia-data/crops"]      # status contexts / check-run names that must be present and green
 temporal:
   address: localhost:7233    # $TEMPORAL_ADDRESS overrides
   namespace: default
@@ -28,4 +30,5 @@ agent:
   extra_mounts: []           # e.g. ["/nrs/scicompsoft/autodev/tools:ro"]
   path_prepend: []           # e.g. ["/nrs/scicompsoft/autodev/tools/bin"] (a pixi binary for the agent's tests)
   max_revisions: 3
+  # max_budget_usd: 5        # passes --max-budget-usd to claude -p; unset = no cap
   api_key_env: null          # e.g. ANTHROPIC_API_KEY (service account billing the API instead of a login)
