@@ -27,26 +27,34 @@ class FakeGH:
 
 
 def _tree(tmp_path, ids=("c1", "c2")):
-    crops, prev = tmp_path / "crops", tmp_path / "preview"
+    cw, vw = tmp_path / "crop-ws", tmp_path / "verify-ws"
     verified = []
     for c in ids:
-        (crops / c).mkdir(parents=True), (prev / c).mkdir(parents=True)
-        (crops / c / "raw.png").write_bytes(b"raw" + c.encode())
-        (crops / c / "junk.txt").write_text("never published")
-        (prev / c / "overlay.png").write_bytes(b"ov" + c.encode())
+        (cw / "crops" / c).mkdir(parents=True), (vw / "preview" / c).mkdir(parents=True)
+        (cw / "crops" / c / "raw.png").write_bytes(b"raw" + c.encode())
+        (cw / "crops" / c / "junk.txt").write_text("never published")
+        (vw / "preview" / c / "overlay.png").write_bytes(b"ov" + c.encode())
         verified.append({"crop_id": c, "files": {"raw.png": hashlib.sha256(b"raw" + c.encode()).hexdigest()}})
-    (tmp_path / "b.yaml").write_text("record: x\n")
-    (tmp_path / "v.json").write_text("{}")
-    return crops, prev, verified
+    (vw / "binding.yaml").write_text("record: x\n")
+    (vw / "verify.json").write_text("{}")
+    return cw, vw, verified
 
 
 def test_gallery_files_only_verified(tmp_path):
-    crops, prev, verified = _tree(tmp_path, ("c1", "c2", "c3"))
-    files = gallery_files(crops, prev, verified[:2], tmp_path / "b.yaml", tmp_path / "v.json")
+    cw, vw, verified = _tree(tmp_path, ("c1", "c2", "c3"))
+    files = gallery_files(cw, vw, verified[:2])
     assert sorted(files) == ["binding.yaml", "c1/overlay.png", "c1/raw.png", "c2/overlay.png", "c2/raw.png", "verify.json"]
-    (crops / "c1" / "raw.png").write_bytes(b"swapped")
+    (cw / "crops" / "c1" / "raw.png").write_bytes(b"swapped")
     with pytest.raises(ValueError):
-        gallery_files(crops, prev, verified[:1], tmp_path / "b.yaml", tmp_path / "v.json")
+        gallery_files(cw, vw, verified[:1])
+
+
+def test_gallery_files_refuse_symlinks(tmp_path):
+    cw, vw, verified = _tree(tmp_path, ("c1",))
+    (vw / "preview").rename(tmp_path / "elsewhere")
+    (vw / "preview").symlink_to(tmp_path / "elsewhere")  # a job pointing its output outside its workspace
+    with pytest.raises(ValueError, match="overlay.png"):
+        gallery_files(cw, vw, verified)
 
 
 async def test_publish_gallery(tmp_path):

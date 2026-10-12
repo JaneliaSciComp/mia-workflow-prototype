@@ -100,3 +100,32 @@ def test_manifest_marks_withdrawn(tmp_path):
     assert m["crops"][1]["plane"] == {"z": 0, "c": 0}
     reindex(ds, {})
     assert not any(c["withdrawn"] for c in json.loads((ds / "manifest.json").read_text())["crops"])
+
+
+def test_manifest_entries_carry_file_checksums(tmp_path):
+    src, verified = _src(tmp_path)
+    ds = tmp_path / "ds"
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)
+    m = json.loads((ds / "manifest.json").read_text())
+    assert [c["files"] for c in m["crops"]] == [v["files"] for v in verified]  # harness verify --existing reads these
+
+
+def test_conflict_still_reindexes(tmp_path):
+    src, verified = _src(tmp_path)
+    ds = tmp_path / "ds"
+    publish(ds, src, verified[:1], {}, tmp_max_age_s=AGE)
+    (src / "c2" / "raw.png").write_bytes(b"changed after verify")
+    (ds / "manifest.json").unlink()
+    with pytest.raises(Conflict):
+        publish(ds, src, verified, {}, tmp_max_age_s=AGE)
+    assert json.loads((ds / "manifest.json").read_text())["count"] == 1
+
+
+def test_symlinked_source_file_is_refused(tmp_path):
+    src, verified = _src(tmp_path)
+    real = tmp_path / "real.png"
+    real.write_bytes((src / "c1" / "raw.png").read_bytes())
+    (src / "c1" / "raw.png").unlink()
+    (src / "c1" / "raw.png").symlink_to(real)
+    with pytest.raises(Conflict, match="c1/raw.png"):
+        publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)

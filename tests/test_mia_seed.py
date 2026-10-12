@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+import yaml
 
 from autodev.github import GitHub
 from mia_data import catalog
@@ -163,3 +164,14 @@ async def test_record_with_other_id_inside_is_skipped(tmp_path, gh_data, gh_cata
     (b,) = bodies(route)
     assert b["title"].startswith("hf-pytc-zebrafinch") and b["body"].count("mia-data:record=") == 1
     assert "bbbc034" in caplog.text
+
+
+@pytest.mark.parametrize("rid, folder", [
+    ("bbbc034-hipsc-nuclei-3d", "lm-human-bbbc034-hipsc-nuclei-3d"),  # as demo-native's dataset_dir
+    ("hf-pytc-zebrafinch-j0126-ffn-em", "em-taeniopygia-guttata-hf-pytc-zebrafinch-j0126-ffn"),
+    ("czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet", "em-mycoplasmoides-pneumoniae-mpneumoniae-chloramphenicol-ribosomes")])
+def test_dataset_folder_follows_miao_layout(rid, folder):
+    rec = yaml.safe_load((FIX / "records" / f"{rid}.yaml").read_text())
+    assert catalog.dataset_folder(rec, rid) == folder
+    with pytest.raises(ValueError):
+        catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "organism": []}}, rid)

@@ -30,8 +30,9 @@ class JobSpec:
     env: dict[str, str] = field(default_factory=dict)
 
 
-def read_untrusted(d: Path, rel: str, limit: int, tail: bool = False) -> str | None:
-    """Read a file a sandboxed job could have tampered with: no symlinks, no FIFOs, bounded size."""
+def read_untrusted(d: Path, rel: str, limit: int, tail: bool = False, binary: bool = False) -> str | bytes | None:
+    """Read a file a sandboxed job could have tampered with: no symlinks, no FIFOs, bounded size. Text (str) unless
+    `binary`."""
     try:
         root = Path(d).resolve()
         p = root / rel
@@ -47,7 +48,8 @@ def read_untrusted(d: Path, rel: str, limit: int, tail: bool = False) -> str | N
                 return None
             if tail:
                 os.lseek(fd, max(0, st.st_size - limit), os.SEEK_SET)
-            return os.read(fd, limit).decode(errors="replace")
+            data = os.read(fd, limit)
+            return data if binary else data.decode(errors="replace")
         finally:
             os.close(fd)
     except (OSError, RuntimeError):  # RuntimeError: symlink loop in resolve()

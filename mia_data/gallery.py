@@ -5,19 +5,28 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .publish import check_crop_id
+from autodev.jobs import read_untrusted
+
+from .publish import MAX_FILE, check_crop_id
 
 
-def gallery_files(crops_dir: Path, preview_dir: Path, verified: list[dict], binding: Path, verify_json: Path) -> dict[str, bytes]:
-    """<crop_id>/raw.png and <crop_id>/overlay.png for verified crops only, plus binding.yaml and verify.json."""
+def _read(ws: Path, rel: str) -> bytes:
+    if (data := read_untrusted(ws, rel, MAX_FILE, binary=True)) is None:
+        raise ValueError(f"{rel} is missing or unreadable in {ws}")
+    return data
+
+
+def gallery_files(crop_ws: Path, verify_ws: Path, verified: list[dict]) -> dict[str, bytes]:
+    """<crop_id>/raw.png (crop job's crops/) and <crop_id>/overlay.png (verify job's preview/) for verified crops
+    only, plus the verify job's binding.yaml and verify.json. Job output: read bounded, no symlinks."""
     out = {}
     for v in verified:
         cid = check_crop_id(v["crop_id"])
-        raw = (crops_dir / cid / "raw.png").read_bytes()
+        raw = _read(crop_ws, f"crops/{cid}/raw.png")
         if hashlib.sha256(raw).hexdigest() != v["files"]["raw.png"]:  # publish only what verify checked
             raise ValueError(f"{cid}/raw.png differs from the verified checksum")
-        out[f"{cid}/raw.png"], out[f"{cid}/overlay.png"] = raw, (preview_dir / cid / "overlay.png").read_bytes()
-    out["binding.yaml"], out["verify.json"] = binding.read_bytes(), verify_json.read_bytes()
+        out[f"{cid}/raw.png"], out[f"{cid}/overlay.png"] = raw, _read(verify_ws, f"preview/{cid}/overlay.png")
+    out["binding.yaml"], out["verify.json"] = _read(verify_ws, "binding.yaml"), _read(verify_ws, "verify.json")
     return out
 
 
