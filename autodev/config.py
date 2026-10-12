@@ -29,6 +29,11 @@ STAGES = {
 }
 
 
+def is_github_host(h: str) -> bool:
+    h = h.strip().lower().rstrip(".")
+    return any(h == b or h.endswith("." + b) for b in ("github.com", "githubusercontent.com"))
+
+
 class GitHubCfg(BaseModel):
     repo: str
     base_branch: str = "main"
@@ -95,9 +100,8 @@ class Config(BaseModel):
             if getattr(g, attr):
                 setattr(g, attr, getattr(g, attr).expanduser())
         for h in self.agent.allow_hosts:
-            h = h.strip().lower().rstrip(".")
-            if any(h == b or h.endswith("." + b) for b in ("github.com", "githubusercontent.com")):
-                raise ValueError(f"agent.allow_hosts: {h!r} would let the agent reach GitHub")
+            if is_github_host(h):
+                raise ValueError(f"agent.allow_hosts: {h.strip()!r} would let the agent reach GitHub")
         secrets = [self.paths.state_dir, g.token_file, g.private_key_path]
         for i, m in enumerate(self.agent.extra_mounts):
             if not m.endswith(":ro"):

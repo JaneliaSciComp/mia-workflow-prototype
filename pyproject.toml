@@ -13,13 +13,14 @@ dependencies = [
 
 [project.scripts]
 autodev = "autodev.cli:main"
+mia-data = "mia_data.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["autodev"]
+packages = ["autodev", "mia_data"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -54,3 +55,4 @@ default = { features = ["test"], solve-group = "default" }
 [tool.pixi.tasks]
 test = "pytest tests/"
 ad = "autodev"
+md = "mia-data"

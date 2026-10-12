@@ -1,0 +1,32 @@
+import pytest
+from pydantic import ValidationError
+
+from mia_data.config import PROJECT_DIR, load_config
+from mia_helpers import make_cfg
+
+
+def test_example_config_loads(monkeypatch):
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    c = load_config(PROJECT_DIR / "mia_data.yaml.example")
+    assert c.task_queue == "mia-data" and c.await_queue == "mia-data-await"
+    assert c.label("go") == "data:go" and c.workflow_id(7) == "mia-data/JaneliaSciComp/mia-workflow-data/issue-7"
+    assert c.marker("x") == "<!-- mia-data: x -->"
+
+
+def test_defaults(tmp_path):
+    c = make_cfg(tmp_path)
+    assert c.crops.licences[0] == "CC0-1.0" and c.gallery.branch == "galleries"
+
+
+@pytest.mark.parametrize("override", [
+    {"paths": {"state_dir": "{tmp}/work/s"}},
+    {"network": {"package_hosts": ["api.github.com"]}},
+    {"network": {"redirect_hosts": {"a.example": ["*.b.example"]}}},
+    {"limits": {"max_pr_revisions": 0}},
+    {"crops": {"licences": []}},
+])
+def test_rejected(tmp_path, override):
+    override = {k: {a: (b.replace("{tmp}", str(tmp_path)) if isinstance(b, str) else b) for a, b in v.items()}
+                for k, v in override.items()}
+    with pytest.raises(ValidationError):
+        make_cfg(tmp_path, **override)
