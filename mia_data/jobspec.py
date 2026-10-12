@@ -3,10 +3,12 @@
 The record and bindings live under `paths.state_dir`, which is never mounted into a job: the caller copies them
 into the job's workspace first, and the builders take their names relative to it (`record.yaml`, `binding.yaml`).
 The snapshot, the harness checkout, the dataset cache and any extra input are mounted read-only; only the workspace
-(and the dataset cache, for jobs that run reviewed code) is writable."""
+(and the dataset cache, for jobs that run reviewed code) is writable. Every builder refuses (PinMoved) when the
+harness checkout is no longer the round's admitted pin, and gives the job the admitted pin values."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
@@ -19,14 +21,14 @@ from string import Template
 
 import yaml
 
-from autodev.gitops import Mirror, git
+from autodev.gitops import GitError, Mirror, git
 from autodev.jobs import JobSpec
 
 from .binding import hosts, missing_hosts, record_urls
 from .seed import ID_RE
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-MATCH_TOOLS = "Bash(harness smoke:*),Bash(pixi run:*),Read,Write,Glob,Grep"
+MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
 q = shlex.quote
 
 
@@ -55,23 +57,33 @@ def snapshot(cfg, sha: str, tokens=lambda: None) -> Path:
     dest = _snap_dir(cfg, sha)
     if dest.exists():
         return dest
-    g = cfg.github
-    m = Mirror(cfg.paths.state_dir / "mirror" / "mia-snippets.git",
-               g.snippets_git_url or f"https://github.com/{g.snippets_repo}.git", tokens)
-    if not (m.path / "HEAD").exists() or subprocess.run(
-            ["git", "-C", str(m.path), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True).returncode:
-        m.sync()
-    tmp = dest.with_name(f".{sha}.tmp")
-    if tmp.exists():  # left by a crash; read-only, like a finished one
-        subprocess.run(["chmod", "-R", "u+w", str(tmp)], check=True)
-        shutil.rmtree(tmp)
-    tmp.mkdir(parents=True)
-    tar = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(m.path), "archive", sha,
-                          "snippets", "WITHDRAWN.yaml", "SPEC.md"], check=True, capture_output=True).stdout
-    subprocess.run(["tar", "-x", "-C", str(tmp)], input=tar, check=True)
-    subprocess.run(["chmod", "-R", "a-w", str(tmp)], check=True)
-    os.rename(tmp, dest)
-    return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest.with_name(f".{sha}.lock"), "w") as lock:  # one fetch + extract per SHA at a time
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if dest.exists():
+            return dest
+        g = cfg.github
+        m = Mirror(cfg.paths.state_dir / "mirror" / "mia-snippets.git",
+                   g.snippets_git_url or f"https://github.com/{g.snippets_repo}.git", tokens)
+        if not (m.path / "HEAD").exists() or subprocess.run(
+                ["git", "-C", str(m.path), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True).returncode:
+            m.sync()
+        tmp = dest.with_name(f".{sha}.tmp")
+        if tmp.exists():  # left by a crash; read-only, like a finished one
+            subprocess.run(["chmod", "-R", "u+w", str(tmp)], check=True)
+            shutil.rmtree(tmp)
+        tmp.mkdir()
+        # no LFS smudge (or any global/system filter) from a PR head's .gitattributes
+        r = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "filter.lfs.smudge=",
+                            "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false", "-C", str(m.path),
+                            "archive", sha, "snippets", "WITHDRAWN.yaml", "SPEC.md"], capture_output=True,
+                           env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+        if r.returncode:
+            raise GitError(f"git archive {sha}: {r.stderr.decode(errors='replace').strip()[-2000:]}")
+        subprocess.run(["tar", "-x", "-C", str(tmp)], input=r.stdout, check=True)
+        subprocess.run(["chmod", "-R", "a-w", str(tmp)], check=True)
+        os.rename(tmp, dest)
+        return dest
 
 
 def harness_pin(cfg) -> tuple[str, str]:
@@ -108,10 +120,11 @@ def _binding(ws, rel: str) -> tuple[str, list[str]]:
     return b.get("record"), [u for a in (b.get("raw") or []) + (b.get("labels") or []) for u in a.get("urls") or []]
 
 
-def _spec(cfg, kind: str, ws, body: str, allow: list[str], pin: tuple[str, str], ro: list, record: str | None = None,
+def _spec(cfg, kind: str, ws, pins, body: str, allow: list[str], ro: list, record: str | None = None,
           writable: bool = False, **kw) -> JobSpec:
-    env = {"MIA_HARNESS_JOB_BYTES": str(int(cfg.limits.job_bytes)), "MIA_HARNESS_COMMIT": pin[0],
-           "MIA_HARNESS_ENV_DIGEST": pin[1], "MIA_HARNESS_ALLOWED_HOSTS": ",".join(allow),
+    assert_pin(cfg, pins)  # the admitted harness, or no job
+    env = {"MIA_HARNESS_JOB_BYTES": str(int(cfg.limits.job_bytes)), "MIA_HARNESS_COMMIT": pins.harness_commit,
+           "MIA_HARNESS_ENV_DIGEST": pins.env_digest, "MIA_HARNESS_ALLOWED_HOSTS": ",".join(allow),
            "MIA_HARNESS_CACHE_DIR": "", "MIA_HARNESS_CACHE_WRITABLE": "0"}
     ro, rw = [str(cfg.harness.dir), *(str(p) for p in ro if p)], []
     if record is not None:  # the dataset cache, §6.6
@@ -140,18 +153,18 @@ def match_job(cfg, ws, pins, record_path: str = "record.yaml", dl_dir=None) -> J
             f'PATH="$PWD/bin:$PATH" claude -p "$(cat prompt.md)" --model {q(cfg.agent.model)} '
             f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
             f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err')
-    return _spec(cfg, "match", ws, body, hosts(record_urls(rec), cfg), (pins.harness_commit, pins.env_digest),
-                 [snap, dl_dir], record=pins.record, claude=True, cpus=cfg.agent.cpus, mem_mb=cfg.agent.mem_mb)
+    return _spec(cfg, "match", ws, pins, body, hosts(record_urls(rec), cfg), [snap, dl_dir],
+                 record=pins.record, claude=True, cpus=cfg.agent.cpus, mem_mb=cfg.agent.mem_mb)
 
 
-def smoke_job(cfg, ws, binding_path: str, snapshot, record_path: str) -> JobSpec:
+def smoke_job(cfg, ws, pins, binding_path: str, snapshot, record_path: str) -> JobSpec:
     """The worker's own smoke of a binding, so the agent's claim is checked (§7.2). Reviewed code: cache rw."""
     record, urls = _binding(ws, binding_path)
     body = f"{_harness(cfg)} smoke {q(binding_path)} --snippets {q(str(snapshot))} --record {q(record_path)} --out smoke.json"
-    return _spec(cfg, "smoke", ws, body, hosts(urls, cfg), harness_pin(cfg), [snapshot], record=record, writable=True)
+    return _spec(cfg, "smoke", ws, pins, body, hosts(urls, cfg), [snapshot], record=record, writable=True)
 
 
-def crop_job(cfg, ws, binding_path: str, snapshot, record_path: str, n: int, seed: str, round_id: str, batch: int,
+def crop_job(cfg, ws, pins, binding_path: str, snapshot, record_path: str, n: int, seed: str, round_id: str, batch: int,
              existing, trusted: bool) -> JobSpec:
     """`harness crop` into `ws/crops` (§7.4, §7.5). `trusted` (a matched or merged SHA, or production) mounts the
     dataset cache read-write; a PR head gets it read-only and keeps a private cache (§6.6)."""
@@ -159,14 +172,14 @@ def crop_job(cfg, ws, binding_path: str, snapshot, record_path: str, n: int, see
     body = (f"{_harness(cfg)} crop {q(binding_path)} --snippets {q(str(snapshot))} --record {q(record_path)} "
             f"--n {int(n)} --seed {q(seed)} --round {q(round_id)} --batch {int(batch)} --out crops"
             + (f" --existing {q(str(existing))}" if existing else ""))
-    return _spec(cfg, "crop", ws, body, hosts(urls, cfg), harness_pin(cfg), [snapshot, existing], record=record,
+    return _spec(cfg, "crop", ws, pins, body, hosts(urls, cfg), [snapshot, existing], record=record,
                  writable=trusted)
 
 
-def verify_job(cfg, ws, crops_dir, binding_path: str, existing) -> JobSpec:
+def verify_job(cfg, ws, pins, crops_dir, binding_path: str, existing) -> JobSpec:
     """`harness verify` then `harness preview` on a crop job's output, mounted read-only (§6.4, §6.7). Loads no
     snippet code: no network, no dataset cache."""
     h, d = _harness(cfg), q(str(crops_dir))
     body = (f"{h} verify {d} --binding {q(binding_path)}" + (f" --existing {q(str(existing))}" if existing else "")
             + f" --out verify.json && \\\n{h} preview {d} --out preview")
-    return _spec(cfg, "verify", ws, body, [], harness_pin(cfg), [crops_dir, existing])
+    return _spec(cfg, "verify", ws, pins, body, [], [crops_dir, existing])

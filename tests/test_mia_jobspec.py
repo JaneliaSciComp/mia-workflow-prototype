@@ -1,10 +1,13 @@
 import stat
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import yaml
 
+from autodev.gitops import GitError
 from autodev_helpers import GIT_ID, make_origin, run_git
 from mia_data import jobspec
 from mia_data.jobspec import (HostsNotAllowed, PinMoved, assert_pin, check_hosts_allowed, crop_job, harness_pin,
@@ -77,6 +80,33 @@ def test_snapshot_extracts_once_read_only(tmp_path, monkeypatch):
     assert (snapshot(cfg, run_git("rev-parse", "HEAD", cwd=src)) / "snippets" / "npy" / "README.md").exists()
 
 
+def test_snapshot_concurrent_calls_extract_once(tmp_path, monkeypatch):
+    origin, src = _origin(tmp_path)
+    cfg = make_cfg(tmp_path, github={"snippets_git_url": str(origin)})
+    sha = run_git("rev-parse", "HEAD", cwd=src)
+    archives, real = [], subprocess.run
+
+    def run(a, **k):
+        if "archive" in a:
+            archives.append(a)
+            time.sleep(0.2)  # widen the race
+        return real(a, **k)
+    monkeypatch.setattr(jobspec.subprocess, "run", run)
+    with ThreadPoolExecutor(2) as ex:
+        a, b = ex.map(lambda _: snapshot(cfg, sha), range(2))
+    assert a == b and len(archives) == 1 and (a / "SPEC.md").read_text() == "spec\n" and _readonly(a)
+
+
+def test_snapshot_archive_error_names_stderr(tmp_path):
+    origin, src = _origin(tmp_path)
+    run_git("rm", "-q", "SPEC.md", cwd=src)
+    run_git(*GIT_ID, "commit", "-qm", "no spec", cwd=src)
+    run_git("push", "-q", str(origin), "main", cwd=src)
+    cfg = make_cfg(tmp_path, github={"snippets_git_url": str(origin)})
+    with pytest.raises(GitError, match="SPEC.md"):
+        snapshot(cfg, run_git("rev-parse", "HEAD", cwd=src))
+
+
 @pytest.mark.parametrize("sha", ["main", "A" * 40, "a" * 39, "../" + "a" * 37])
 def test_snapshot_rejects_non_sha(tmp_path, sha):
     with pytest.raises(ValueError):
@@ -109,7 +139,7 @@ def test_match_job(tmp_path):
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.claude and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
-    assert "Bash(harness smoke:*)" in s.command and "> claude.json" in s.command
+    assert '--allowedTools "Bash(harness smoke:*),Read,Write,Glob,Grep"' in s.command and "> claude.json" in s.command
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
     snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
@@ -120,7 +150,7 @@ def test_match_job(tmp_path):
 @pytest.mark.parametrize("trusted", [False, True])
 def test_crop_job_cache_mode(tmp_path, trusted):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    s = crop_job(cfg, ws, "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s-t", "i1-e2", 0, None, trusted)
+    s = crop_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s-t", "i1-e2", 0, None, trusted)
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert (cache in s.rw_mounts, cache in s.ro_mounts) == (trusted, not trusted)
     assert s.env["MIA_HARNESS_CACHE_WRITABLE"] == ("1" if trusted else "0") and Path(cache).is_dir()
@@ -131,37 +161,49 @@ def test_crop_job_cache_mode(tmp_path, trusted):
 def test_verify_job(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     crops = tmp_path / "crop-ws" / "crops"
-    s = verify_job(cfg, ws, crops, "binding.yaml", tmp_path / "manifest.json")
+    s = verify_job(cfg, ws, _pins(cfg), crops, "binding.yaml", tmp_path / "manifest.json")
     assert s.allow_hosts == [] and str(crops) in s.ro_mounts and str(tmp_path / "manifest.json") in s.ro_mounts
     assert s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_DIR"] == "" and "harness preview" in s.command
 
 
 def test_check_hosts_allowed(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    s = smoke_job(cfg, ws, "binding.yaml", tmp_path / "snap", "record.yaml")
+    s = smoke_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml")
     check_hosts_allowed(s, ["*.example.org", "cdn.example.net", *cfg.network.package_hosts])
     with pytest.raises(HostsNotAllowed, match="data.example.org") as e:
         check_hosts_allowed(s, ["cdn.example.net", "*.pypi.org", *cfg.network.package_hosts])
     assert e.value.missing == ["data.example.org"]
 
 
+def _builders(cfg, ws, pins, tmp_path):
+    snap = tmp_path / "snap"
+    return [lambda: match_job(cfg, ws, pins, "record.yaml", None),
+            lambda: smoke_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml"),
+            lambda: crop_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True),
+            lambda: verify_job(cfg, ws, pins, tmp_path / "crops", "binding.yaml", None)]
+
+
 def test_every_builder_sets_harness_env(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    snap = tmp_path / "snap"
-    specs = [match_job(cfg, ws, _pins(cfg), "record.yaml", None),
-             smoke_job(cfg, ws, "binding.yaml", snap, "record.yaml"),
-             crop_job(cfg, ws, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True),
-             verify_job(cfg, ws, tmp_path / "crops", "binding.yaml", None)]
-    commit, digest = harness_pin(cfg)
-    for s in specs:
+    pins = _pins(cfg)
+    for s in (b() for b in _builders(cfg, ws, pins, tmp_path)):
         assert s.env["MIA_HARNESS_JOB_BYTES"] == "1000000"
         assert s.env["MIA_HARNESS_ALLOWED_HOSTS"] == ",".join(s.allow_hosts)
-        assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (commit, digest)
+        assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)
         assert str(cfg.harness.dir) in s.ro_mounts and s.workspace == str(ws)
         assert s.command.rstrip().endswith('echo "$rc" > exit_code\nexit "$rc"')
         assert s.walltime_min == cfg.limits.job_walltime_min and not set(s.ro_mounts) & set(s.rw_mounts)
         if not s.claude:
             assert f"pixi run --manifest-path {cfg.harness.dir}/harness/pixi.toml harness " in s.command
+
+
+def test_every_builder_refuses_a_moved_harness(tmp_path):
+    cfg, ws = _cfg(tmp_path), _ws(tmp_path)
+    pins = _pins(cfg)
+    (cfg.harness.dir / "harness" / "pixi.lock").write_text("lock v2\n")
+    for b in _builders(cfg, ws, pins, tmp_path):
+        with pytest.raises(PinMoved):
+            b()
 
 
 def test_match_prompt_names_pins_and_outcomes(tmp_path):
