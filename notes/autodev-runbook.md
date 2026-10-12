@@ -88,3 +88,19 @@ round summary count, so a short prefix approved earlier cannot approve a later h
   re-record: `AUTODEV_RECORD_HISTORY=1 pixi run pytest tests/test_autodev_workflows.py -k recorded_history`.
 - `[bot]` logins are treated as having no permission (never looked up), so no bot can trigger, approve or revise.
 - The live end-to-end run (issue, PR, `/revise`, `/approve`) has not been done yet.
+
+## mia-data
+
+Prerequisites P1-P4 ([plan](plans/2026-10-11-mia-crops-poc.md)): P1 repos `mia-workflow-data` and `mia-snippets`
+with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage.root` visible from compute
+nodes; P3 csub broker policy (`allowed_roots`, `[agents]`, data hosts, redirect probe); P4 see the plan.
+
+1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
+2. `pixi run md check` verifies repos, Temporal, csub, dirs and the harness pin.
+3. `scripts/autodev-up.sh` first (it owns the one shared Temporal dev server), then `scripts/mia-data-up.sh`:
+   it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and applies the poll schedule.
+   It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Needs `temporal` on PATH
+   (or `$TEMPORAL`).
+4. `pixi run md init-labels` creates the `data:*` labels; `pixi run md seed` seeds dataset issues from the catalog.
+5. `pixi run md test-pr <pr>` runs the crop check on a snippet PR and reports on the PR.
+6. Labels on a dataset issue: `data:go` starts a run; `data:approve` approves the snippet PR / crops for publish.

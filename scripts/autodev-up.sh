@@ -24,7 +24,7 @@ secret = g.private_key_path if g.auth == "app" else g.token_file
 vals = {"DEPLOY": c.deployment, "STATE": Path(c.paths.state_dir).resolve(), "WORK": Path(c.paths.work_root).resolve(),
         "SECRET": Path(secret).resolve() if secret else "",
         "CFG": Path(os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml").resolve(),
-        "TEMPORAL_ADDRESS": c.temporal.address}
+        "TEMPORAL_ADDRESS": c.temporal.address, "NS": c.temporal.namespace}
 for k, v in vals.items():
     if "'" in str(v):  # these go inside single quotes in tmux command strings
         sys.exit(f"autodev-up.sh: {k} contains a single quote: {v}")
@@ -48,15 +48,25 @@ fi
 if tmux has-session -t "$DEPLOY" 2>/dev/null; then echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
 
 # Temporal gRPC and UI stay on this host's loopback; the sandboxed worker reaches them via the allowlist proxy.
-tmux new-session -d -s "$DEPLOY" -n temporal \
-  "'$TEMPORAL' server start-dev --db-filename '$HOST/temporal.db' 2>&1 | tee -a '$HOST/logs/temporal.log'"
-up=
-for _ in $(seq 60); do
-  "$TEMPORAL" operator cluster health --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 && { up=1; break; }
-  sleep 1
-done
-[ -n "$up" ] || { echo "Temporal did not come up; see $HOST/logs/temporal.log"; exit 1; }
-tmux new-window -t "$DEPLOY" -n broker "'$BROKER' --serve '$RUN/csub.sock' 2>&1 | tee -a '$HOST/logs/broker.log'"
+# One dev server serves every app: if one is already healthy (started by another up-script), reuse it.
+health() { "$TEMPORAL" operator cluster health --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1; }
+if health; then
+  echo "Temporal already healthy at $TEMPORAL_ADDRESS: reusing it (owned by whichever script started it)"
+  tmux new-session -d -s "$DEPLOY" -n broker "'$BROKER' --serve '$RUN/csub.sock' 2>&1 | tee -a '$HOST/logs/broker.log'"
+else
+  tmux new-session -d -s "$DEPLOY" -n temporal \
+    "'$TEMPORAL' server start-dev --db-filename '$HOST/temporal.db' 2>&1 | tee -a '$HOST/logs/temporal.log'"
+  up=
+  for _ in $(seq 60); do
+    health && { up=1; break; }
+    sleep 1
+  done
+  [ -n "$up" ] || { echo "Temporal did not come up; see $HOST/logs/temporal.log"; exit 1; }
+  tmux new-window -t "$DEPLOY" -n broker "'$BROKER' --serve '$RUN/csub.sock' 2>&1 | tee -a '$HOST/logs/broker.log'"
+fi
+"$TEMPORAL" operator namespace describe -n "$NS" --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
+  || "$TEMPORAL" operator namespace create -n "$NS" --address "$TEMPORAL_ADDRESS"
+
 
 # cwd = $STATE, which sandbox-run.sh binds read-write; the repo (code + pixi env) is read-only.
 tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh' --ro '$REPO' --ro '$CFG' \

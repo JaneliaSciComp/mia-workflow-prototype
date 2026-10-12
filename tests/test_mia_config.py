@@ -31,3 +31,8 @@ def test_rejected(tmp_path, override):
                 for k, v in override.items()}
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, **override)
+
+
+def test_via_proxy_env_override(monkeypatch):
+    monkeypatch.setenv("MIA_DATA_TEMPORAL_VIA_PROXY", "1")
+    assert load_config(PROJECT_DIR / "mia_data.yaml.example").temporal.via_https_proxy is True

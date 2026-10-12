@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
 
-_ENV_OVERRIDES = {"TEMPORAL_ADDRESS": ("temporal", "address")}
+_ENV_OVERRIDES = {"TEMPORAL_ADDRESS": ("temporal", "address"), "MIA_DATA_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy")}
 
 # stage -> (label color, description); labels are `data:<stage>`
 STAGES = {
