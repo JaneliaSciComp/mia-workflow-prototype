@@ -320,8 +320,7 @@ class Activities:
     def _spec(self, kind: str, a: JobArgs, snap: Path | None):
         ws, pins, cfg = Path(a.ws), a.pins, self.cfg
         if kind == "match":
-            dl = json.loads((self._round_dir(a.round_id) / "downloads.json").read_text()).get("dataset_dir")
-            return match_job(cfg, ws, pins, "record.yaml", dl if isinstance(dl, str) and Path(dl).is_dir() else None)
+            return match_job(cfg, ws, pins, "record.yaml")
         existing = self._dataset_dir(a.round_id, pins) / "manifest.json" if a.existing else None
         existing = existing if existing and existing.is_file() else None
         if kind == "smoke":

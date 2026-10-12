@@ -135,7 +135,7 @@ def test_assert_pin_raises_when_lock_changes(tmp_path):
 def test_match_job(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     pins = _pins(cfg)
-    s = match_job(cfg, ws, pins, "record.yaml", str(tmp_path / "dl"))
+    s = match_job(cfg, ws, pins, "record.yaml")
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.claude and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
@@ -143,7 +143,7 @@ def test_match_job(tmp_path):
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
     snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
-    assert {str(cfg.harness.dir), snap, str(tmp_path / "dl")} <= set(s.ro_mounts) and snap in s.command
+    assert sorted(s.ro_mounts) == sorted([str(cfg.harness.dir), snap, cache]) and snap in s.command
     assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)
 
 
@@ -178,7 +178,7 @@ def test_check_hosts_allowed(tmp_path):
 
 def _builders(cfg, ws, pins, tmp_path):
     snap = tmp_path / "snap"
-    return [lambda: match_job(cfg, ws, pins, "record.yaml", None),
+    return [lambda: match_job(cfg, ws, pins, "record.yaml"),
             lambda: smoke_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml"),
             lambda: crop_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True),
             lambda: verify_job(cfg, ws, pins, tmp_path / "crops", "binding.yaml", None)]
@@ -188,7 +188,7 @@ def test_every_builder_sets_harness_env(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     pins = _pins(cfg)
     for s in (b() for b in _builders(cfg, ws, pins, tmp_path)):
-        assert s.env["MIA_HARNESS_JOB_BYTES"] == "1000000"
+        assert s.env["MIA_HARNESS_JOB_BYTES"] == "1000000" and sorted(s.env) == sorted(jobspec.HARNESS_ENV)
         assert s.env["MIA_HARNESS_ALLOWED_HOSTS"] == ",".join(s.allow_hosts)
         assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)
         assert str(cfg.harness.dir) in s.ro_mounts and s.workspace == str(ws)

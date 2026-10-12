@@ -131,7 +131,7 @@ async def test_submit_match_once(tmp_path):
     assert await _submit_match(t) == "777" == await _submit_match(t)
     s = t.csub.submitted
     assert len(s) == 1 and s[0]["claude"] and "data.example.org" in s[0]["allow_hosts"]
-    assert {"path": str(tmp_path / "dl"), "mode": "ro"} in s[0]["mounts"]
+    assert not any(m["path"] == str(tmp_path / "dl") for m in s[0]["mounts"])  # its files are copied into the ws
 
 
 async def test_set_stage_swaps_labels_and_edits_status(tmp_path):

@@ -60,7 +60,7 @@ class _GH:
         pass
 
 
-def _fake_env(monkeypatch, hosts):
+def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",)):
     async def client(cfg):
         return SimpleNamespace(workflow_service=SimpleNamespace(describe_namespace=_aw))
 
@@ -70,7 +70,8 @@ def _fake_env(monkeypatch, hosts):
     async def login(cfg):
         return "bot"
 
-    probe = SimpleNamespace(allow_claude=True, allowed_hosts=hosts, user="u")
+    probe = SimpleNamespace(allow_claude=True, allowed_hosts=hosts, user="u", env_allow=list(env_allow),
+                            allowed_roots=list(roots))
     monkeypatch.setattr(cli, "GitHub", _GH)
     monkeypatch.setattr(cli, "_client", client)
     monkeypatch.setattr(cli, "bot_login", login)
@@ -125,3 +126,17 @@ def test_check_wants_an_installed_harness_env(monkeypatch, tmp_path, capsys):
     assert main(["check"]) == 1
     pin = next(l for l in capsys.readouterr().out.split("\n") if "harness pin" in l)
     assert pin.startswith("BAD") and "cd harness && pixi install" in pin
+
+
+def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
+    _fake_env(monkeypatch, ["*"], env_allow=["MIA_HARNESS_COMMIT"], roots=[str(tmp_path / "work")])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    assert main(["check"]) == 1
+    row = next(l for l in capsys.readouterr().out.split("\n") if "csub broker" in l)
+    assert row.startswith("BAD") and "MIA_HARNESS_JOB_BYTES" in row and "MIA_HARNESS_COMMIT," not in row
+    assert 'add "MIA_HARNESS_*" to env_allow' in row
+    assert f'add "{cfg.harness.dir}", "{cfg.storage.root}" to allowed_roots' in row
+    assert f"home directory {tmp_path.resolve()}" in row and str(cfg.harness.dir) in row.split("home directory")[1]

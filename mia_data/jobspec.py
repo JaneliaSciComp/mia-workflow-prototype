@@ -29,6 +29,8 @@ from .seed import ID_RE
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
+HARNESS_ENV = ("MIA_HARNESS_JOB_BYTES", "MIA_HARNESS_COMMIT", "MIA_HARNESS_ENV_DIGEST", "MIA_HARNESS_ALLOWED_HOSTS",
+               "MIA_HARNESS_CACHE_DIR", "MIA_HARNESS_CACHE_WRITABLE")  # every job's env; csub's env_allow must cover it
 q = shlex.quote
 
 
@@ -147,11 +149,10 @@ def _spec(cfg, kind: str, ws, pins, body: str, allow: list[str], ro: list, recor
                    rw_mounts=rw, env=env, **kw)
 
 
-def match_job(cfg, ws, pins, record_path: str = "record.yaml", dl_dir=None) -> JobSpec:
+def match_job(cfg, ws, pins, record_path: str = "record.yaml") -> JobSpec:
     """The match agent (§7.2). The caller has written `prompt.md` (match_prompt), `record.yaml`, `downloads.json`,
     any `conversion.json` / `manifest.json`, `catalog/` and `SPEC.md` into `ws`, and made the snapshot of
-    `pins.snippets_commit`; `dl_dir` (the downloader's dataset_dir) is mounted read-only. Anthropic hosts come from
-    the csub policy's [agents] table, never from here."""
+    `pins.snippets_commit`. Anthropic hosts come from the csub policy's [agents] table, never from here."""
     rec = yaml.safe_load(Path(ws, record_path).read_text()) or {}
     snap = _snap_dir(cfg, pins.snippets_commit)
     body = (f"ln -sfn {q(str(snap))} snapshot && mkdir -p bin && \\\n"
@@ -159,7 +160,7 @@ def match_job(cfg, ws, pins, record_path: str = "record.yaml", dl_dir=None) -> J
             f'PATH="$PWD/bin:$PATH" claude -p "$(cat prompt.md)" --model {q(cfg.agent.model)} '
             f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
             f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err')
-    return _spec(cfg, "match", ws, pins, body, hosts(record_urls(rec), cfg), [snap, dl_dir],
+    return _spec(cfg, "match", ws, pins, body, hosts(record_urls(rec), cfg), [snap],
                  record=pins.record, claude=True, cpus=cfg.agent.cpus, mem_mb=cfg.agent.mem_mb)
 
 

@@ -11,6 +11,7 @@ import signal
 import sys
 import json
 from datetime import timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import yaml
@@ -37,7 +38,7 @@ async def cmd_check(cfg, args) -> int:
     from autodev.jobs import csub_client
 
     from .binding import missing_hosts
-    from .jobspec import harness_bin, harness_pin
+    from .jobspec import HARNESS_ENV, harness_bin, harness_pin
 
     rows: list[tuple[str, bool, str]] = []
 
@@ -71,6 +72,16 @@ async def cmd_check(cfg, args) -> int:
         bad = [f"host not allowed: {h}" for h in missing_hosts(want, list(p.allowed_hosts))]
         if not p.allow_claude:
             bad.append("allow_claude is false")
+        if miss := [e for e in HARNESS_ENV if not any(fnmatchcase(e, pat) for pat in p.env_allow)]:
+            bad.append(f"env not allowed: {', '.join(miss)} (broker.toml [broker]: add \"MIA_HARNESS_*\" to env_allow)")
+        mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.storage.root]  # every job mounts under these
+        if miss := [str(d) for d in mounted if not any(d.is_relative_to(r) for r in p.allowed_roots)]:
+            bad.append(f"outside allowed_roots: {', '.join(miss)} (broker.toml [broker]: add "
+                       f"{', '.join(json.dumps(d) for d in miss)} to allowed_roots)")
+        home = Path.home().resolve()
+        if inside := [str(d) for d in mounted if d.is_relative_to(home) or home.is_relative_to(d)]:
+            bad.append(f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
+                       "(move it out of $HOME)")
         if bad:
             raise RuntimeError("; ".join(bad))
         return f"broker user {p.user}, {len(want)} hosts ok"
