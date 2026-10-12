@@ -1,6 +1,6 @@
 # MIA crops: snippets, development and production cropping — Spec
 
-**Status:** draft v0.4 · 2026-10-11 · not yet approved. A proof of concept: 2D PNG crops only.
+**Status:** draft v0.5 · 2026-10-11 · not yet approved. A proof of concept: 2D PNG crops only.
 **Repos:** this repo (orchestration, new package `mia_data/`), [JaneliaSciComp/mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) (issues only),
 [JaneliaSciComp/mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) (conversion snippets + their harness), [AI-HHMI/mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) (read-only input)
 
@@ -79,6 +79,23 @@ are not specific to 2D: the same readers will serve the 3D crops later.
   cryoetdataportal. Formats: TIFF (31), OME-TIFF (7), MRC (7), HDF5 (6), and a few OME-Zarr, N5, CZI and ND2.
   Records write zip members as `<zip url>::<member>`, and `technical.arrays[]` gives each array's role, path
   pattern, axes, shape and dtype.
+- **csub networking.** The policy's `allowed_hosts` is a static list of fnmatch patterns in the service
+  account's `broker.toml`, so `*.huggingface.co` works there.
+  - Each job requests its own `allow_hosts`. The broker rejects the whole job if any requested host matches no
+    pattern (`csub/broker/resolve.py`, `check_hosts`). It passes the hosts that survive to the sandbox as one
+    `--allow` per host (`wrapper.py`, `_allow_flags`). `csub probe` returns the policy's patterns.
+  - Agent jobs get the Anthropic hosts from the policy's `[agents]` table (`claude = [...]`), not from the job's
+    request. In `deploy/broker.janelia.toml` that table is commented out, so the service account's policy must
+    enable it.
+  - **Egress goes through an HTTPS proxy only, so FTP doesn't work.** The ftp.ebi.ac.uk datasets must use
+    EMPIAR's `https://ftp.ebi.ac.uk/...` mirror; their records already give https URLs.
+- **The record's host is often not where the bytes come from.** Several hosts redirect downloads elsewhere,
+  and the proxy blocks a redirect target that isn't allowed:
+  - figshare's `ndownloader.figshare.com` redirects to an S3 bucket host
+  - huggingface redirects LFS files to a CDN or xet host
+  - zenodo sometimes bounces through `zenodo.org/api/...` on the same host
+
+  Following the chain is the only way to learn it (§12.5).
 - **TensorSwitch** readers subclass `tensorswitch_v2.readers.base.BaseReader`, but there is no plugin mechanism.
   A snippet may wrap a TensorSwitch reader. It never patches TensorSwitch.
 - **autodev** already implements "labelled issue → PR → revise → human approval → squash-merge" against one repo
@@ -193,7 +210,14 @@ class Array(Protocol):                     # defined in harness/api.py
   - `io.list(url)`: lists zip members
 
   `io` records each file's validators (ETag, Last-Modified, size) for provenance, and refuses a server that
-  answers a range request with the whole body. Snippets never open sockets, call `requests`/`urllib`/`fsspec`
+  answers a range request with the whole body.
+- **`io` follows redirects itself** and checks every hop's host against the hosts the job was granted
+  (`MIA_HARNESS_ALLOWED_HOSTS`, set by the worker) before requesting it. A hop outside that set raises
+  `HostNotAllowed`, with the host and the redirect chain so far, instead of failing later as a generic proxy or
+  connection error. `ftp://` URLs raise the same error. The harness reports it as `host_not_allowed` in the
+  command's JSON output, and the match agent's prompt says to report `blocked` with that host rather than
+  work around it.
+- Snippets never open sockets, call `requests`/`urllib`/`fsspec`
   directly, run subprocesses or write outside `io`'s staging.
 - **Pure readers.** A snippet reads; it never crops, samples, resamples, normalises or writes output. Those belong
   to the harness, so every crop goes through the same code.
@@ -479,10 +503,12 @@ snippets and params. It may not write or alter snippet code.
 - `{"outcome": "ineligible", "shapes": …}`
 - `{"outcome": "blocked", "reason": …}`
 
-The `blocked` case covers things like an undecidable label class, or a dependency missing from the allowlist.
+The `blocked` case covers things like an undecidable label class, a dependency missing from the allowlist, or
+a host the job isn't allowed to reach (`host_not_allowed`, §5.2).
 
 **Worker.**
-1. It checks the binding (record and commit match, URL hosts from the record, snippets exist).
+1. It checks the binding: record and commit match, URL hosts come from the record, every URL is `https`
+   (or `s3` rewritten to https), and the snippets exist.
 2. For `matched` and `ineligible`, it runs its own sandboxed `harness smoke` job, so the agent's claim is
    checked rather than trusted.
 3. If those agree, it records the binding (§8.1) and moves to `testing` or `ineligible`.
@@ -685,10 +711,22 @@ Agents run inside jobs, and their internal tool loops are not Temporal activitie
 
 - **GitHub writes.** Agents never get GitHub credentials or network access to GitHub. The worker does every
   GitHub write: issues, comments, labels, statuses. autodev does the snippet branch pushes and the merge.
-- **Network.** Agent and harness jobs get a per-job allowlist: Anthropic (agent jobs only), package hosts,
-  and the hosts in the binding's URLs, each checked against the record. Verify jobs get no network access. The
-  csub broker policy (`broker.toml`) must allow the catalog's data hosts. FTP through the allowlist proxy is
-  unverified and is tested first; the records also give https mirrors.
+- **Network.** The shape is a maintained ceiling plus a narrow per-job request:
+  - **The ceiling.** The csub policy on the service account allows every catalog data host and the redirect
+    targets found for it (§12.5). It is maintained by hand. For today's 49 datasets it is a short list.
+  - **Each job requests only what it needs.** That is the hosts in its binding's URLs (for the match agent,
+    the record's URLs), each checked against the record, plus the redirect hosts configured for them
+    (`network.redirect_hosts`, §10), plus package hosts for the environment.
+  - **Anthropic hosts** come from the policy's `[agents]` table, and only for agent jobs. Verify jobs get no
+    network access.
+  - **Egress is HTTPS-proxy only.** No FTP; bindings must use https URLs.
+- **New hosts fail closed, before submission.** The worker derives a job's hosts and compares them with the
+  policy patterns from `csub probe`, which it fetches at worker start and again whenever a job is about to be
+  submitted. If any host is missing, it doesn't submit. The issue goes to `needs-human`, naming the missing
+  host and saying that it needs a policy edit. Adding a host is an edit to `broker.toml` on the service account
+  (plus `network.redirect_hosts` if the host redirects), never a code change. The same applies when a running
+  job reports `host_not_allowed` for a redirect target nobody had probed: the comment names that host, the
+  operator probes it (§12.5) and adds it, and a new `data:go` re-runs the round.
 - **Unreviewed code.**
   - PR-head snippet code is agent-written and unreviewed. It runs only in csub sandboxes, with no GitHub access
     and no secrets, writing only to its own workspace and private cache.
@@ -717,7 +755,15 @@ limits:   {job_bytes: 5e9, job_walltime_min: 120, agent_max_budget_usd: 5,
            max_stage_attempts: 1, max_pr_revisions: 5}
 agent:    {…same shape as autodev's agent block…}
 harness:  {dir: /path/to/mia-snippets-checkout}           # pinned per round by commit + pixi.lock digest
+network:
+  package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
+  redirect_hosts:                                          # filled from the §12.5 probe; exact hosts, no patterns
+    ndownloader.figshare.com: [s3-eu-west-1.amazonaws.com]
+    huggingface.co: [cdn-lfs.huggingface.co, cas-bridge.xethub.hf.co]
 ```
+
+The `redirect_hosts` values above are illustrative; the probe decides the real ones. Jobs request exact hosts,
+so the sandbox never depends on wildcard support. The policy may use patterns.
 
 All paths must be on storage that the worker and the cluster jobs both see. Config changes apply to new
 rounds, never to an admitted one.
@@ -755,6 +801,9 @@ with stub Activities.
   - two concurrent attempts (simulating a zombie) give one crop, with neither attempt's temporary directory
     deleted while it is live
   - withdrawal marks crops in the manifest without deleting them
+- **Hosts:** a binding host missing from the probed policy → no submission, and `needs-human` naming the
+  host. A redirect host is added to the job's request from `network.redirect_hosts`. A GitHub host is never
+  requested.
 - **Pinning:** changing config, `main` or the harness between retries doesn't change an admitted round.
 - **The status comment** renders correctly, and the **replay test** passes on recorded histories for both
   paths.
@@ -766,6 +815,8 @@ with stub Activities.
   - the PNG mappings for every row of §6.3, including 0/255 binary masks and NaN/inf floats
   - the byte cap, `io` range and cache behaviour against a local HTTP server, and refusing a server that
     ignores `Range`
+  - a redirect to a host outside `MIA_HARNESS_ALLOWED_HOSTS` raises `HostNotAllowed` with the chain, before
+    any request to that host; `ftp://` raises the same
   - dataset-cache CRC32 checks, and read-only use by unreviewed jobs
 - CI-check tests with good and bad PR file lists, including `WITHDRAWN.yaml` edits by a bot
 
@@ -795,12 +846,21 @@ candidate: a zip member with labels and 1024×1024 planes. Before scaling out, a
      pending, so autodev waits instead of attempting a merge that branch protection would refuse.
    - The GitHub client gains commit statuses, tree SHAs of a directory at a ref, raw file reads, and issues and
      comments found by marker.
-   - A `snippets` deployment config with `agent.allow_hosts` set to the catalog's data hosts, and `extra_mounts`
+   - A `snippets` deployment config with `agent.allow_hosts` set to the catalog's data hosts and their redirect
+     hosts, and `extra_mounts`
      giving read-only access to the pinned harness checkout, so its agent can run `harness smoke` on real data.
      Its agent jobs use `--max-budget-usd` and walltime like mia-data's.
 4. **`mia-data test-pr <pr> --binding <file>`.** A manual admission command that runs §7.4 on an explicit PR
    head and publishes the status. Human-authored snippet PRs, including the two bootstrap ones, need it before
    any data issue exists. It doesn't bypass approval.
+5. **Network setup** (one-time, then again for every new host):
+   - Enable the `[agents]` `claude` table in the service account's `broker.toml`.
+   - Add every catalog data host to `allowed_hosts`.
+   - **Redirect probe.** From inside a csub job, run `curl -sIL` on each binding or sample URL, and record the
+     redirect chain. Add every host in the chain to the policy, and add the hops that aren't the record's own
+     host to `network.redirect_hosts`. Keep the probe output in the runbook so the next person can see why a
+     host is there.
+   - Confirm that FTP is unusable and that the EMPIAR records' https mirrors work.
 
 ## 13. Open questions (defaults in bold)
 
@@ -809,7 +869,12 @@ candidate: a zip member with labels and 1024×1024 planes. Before scaling out, a
    set, comments give file paths.
 3. **Byte cap for agent downloads:** can the agentic-sandbox allowlist proxy count bytes per job? If not,
    walltime is the bound (§6.5).
-4. **Review fatigue on the matched path:** every matched binding needs a `data:approve` today. If galleries
+4. **Who maintains the csub policy, and how quickly?** A dataset on a new host, or one behind a new redirect
+   target, stops at `needs-human` until an operator edits `broker.toml` on the service account (§9). Default:
+   **the comment names the host; an operator probes it, edits the policy and re-triggers.** Automating the
+   probe, e.g. a `mia-data probe-hosts <record>` command that runs the §12.5 job and prints the policy lines
+   to add, is cheap if this happens often. The policy edit itself stays manual.
+5. **Review fatigue on the matched path:** every matched binding needs a `data:approve` today. If galleries
    for default bindings (empty `params`, no overrides in `reasons`) are routinely fine, they could skip review.
    Keep the gate until there is evidence.
 
