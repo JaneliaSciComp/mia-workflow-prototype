@@ -158,11 +158,20 @@ def test_crop_job_cache_mode(tmp_path, trusted):
     assert "--n 4 --seed s-t --round i1-e2 --batch 0 --out crops" in s.command and not s.claude
 
 
+def test_crop_job_mounts_the_existing_manifests_dir(tmp_path):
+    cfg, ws, m = _cfg(tmp_path), _ws(tmp_path), tmp_path / "ds" / "manifest.json"
+    s = crop_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s", "i1-e2", 1, m, True)
+    assert s.command.rstrip().split("\n")[1].endswith(f"--existing {m}")
+    assert str(m.parent) in s.ro_mounts and str(m) not in s.ro_mounts  # csub mounts directories only
+
+
 def test_verify_job(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     crops = tmp_path / "crop-ws" / "crops"
-    s = verify_job(cfg, ws, _pins(cfg), crops, "binding.yaml", tmp_path / "manifest.json")
-    assert s.allow_hosts == [] and str(crops) in s.ro_mounts and str(tmp_path / "manifest.json") in s.ro_mounts
+    m = tmp_path / "ds" / "manifest.json"
+    s = verify_job(cfg, ws, _pins(cfg), crops, "binding.yaml", m)
+    assert s.allow_hosts == [] and str(crops) in s.ro_mounts and f"--existing {m} " in s.command
+    assert str(m.parent) in s.ro_mounts and str(m) not in s.ro_mounts  # csub mounts directories only
     assert s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_DIR"] == "" and "harness preview" in s.command
     assert "verify.json; v=$?" in s.command  # preview runs even when a crop fails verification
 

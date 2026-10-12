@@ -128,6 +128,11 @@ def _binding(ws, rel: str) -> tuple[str, list[str]]:
     return b.get("record"), [u for a in (b.get("raw") or []) + (b.get("labels") or []) for u in a.get("urls") or []]
 
 
+def _parent(f):
+    """The directory to mount for an input file (csub mounts directories only)."""
+    return Path(f).parent if f else None
+
+
 def _spec(cfg, kind: str, ws, pins, body: str, allow: list[str], ro: list, record: str | None = None,
           writable: bool = False, **kw) -> JobSpec:
     assert_pin(cfg, pins)  # the admitted harness, or no job
@@ -179,7 +184,7 @@ def crop_job(cfg, ws, pins, binding_path: str, snapshot, record_path: str, n: in
     body = (f"{_harness(cfg)} crop {q(binding_path)} --snippets {q(str(snapshot))} --record {q(record_path)} "
             f"--n {int(n)} --seed {q(seed)} --round {q(round_id)} --batch {int(batch)} --out crops"
             + (f" --existing {q(str(existing))}" if existing else ""))
-    return _spec(cfg, "crop", ws, pins, body, hosts(urls, cfg), [snapshot, existing], record=record,
+    return _spec(cfg, "crop", ws, pins, body, hosts(urls, cfg), [snapshot, _parent(existing)], record=record,
                  writable=trusted)
 
 
@@ -189,4 +194,4 @@ def verify_job(cfg, ws, pins, crops_dir, binding_path: str, existing) -> JobSpec
     h, d = _harness(cfg), q(str(crops_dir))
     body = (f"{h} verify {d} --binding {q(binding_path)}" + (f" --existing {q(str(existing))}" if existing else "")
             + f" --out verify.json; v=$?\n{h} preview {d} --out preview && (exit $v)")  # overlays even if a crop fails
-    return _spec(cfg, "verify", ws, pins, body, [], [crops_dir, existing])
+    return _spec(cfg, "verify", ws, pins, body, [], [crops_dir, _parent(existing)])
