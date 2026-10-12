@@ -47,12 +47,14 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 CROP_STATUS = {"pending": "test crops running", "success": "test crops passed", "failure": "test crops failed",
                "error": "test crops could not run"}
-PERMANENT = (HostsNotAllowed, PinMoved, Conflict, ValueError, FileNotFoundError)  # inputs that a retry can't fix
+PERMANENT = (HostsNotAllowed, PinMoved, Conflict, ValueError, FileNotFoundError,
+             yaml.YAMLError)  # inputs that a retry can't fix
 
 
 def mia_permanent_errors(fn):
     """autodev's permanent_errors, plus our refusals: a moved pin, a host outside the policy, a publication
-    conflict, a bad input or a missing state file go to needs-human instead of burning retries (§8.2)."""
+    conflict, a bad input (malformed YAML too) or a missing state file go to needs-human instead of burning
+    retries (§8.2)."""
     inner = permanent_errors(fn)
 
     @functools.wraps(fn)

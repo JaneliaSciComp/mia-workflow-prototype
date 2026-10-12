@@ -30,12 +30,10 @@ limits:
   agent_max_budget_usd: 5
   max_stage_attempts: 1
   max_pr_revisions: 5
-agent:
-  model: sonnet
-  walltime_min: 60
+agent:                   # match job; its walltime is limits.job_walltime_min. autodev's agent.allow_hosts,
+  model: sonnet          # extra_mounts and api_key_env are not used by mia-data (config rejects them)
   cpus: 1
   mem_mb: 4000
-  extra_mounts: []
   path_prepend: []
 harness:
   dir: /path/to/mia-snippets-checkout   # pinned per round by commit + pixi.lock digest

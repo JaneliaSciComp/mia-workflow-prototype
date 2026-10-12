@@ -33,6 +33,13 @@ def test_rejected(tmp_path, override):
         make_cfg(tmp_path, **override)
 
 
+@pytest.mark.parametrize("key, value", [("allow_hosts", ["x.example.org"]), ("extra_mounts", ["/data:ro"]),
+                                        ("api_key_env", "KEY")])
+def test_rejects_autodev_only_agent_settings(tmp_path, key, value):
+    with pytest.raises(ValidationError, match=f"agent.{key} is not used by mia-data"):
+        make_cfg(tmp_path, agent={key: value})
+
+
 def test_via_proxy_env_override(monkeypatch):
     monkeypatch.setenv("MIA_DATA_TEMPORAL_VIA_PROXY", "1")
     assert load_config(PROJECT_DIR / "mia_data.yaml.example").temporal.via_https_proxy is True

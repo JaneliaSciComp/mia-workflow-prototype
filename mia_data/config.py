@@ -129,6 +129,10 @@ class Config(BaseModel):
                 raise ValueError(f"limits.{k} must be finite and positive")
         if self.limits.max_stage_attempts != 1:
             raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")
+        for k in ("allow_hosts", "extra_mounts", "api_key_env"):  # autodev's; mia-data's jobs never read them
+            if getattr(self.agent, k):
+                raise ValueError(f"agent.{k} is not used by mia-data (job hosts come from the binding and network.*, "
+                                 "mounts from the job builders); remove it")
         if not self.crops.licences:
             raise ValueError("crops.licences must not be empty")
         n = self.network

@@ -111,6 +111,15 @@ async def test_read_match_foreign_host_needs_human(tmp_path):
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
 
 
+async def test_prepare_match_malformed_snippet_yaml_is_permanent(tmp_path):
+    t = _setup(tmp_path)
+    pins = await t.a.admit(1, "99")
+    (t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "tiff-zip-member" / "snippet.yaml").write_text("a: [\n")
+    with pytest.raises(ApplicationError) as e:
+        await t.a.prepare_match(1, ROUND, pins, 1)
+    assert e.value.non_retryable and e.value.type in ("ParserError", "ScannerError")
+
+
 async def _submit_match(t):
     pins, ws = await _match_ws(t, None)
     return await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, pins))
