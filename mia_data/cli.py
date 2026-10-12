@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import dataclasses
 import logging
+import os
 import signal
 import sys
 import json
@@ -36,7 +37,7 @@ async def cmd_check(cfg, args) -> int:
     from autodev.jobs import csub_client
 
     from .binding import missing_hosts
-    from .jobspec import harness_pin
+    from .jobspec import harness_bin, harness_pin
 
     rows: list[tuple[str, bool, str]] = []
 
@@ -83,6 +84,8 @@ async def cmd_check(cfg, args) -> int:
 
     async def pin():
         c, digest = harness_pin(cfg)
+        if not (b := harness_bin(cfg)).is_file() or not os.access(b, os.X_OK):
+            raise RuntimeError(f"{b} is missing or not executable: run `cd harness && pixi install` in harness.dir")
         return f"{c[:12]} env {digest[:12]}"
 
     for kind in ("data", "snippets", "catalog"):

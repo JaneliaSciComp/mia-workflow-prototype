@@ -78,11 +78,19 @@ def _fake_env(monkeypatch, hosts):
     monkeypatch.setattr("mia_data.jobspec.harness_pin", lambda cfg: ("c" * 40, "d" * 64))
 
 
+def _harness_bin(cfg, mode=0o755):
+    b = cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "harness"
+    b.parent.mkdir(parents=True)
+    b.write_text("#!/bin/sh\n")
+    b.chmod(mode)
+
+
 def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys):
     _fake_env(monkeypatch, ["*"])
     for d in ("state", "work", "storage"):
         (tmp_path / d).mkdir()
     cfg = make_cfg(tmp_path)
+    _harness_bin(cfg)
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
@@ -106,3 +114,14 @@ def test_check_flags_unallowed_data_host(monkeypatch, tmp_path, capsys):
 
 async def _ok(gh):
     return SimpleNamespace(json=lambda: {"full_name": gh.repo})
+
+
+def test_check_wants_an_installed_harness_env(monkeypatch, tmp_path, capsys):
+    _fake_env(monkeypatch, ["*"])
+    cfg = make_cfg(tmp_path)
+    _harness_bin(cfg, 0o644)
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    assert main(["check"]) == 1
+    pin = next(l for l in capsys.readouterr().out.split("\n") if "harness pin" in l)
+    assert pin.startswith("BAD") and "cd harness && pixi install" in pin

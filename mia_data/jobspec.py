@@ -110,8 +110,14 @@ def match_prompt(pins) -> str:
         record=pins.record, record_commit=pins.record_commit, snippets_commit=pins.snippets_commit)
 
 
+def harness_bin(cfg) -> Path:
+    """The harness environment's entry point. Run directly: `pixi run` wants the install lock on the prefix, and
+    `harness.dir` is mounted read-only."""
+    return cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "harness"
+
+
 def _harness(cfg) -> str:
-    return f"pixi run --manifest-path {q(str(cfg.harness.dir / 'harness' / 'pixi.toml'))} harness"
+    return q(str(harness_bin(cfg)))
 
 
 def _binding(ws, rel: str) -> tuple[str, list[str]]:

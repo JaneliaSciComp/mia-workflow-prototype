@@ -194,8 +194,7 @@ def test_every_builder_sets_harness_env(tmp_path):
         assert str(cfg.harness.dir) in s.ro_mounts and s.workspace == str(ws)
         assert s.command.rstrip().endswith('echo "$rc" > exit_code\nexit "$rc"')
         assert s.walltime_min == cfg.limits.job_walltime_min and not set(s.ro_mounts) & set(s.rw_mounts)
-        if not s.claude:
-            assert f"pixi run --manifest-path {cfg.harness.dir}/harness/pixi.toml harness " in s.command
+        assert f"{cfg.harness.dir}/harness/.pixi/envs/default/bin/harness" in s.command and "pixi run" not in s.command
 
 
 def test_every_builder_refuses_a_moved_harness(tmp_path):
