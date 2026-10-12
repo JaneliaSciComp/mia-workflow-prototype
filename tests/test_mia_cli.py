@@ -16,10 +16,10 @@ def _run(monkeypatch, tmp_path, argv, **cfg_over):
 def _storage(cfg, withdrawn=None):
     for ds, crops in {"ds1": [("a", "tiff-zip"), ("b", "other")], "ds2": [("c", "tiff-zip")]}.items():
         for cid, snip in crops:
-            d = cfg.storage.root / ds / cid
+            d = cfg.paths.storage_root / ds / cid
             d.mkdir(parents=True)
             (d / "crop.json").write_text(json.dumps({"crop_id": cid, "snippets": [{"name": snip, "commit": "1"}]}))
-        (cfg.storage.root / ds / "manifest.json").write_text(json.dumps({"crops": [
+        (cfg.paths.storage_root / ds / "manifest.json").write_text(json.dumps({"crops": [
             {"crop_id": c, "snippets": [{"name": n}], "withdrawn": False} for c, n in crops]}))
 
 
@@ -41,8 +41,8 @@ def test_reindex_marks_withdrawn(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["reindex", "ds2"]) == 0
     assert capsys.readouterr().out == "ds2: 1 crop(s)\n"
-    assert json.loads((cfg.storage.root / "ds2/manifest.json").read_text())["crops"][0]["withdrawn"] is True
-    assert json.loads((cfg.storage.root / "ds1/manifest.json").read_text())["crops"][0]["withdrawn"] is False
+    assert json.loads((cfg.paths.storage_root / "ds2/manifest.json").read_text())["crops"][0]["withdrawn"] is True
+    assert json.loads((cfg.paths.storage_root / "ds1/manifest.json").read_text())["crops"][0]["withdrawn"] is False
     assert main(["reindex"]) == 0
     assert capsys.readouterr().out == "ds1: 2 crop(s)\nds2: 1 crop(s)\n"
 
@@ -139,7 +139,7 @@ def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
     row = next(l for l in capsys.readouterr().out.split("\n") if "csub broker" in l)
     assert row.startswith("BAD") and "MIA_HARNESS_JOB_BYTES" in row and "MIA_HARNESS_COMMIT," not in row
     assert 'add "MIA_HARNESS_*" to env_allow' in row
-    assert f'add "{cfg.harness.dir}", "{cfg.storage.root}" to allowed_roots' in row
+    assert f'add "{cfg.harness.dir}", "{cfg.paths.storage_root}" to allowed_roots' in row
     assert f"home directory {tmp_path.resolve()}" in row and str(cfg.harness.dir) in row.split("home directory")[1]
 
 

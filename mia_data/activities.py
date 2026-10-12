@@ -35,7 +35,7 @@ from .models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, 
                      RoundLimits, SmokeResult, VerifyResult)
 from .publish import CROP_ID_RE, Conflict
 from .seed import ID_RE, MARKER_RE
-from .status import MARKER as STATUS_MARKER, render_crops_table, render_stage, render_status
+from .status import render_binding, render_crops_table, render_links, render_stage
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ class Activities:
         return yaml.safe_load((self._round_dir(round_id) / "record.yaml").read_text()) or {}
 
     def _dataset_dir(self, round_id: str, pins: Pins) -> Path:
-        return self.cfg.storage.root / catalog.dataset_folder(self._record(round_id), pins.record)
+        return self.cfg.paths.storage_root / catalog.dataset_folder(self._record(round_id), pins.record)
 
     async def _snapshot(self, sha: str) -> Path:
         return await asyncio.to_thread(snapshot, self.cfg, sha, self.gh_snippets.tokens)
@@ -237,10 +237,11 @@ class Activities:
 
     @activity.defn(name="set_stage")
     @mia_permanent_errors
-    async def set_stage(self, issue: int, stage: str, state: DatasetState | None = None, links: dict | None = None,
-                        detail: str = "") -> None:
-        """Swap the `data:<stage>` label, edit (or create) the status comment and, within a round, post the short
-        stage comment once (§4). `links` as render_status takes them; `detail` is shown neutralized."""
+    async def set_stage(self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "",
+                        extra: str = "") -> None:
+        """Swap the `data:<stage>` label and, within a round, post the stage's comment once (§4): the stage line,
+        `detail` (neutralized), the caller's `extra` (crops table, totals, PR link) and links to the folders to
+        look at. Comments are never edited: each stage and result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         gh, want = self.gh_data, self.cfg.label(stage)
@@ -250,23 +251,29 @@ class Activities:
                 await gh.remove_label(issue, name)
         if want not in current:
             await gh.add_labels(issue, [want])
-        s = dataclasses.replace(state or DatasetState(issue), stage=stage)
-        body = render_status(s, links or {})
-        if not (c := await self._bot_comment(gh, issue, STATUS_MARKER)):
-            await gh.comment(issue, body)
-        elif c.get("body") != body:
-            await gh.edit_comment(c["id"], body)
-        if s.round_id:
-            m = self.cfg.marker(f"stage {s.round_id} {stage}")
-            await self._comment_once(gh, issue, f"{render_stage(stage, self._clean(detail))}\n{m}", m)
+        if not (state and state.round_id):
+            return
+        rid, paths = state.round_id, self.cfg.paths
+        links = {"Workspace": paths.link(self._round_ws(issue, rid))}
+        if stage == "done":
+            pins = self._pins(rid)
+            links["Crops"] = paths.link(self._dataset_dir(rid, pins))
+            links["Gallery"] = (f"https://github.com/{gh.repo}/tree/{self.cfg.gallery.branch}/galleries/"
+                                f"{pins.record}/{rid}")
+        m = self.cfg.marker(f"stage {rid} {stage}")
+        parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
+        await self._comment_once(gh, issue, "\n".join(x for x in parts if x) + f"\n{m}", m)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
-    async def comment(self, issue: int, body: str, marker: str, repo: str = "data") -> str | None:
-        """Once per marker, on a data issue or (repo="snippets") a snippets issue or PR. Returns its URL."""
+    async def comment(self, issue: int, body: str, marker: str, repo: str = "data", binding_path: str | None = None,
+                      binding_hash: str | None = None) -> str | None:
+        """Once per marker, on a data issue or (repo="snippets") a snippets issue or PR, with the binding appended
+        when one is given. Returns its URL."""
         m = self.cfg.marker(marker)
+        body = self._clean(body) + (f"\n\n{render_binding(binding_path, binding_hash)}" if binding_path else "")
         return await self._comment_once(self.gh_snippets if repo == "snippets" else self.gh_data, issue,
-                                        f"{self._clean(body)}\n\n{m}", m)
+                                        f"{body}\n\n{m}", m)
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors

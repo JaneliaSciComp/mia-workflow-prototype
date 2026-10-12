@@ -12,9 +12,14 @@ temporal:
   poll_minutes: 2
 paths:
   state_dir: ~/.local/state/mia-data
-  work_root: /shared/TBD/mia-data-work
-storage:
-  root: /shared/TBD/mia-crops
+  # a root is a path, or {path, url} with the Fileglancer (or other browser) URL of that folder:
+  # issue comments then link the round's workspace and the dataset's crops folder
+  work_root:
+    path: /shared/TBD/mia-data-work
+    url: https://fileglancer.example.org/browse/TBD/mia-data-work
+  storage_root:
+    path: /shared/TBD/mia-crops
+    url: https://fileglancer.example.org/browse/TBD/mia-crops
 gallery:
   branch: galleries
 crops:

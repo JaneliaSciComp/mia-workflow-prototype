@@ -1,5 +1,4 @@
-from mia_data.models import DatasetState
-from mia_data.status import MARKER, render_crops_table, render_stage, render_status
+from mia_data.status import render_binding, render_crops_table, render_links, render_stage
 
 
 def rows(n, cid="i1-e2-b1-{:03d}"):
@@ -18,15 +17,18 @@ def test_crops_table_small_plain_large_details():
     assert t16.count("![overlay]") == 16
 
 
-def test_status_has_no_agent_markers(tmp_path):
-    bad = "<!-- mia-data:status -->"
+def test_binding_block_fences_and_neutralizes(tmp_path):
+    bad = "<!-- mia-data: stage x -->"
     p = tmp_path / "binding.yaml"
     p.write_text(f"reasons: ['{bad}', '```', 'ghp_{'a' * 36}']\n")
-    st = DatasetState(issue=3, stage="review", binding=str(p), binding_hash="ab" * 32, pr=7)
-    crops = render_crops_table(rows(2, cid=bad + "|{}"))
-    out = render_status(st, {"crops": crops, "totals": f"2 published {bad}", "pr": "https://github.com/o/s/pull/7"})
-    assert out.startswith(MARKER + "\n") and out.count("<!--") == 1
-    assert "data:review" in out and "ab" * 32 in out and "[#7](https://github.com/o/s/pull/7)" in out
-    assert "ghp_" not in out and "````yaml" in out  # longer fence than any backtick run in the binding
-    assert "(none)" in render_status(DatasetState(issue=3), {})
-    assert "<!--" not in render_stage("needs-human", bad)
+    out = render_binding(str(p), "ab" * 32)
+    assert out.startswith("**Binding** (sha256 `" + "ab" * 32 + "`):\n````yaml\n") and out.rstrip().endswith("````")
+    assert "<!--" not in out and "ghp_" not in out
+    assert render_binding(str(tmp_path / "missing.yaml"), None) == "**Binding:** (none)\n"
+
+
+def test_links_line_lists_only_given_urls():
+    assert render_links({"Workspace": None, "Crops": "https://fg.example/b/c d", "Gallery": "https://g/x"}) == \
+        "**Folders:** [Crops](https://fg.example/b/c%20d) · [Gallery](https://g/x)\n"
+    assert render_links({"Workspace": None}) == ""
+    assert "<!--" not in render_stage("needs-human", "<!-- mia-data:status -->")

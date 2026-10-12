@@ -68,7 +68,6 @@ class DatasetState:
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)
-    links: dict = field(default_factory=dict)  # what the status comment shows: crops table, PR, totals
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

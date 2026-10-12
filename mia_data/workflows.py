@@ -111,9 +111,9 @@ class MiaDataDataset:
         self.s.handled = (self.s.handled + [e.event_id])[-50:]
         return False
 
-    async def _stage(self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6)) -> None:
+    async def _stage(self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = "") -> None:
         self.s.stage = stage
-        await self._act("set_stage", self.s.issue, stage, self.s, self.s.links, detail, budget=budget)
+        await self._act("set_stage", self.s.issue, stage, self.s, detail, extra, budget=budget)
 
     async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
         """Every label queued now arrived while it couldn't count: answer each new one with refuse_label."""
@@ -132,10 +132,10 @@ class MiaDataDataset:
         except ActivityError as x:  # best effort: the event is handled either way
             workflow.logger.warning("issue #%d: could not refuse %s %s: %s", self.s.issue, label, e.event_id, _err(x))
 
-    async def _finish(self, stage: str, detail: str = "") -> None:
+    async def _finish(self, stage: str, detail: str = "", extra: str = "") -> None:
         """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises."""
         try:
-            await self._stage(stage, detail, budget=timedelta(hours=24))
+            await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra)
         except ActivityError as x:
             workflow.logger.error("issue #%d: could not set %s: %s", self.s.issue, stage, _err(x))
         await self._refuse_queued()
@@ -173,10 +173,8 @@ class MiaDataDataset:
 
     async def _gallery(self, tag: str, cw: str, vw: str, v: VerifyResult) -> GalleryResult:
         s = self.s
-        g = await self._act("publish_gallery", s.issue, s.round_id, tag, cw, vw, v.crops, seconds=300,
-                            result_type=GalleryResult)
-        self.s.links["crops"] = g.table
-        return g
+        return await self._act("publish_gallery", s.issue, s.round_id, tag, cw, vw, v.crops, seconds=300,
+                               result_type=GalleryResult)
 
     async def _test(self, sha: str, seed: str, trusted: bool = True, notes: tuple = ()) -> tuple[Test, list[str], str]:
         """§7.4 test crops at `sha`, judged and galleried: (the Test, the failed jobs, the report)."""
@@ -196,7 +194,7 @@ class MiaDataDataset:
         s = self.s
         s.round_id, s.seed = f"i{s.issue}-e{e.event_id}", str(workflow.random().getrandbits(64))
         s.pins = s.binding = s.binding_hash = s.snippet_name = s.snippet_issue = s.pr = None
-        s.tests, s.attempts, s.links, s.pending = [], {}, {}, []
+        s.tests, s.attempts, s.pending = [], {}, []
         s.pins = await self._act("admit", s.issue, e.event_id, seconds=300, result_type=Pins)
         self.lim = await self._act("limits", result_type=RoundLimits)
         await self._stage("matching")
@@ -231,7 +229,7 @@ class MiaDataDataset:
         t, bad, report = await self._test(sha, s.seed + "-t", notes=("", "Binding reasons:",
                                                                       *(f"- {x}" for x in m.reasons)))
         s.tests.append(t)
-        await self._act("comment", s.issue, report, f"test {s.round_id} {sha}")
+        await self._act("comment", s.issue, report, f"test {s.round_id} {sha}", "data", s.binding, s.binding_hash)
         if not t.ok:
             return await self._finish("needs-human", "; ".join(["the test crops failed; nothing was produced", *bad]))
         await self._stage("review")
@@ -252,19 +250,18 @@ class MiaDataDataset:
         cw, vw, v, c, _ = await self._crop("production", sha, n, s.seed + "-p", 1)
         # verify's exit is not checked: harness verify exits 1 whenever a crop fails; its report decides
         r = await self._act("publish_crops", s.issue, s.round_id, cw, v.crops, sha, seconds=300, result_type=dict)
-        if v.crops:
-            await self._gallery("production", cw, vw, v)
+        table = (await self._gallery("production", cw, vw, v)).table if v.crops else ""
         n_eff = n if v.n_effective is None else min(n, v.n_effective)
         need = max(1, math.ceil(n_eff / 2))
-        s.links["totals"] = (f"{len(r['published'])} new crops published this round ({v.ok_count} of {n_eff} "
-                             f"passed); {r['total']} in the dataset")
+        extra = f"{table}\n**Totals:** {len(r['published'])} new crops published this round ({v.ok_count} of {n_eff} " \
+                f"passed); {r['total']} in the dataset\n"
         if not _ok(c):  # a limit or a crash (§6.5): the surviving crops are published, the round needs a human
             return await self._finish("needs-human", f"{_failed('crop', c)}; the {v.ok_count} crops that passed "
-                                                     f"are published")
+                                                     f"are published", extra)
         if v.ok_count >= need:
-            return await self._finish("done")
+            return await self._finish("done", extra=extra)
         await self._finish("needs-human", f"only {v.ok_count} of {n_eff} crops passed (at least {need} needed); the "
-                                          f"ones that passed are published")
+                                          f"ones that passed are published", extra)
 
     async def _review(self) -> bool:
         """Wait for an approve newer than the test result (True), or a new go (False). Stale approves are refused."""
@@ -314,7 +311,7 @@ class MiaDataDataset:
         s = self.s
         p = await self._act("pr_state", pr, result_type=PrUpdate)
         while p.snippet_issue == s.snippet_issue:  # else another round's PR
-            s.pr, s.links["pr"] = p.pr, p.url
+            s.pr = p.pr
             where = f"snippet PR {p.url or f'#{p.pr}'}"
             if p.needs_human or p.state == "closed":
                 why = "its issue has `snippets:needs-human`" if p.needs_human else "it was closed without merging"
@@ -355,13 +352,13 @@ class MiaDataDataset:
             raise
         s.tests.append(t)
         mk = f"test {s.round_id} {h}"
-        pr_url = await self._act("comment", p.pr, report, mk, "snippets")
-        issue_url = await self._act("comment", s.issue, report, mk)
-        url = pr_url or issue_url  # the status links the PR comment
+        pr_url = await self._act("comment", p.pr, report, mk, "snippets", s.binding, s.binding_hash)
+        issue_url = await self._act("comment", s.issue, report, mk, "data", s.binding, s.binding_hash)
+        url = pr_url or issue_url  # the commit status links the PR comment
         now = await self._act("pr_state", p.pr, result_type=PrUpdate)
         await self._act("set_crop_status", h, "success" if t.ok else "failure", url)  # h's own, current or not
         if t.ok and now.head_sha == h and now.state == "open":
-            await self._stage("pr-ready")
+            await self._stage("pr-ready", extra=f"**Snippet PR:** {now.url or f'#{p.pr}'}\n")
         return now
 
     async def _merged(self, p: PrUpdate) -> None:
@@ -381,7 +378,7 @@ class MiaDataDataset:
             t, bad, report = await self._test(mc, f"{s.seed}-t{mc[:7]}")
             t.tree_sha = await self._act("tree_sha", mc, b["name"])
             s.tests.append(t)
-            await self._act("comment", s.issue, report, f"test {s.round_id} {mc}")
+            await self._act("comment", s.issue, report, f"test {s.round_id} {mc}", "data", s.binding, s.binding_hash)
             if not t.ok:
                 return await self._finish("needs-human", "; ".join(
                     ["the merge commit's test crops failed; nothing was produced", *bad]))

@@ -94,13 +94,15 @@ round summary count, so a short prefix approved earlier cannot approve a later h
 ## mia-data
 
 Prerequisites P1-P4 ([plan](plans/2026-10-11-mia-crops-poc.md)): P1 repos `mia-workflow-data` and `mia-snippets`
-with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage.root` visible from compute
+with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage_root` (all under `paths`) visible from compute
 nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes `"MIA_HARNESS_*"`;
-`allowed_roots` covers `harness.dir`, `work_root` and `storage.root`, none of them under `$HOME`, which csub never
+`allowed_roots` covers `harness.dir`, `work_root` and `storage_root`, none of them under `$HOME`, which csub never
 mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `md check`
 names what is missing); P4 see the plan.
 
 1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
+   `paths.work_root` and `paths.storage_root` take a path or `{path, url}`; with a `url` (the folder in Fileglancer)
+   the issue comments link the round's workspace and the dataset's crops folder.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
    trees API, which answers 409 on an empty repo.
 2. `pixi run md check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness && pixi

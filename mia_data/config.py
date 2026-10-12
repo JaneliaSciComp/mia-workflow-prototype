@@ -8,6 +8,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
@@ -55,12 +56,31 @@ class GitHubCfg(BaseModel):
 
 
 class PathsCfg(BaseModel):
+    """`work_root` and `storage_root` take a path, or `{path, url}` where `url` is where a browser (Fileglancer)
+    shows that folder; issue comments then link the folders they mention."""
     state_dir: Path = Path("~/.local/state/mia-data")
     work_root: Path
+    work_root_url: str | None = None
+    storage_root: Path
+    storage_root_url: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _flatten(cls, d):
+        if isinstance(d, dict):
+            d = dict(d)
+            for k in ("work_root", "storage_root"):
+                if isinstance(v := d.get(k), dict):
+                    d[k], d[f"{k}_url"] = v.get("path"), v.get("url")
+        return d
 
-class StorageCfg(BaseModel):
-    root: Path
+    def link(self, p: Path) -> str | None:
+        """The browse URL of `p`, from the url of the root it is under; None when that root has none."""
+        for root, url in ((self.work_root, self.work_root_url), (self.storage_root, self.storage_root_url)):
+            if url and p.is_relative_to(root):
+                rel = p.relative_to(root)
+                return url.rstrip("/") + ("" if rel == Path() else "/" + quote(rel.as_posix()))
+        return None
 
 
 class GalleryCfg(BaseModel):
@@ -98,7 +118,6 @@ class Config(BaseModel):
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
     paths: PathsCfg
-    storage: StorageCfg
     gallery: GalleryCfg = GalleryCfg()
     crops: CropsCfg = CropsCfg()
     limits: LimitsCfg = LimitsCfg()
@@ -117,11 +136,11 @@ class Config(BaseModel):
             if getattr(g, attr):
                 setattr(g, attr, getattr(g, attr).expanduser())
         p = self.paths
-        for o in (p, self.storage, self.harness):
+        for o in (p, self.harness):
             for k, v in vars(o).items():
                 if isinstance(v, Path):
                     setattr(o, k, v.expanduser().resolve())
-        for other in (p.work_root, self.storage.root):
+        for other in (p.work_root, p.storage_root):
             if p.state_dir == other or p.state_dir in other.parents or other in p.state_dir.parents:
                 raise ValueError(f"paths.state_dir {p.state_dir} overlaps {other}")
         for k, v in vars(self.limits).items():

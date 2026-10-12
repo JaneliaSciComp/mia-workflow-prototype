@@ -66,13 +66,14 @@ class Mocks:
             return RoundLimits(4, 16, 120, self.revisions)
 
         @activity.defn(name="set_stage")
-        async def set_stage(issue: int, stage: str, state: DatasetState | None = None, links: dict | None = None,
-                            detail: str = "") -> None:
-            rec("set_stage", stage, detail, links)
+        async def set_stage(issue: int, stage: str, state: DatasetState | None = None, detail: str = "",
+                            extra: str = "") -> None:
+            rec("set_stage", stage, detail, extra)
 
         @activity.defn(name="comment")
-        async def comment(issue: int, body: str, marker: str, repo: str = "data") -> str | None:
-            rec("comment", body, marker, repo)
+        async def comment(issue: int, body: str, marker: str, repo: str = "data", binding_path: str | None = None,
+                          binding_hash: str | None = None) -> str | None:
+            rec("comment", body, marker, repo, binding_path)
             return f"https://github.com/o/{repo}/issues/{issue}#{marker}" if repo == "snippets" else None
 
         @activity.defn(name="refuse_label")
@@ -242,7 +243,9 @@ async def test_match_test_review_approve_crop_done(env):
     assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1")
     report = m.of("comment")[0][0]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
-    assert m.of("set_stage")[-1][2]["totals"].startswith("16 new")
+    done = m.of("set_stage")[-1]
+    assert done[0] == "done" and "table" in done[2] and "**Totals:** 16 new" in done[2]
+    assert m.of("comment")[0][3] == "/s/binding-1.yaml"  # the test report carries the matched binding
     assert not m.of("refuse_label")
 
 
@@ -370,7 +373,7 @@ async def test_rollover_in_review_then_approve(env, monkeypatch):
         st = await h.query(MiaDataDataset.status)
     assert (await h.describe()).run_id != h.first_run_id
     assert m.stages == ["matching", "testing", "review", "cropping", "done"] and len(m.of("admit")) == 1
-    assert [a.seed for a in m.jobs() if a.n] == [st.seed + "-t", st.seed + "-p"] and st.links["totals"]
+    assert [a.seed for a in m.jobs() if a.n] == [st.seed + "-t", st.seed + "-p"] and "16 new" in m.of("set_stage")[-1][2]
 
 
 async def test_test_crop_failure_never_produces(env):
@@ -455,7 +458,8 @@ async def test_develop_happy_path(env):
     assert m.of("prepare_job")[-1] == ("verify-production", f"/s/binding-pr-{MC[:7]}.yaml")
     assert m.of("publish_crops")[0][2] == MC and m.of("publish_gallery")[0] == (H1, 4)
     assert st.snippet_issue == 100 and st.pr == 5 and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
-    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T")] and st.links["pr"] == PR_URL
+    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T")]
+    assert [a[2] for a in m.of("set_stage") if a[0] == "pr-ready"] == [f"**Snippet PR:** {PR_URL}\n"]
     assert {a[2] for a in m.of("comment")} == {"snippets", "data"}
 
 

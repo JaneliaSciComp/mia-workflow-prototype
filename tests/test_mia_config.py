@@ -43,3 +43,14 @@ def test_rejects_autodev_only_agent_settings(tmp_path, key, value):
 def test_via_proxy_env_override(monkeypatch):
     monkeypatch.setenv("MIA_DATA_TEMPORAL_VIA_PROXY", "1")
     assert load_config(PROJECT_DIR / "mia_data.yaml.example").temporal.via_https_proxy is True
+
+
+def test_roots_take_a_path_or_a_path_with_browse_url(tmp_path):
+    c = make_cfg(tmp_path, paths={"work_root": {"path": str(tmp_path / "w"), "url": "https://fg.example/browse/w/"},
+                                  "storage_root": str(tmp_path / "crops")})
+    assert c.paths.work_root == (tmp_path / "w").resolve() and c.paths.storage_root == (tmp_path / "crops").resolve()
+    assert c.paths.link(c.paths.work_root / "issue-5" / "round x") == "https://fg.example/browse/w/issue-5/round%20x"
+    assert c.paths.link(c.paths.work_root) == "https://fg.example/browse/w"
+    assert c.paths.link(c.paths.storage_root / "ds") is None  # no url for that root
+    assert c.paths.link(tmp_path / "elsewhere") is None
+    assert not hasattr(c, "storage")

@@ -150,17 +150,32 @@ async def test_submit_match_once(tmp_path):
     assert not any(m["path"] == str(tmp_path / "dl") for m in s[0]["mounts"])  # its files are copied into the ws
 
 
-async def test_set_stage_swaps_labels_and_edits_status(tmp_path):
+async def test_set_stage_swaps_labels_and_appends_one_comment_per_stage(tmp_path):
     t = _setup(tmp_path)
+    t.cfg.paths.work_root_url, t.cfg.paths.storage_root_url = "https://fg.example/work", "https://fg.example/crops"
     t.data.issues[1]["labels"] = [{"name": "data:new"}, {"name": "has-labels"}]
-    await t.data.comment(1, "forged <!-- mia-data:status -->", login="mallory")
-    s = DatasetState(1, round_id=ROUND)
+    await t.a.admit(1, "99")
+    s = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     await t.a.set_stage(1, "matching", s)
-    await t.a.set_stage(1, "needs-human", s, detail="host <!-- x --> missing")
+    await t.a.set_stage(1, "matching", s)  # a retry adds nothing
+    await t.a.set_stage(1, "done", s, "", "<details>16 crops</details>\n\n**Totals:** 16 new")
+    await t.a.set_stage(1, "needs-human", s, "host <!-- x --> missing")
     assert [x["name"] for x in t.data.issues[1]["labels"]] == ["has-labels", "data:needs-human"]
     bodies = [c["body"] for c in t.data.comments[1]]
-    assert bodies[0].startswith("forged") and len(bodies) == 4  # forged, status (edited in place), two stage notes
-    assert "`data:needs-human`" in bodies[1] and "<!-- x" not in bodies[3]
+    assert len(bodies) == 3 and all(b.startswith("**Stage:** `data:") for b in bodies)  # nothing edited in place
+    assert "<!-- x" not in bodies[2] and "host" in bodies[2]
+    assert f"[Workspace](https://fg.example/work/issue-1/{ROUND})" in bodies[2]
+    assert "**Totals:** 16 new" in bodies[1] and "[Crops](https://fg.example/crops/lm-human-rec-1)" in bodies[1]
+    assert "[Gallery](https://github.com/o/data/tree/galleries/galleries/rec-1/" + ROUND + ")" in bodies[1]
+
+
+async def test_comment_can_carry_the_binding(tmp_path):
+    t = _setup(tmp_path)
+    b = tmp_path / "b.yaml"
+    b.write_text("record: rec-1\n")
+    await t.a.comment(1, "Test crops: **passed**", "test r 1", "data", str(b), "cd" * 32)
+    body = t.data.comments[1][0]["body"]
+    assert body.startswith("Test crops: **passed**\n\n**Binding** (sha256 `" + "cd" * 32 + "`):\n```yaml\nrecord: rec-1\n```")
 
 
 async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
@@ -278,7 +293,7 @@ async def test_publish_crops_into_dataset_folder(tmp_path):
     cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
     v = _crop(cw, "c1", 0)
     r = await t.a.publish_crops(1, ROUND, str(cw), [v], SNIP_SHA)
-    m = json.loads((t.cfg.storage.root / "lm-human-rec-1" / "manifest.json").read_text())
+    m = json.loads((t.cfg.paths.storage_root / "lm-human-rec-1" / "manifest.json").read_text())
     assert r == {"published": ["c1"], "already": [], "total": 1} and m["crops"][0]["files"] == v["files"]
     with pytest.raises(ApplicationError):  # not this round's workspace
         await t.a.publish_crops(1, "i1-e100", str(cw), [v], SNIP_SHA)

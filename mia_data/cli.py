@@ -85,7 +85,7 @@ async def cmd_check(cfg, args) -> int:
                        '"claude.ai", "platform.claude.com"])')
         if miss := [e for e in HARNESS_ENV if not any(fnmatchcase(e, pat) for pat in p.env_allow)]:
             bad.append(f"env not allowed: {', '.join(miss)} (broker.toml [broker]: add \"MIA_HARNESS_*\" to env_allow)")
-        mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.storage.root]  # every job mounts under these
+        mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.paths.storage_root]  # every job mounts under these
         if miss := [str(d) for d in mounted if not any(d.is_relative_to(r) for r in p.allowed_roots)]:
             bad.append(f"outside allowed_roots: {', '.join(miss)} (broker.toml [broker]: add "
                        f"{', '.join(json.dumps(d) for d in miss)} to allowed_roots)")
@@ -103,11 +103,11 @@ async def cmd_check(cfg, args) -> int:
         return f"broker user {p.user}, {len(want)} hosts ok"
 
     async def dirs():
-        for d in (cfg.paths.state_dir, cfg.paths.work_root, cfg.storage.root):
+        for d in (cfg.paths.state_dir, cfg.paths.work_root, cfg.paths.storage_root):
             t = d / ".write-test"
             t.touch()
             t.unlink()
-        return f"{cfg.paths.state_dir}, {cfg.paths.work_root}, {cfg.storage.root}"
+        return f"{cfg.paths.state_dir}, {cfg.paths.work_root}, {cfg.paths.storage_root}"
 
     async def pin():
         c, digest = harness_pin(cfg)
@@ -127,7 +127,7 @@ async def cmd_check(cfg, args) -> int:
 
 
 async def cmd_crops_by_snippet(cfg, args) -> int:
-    for m in sorted(cfg.storage.root.glob("*/manifest.json")):
+    for m in sorted(cfg.paths.storage_root.glob("*/manifest.json")):
         for c in json.loads(m.read_text())["crops"]:
             if any(s.get("name") == args.name for s in c.get("snippets") or []):
                 print(m.parent.name, c["crop_id"], str(c.get("withdrawn", False)).lower())
@@ -139,7 +139,7 @@ async def cmd_reindex(cfg, args) -> int:
     from .publish import reindex
 
     withdrawn = _withdrawn(cfg.harness.dir)
-    root = cfg.storage.root
+    root = cfg.paths.storage_root
     for d in [root / args.dataset] if args.dataset else sorted(p for p in root.iterdir() if p.is_dir()):
         print(f"{d.name}: {reindex(d, withdrawn)} crop(s)")
     return 0

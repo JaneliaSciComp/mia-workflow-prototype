@@ -39,10 +39,11 @@ on your behalf are listed at the end: read them, they are the decisions you did 
    Pull requests RW, Contents RW (both), Commit statuses RW, Checks R, Metadata R. Branch protection settings are
    in the mia-snippets README; apply them after the first `test-pr` has posted a `mia-data/crops` status.
 2. **Shared directories** visible from the worker host and compute nodes, none under `$HOME`:
-   `paths.state_dir`, `paths.work_root`, `storage.root`, and a mia-snippets checkout for `harness.dir`
+   `paths.state_dir`, `paths.work_root`, `paths.storage_root` (each root a path or `{path, url}`, the url being the
+   folder in Fileglancer so issue comments can link it), and a mia-snippets checkout for `harness.dir`
    (`cd harness && pixi install` there; jobs call `harness/.pixi/envs/default/bin/harness` directly).
 3. **Broker policy** (`~/.config/csub/broker.toml` of the service account): `allowed_roots` covering
-   `harness.dir`, `work_root`, `storage.root`; `env_allow` with `MIA_HARNESS_*`; `[agents] claude = [...]`
+   `harness.dir`, `work_root`, `storage_root`; `env_allow` with `MIA_HARNESS_*`; `[agents] claude = [...]`
    enabled; the data hosts and their redirect targets in `allowed_hosts`; CPU `[queues.<name>]` tables named after
    real LSF queues (`bqueues`: `short`, `local`), never an invented name. `pixi run md check` prints exactly
    what is missing. Run the redirect probe from the worker host (plan P3) and put the hops into

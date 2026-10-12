@@ -20,7 +20,7 @@ c = load_config()
 g = c.github
 secret = g.private_key_path if g.auth == "app" else g.token_file
 vals = {"DEPLOY": c.deployment, "STATE": Path(c.paths.state_dir).resolve(), "WORK": Path(c.paths.work_root).resolve(),
-        "STORE": Path(c.storage.root).resolve(), "HARNESS": Path(c.harness.dir).resolve(),
+        "STORE": Path(c.paths.storage_root).resolve(), "HARNESS": Path(c.harness.dir).resolve(),
         "SECRET": Path(secret).resolve() if secret else "",
         "CFG": Path(os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml").resolve(),
         "TEMPORAL_ADDRESS": c.temporal.address, "NS": c.temporal.namespace}

@@ -147,10 +147,12 @@ any stage ──> data:needs-human (comment says why) · data:ineligible (no pla
   - a new round starts only after every job from the previous one is terminal (§8.2)
 
   A finished dataset gets additional crops this way. The system never deletes a crop (§5.6).
-- **Status comment.** One bot comment per issue is edited in place (found by a hidden marker). It shows the
-  stage, the binding (§5.4) and its hash, the snippet PR link, the latest crops and production totals. It is
-  a display, not where execution state is stored (§8.1). Every stage change also posts a short new comment, so
-  the history stays readable.
+- **Comments are append-only.** Every stage change posts a new comment and nothing is ever edited in place:
+  the stage, then what that stage produced (the test report carries the binding (§5.4) and its hash, `pr-ready`
+  the snippet PR link, `done` the production crops and totals) and links to the folders to look at (the round's
+  workspace under `work_root`; at `done` also the dataset's crops folder and its gallery), when the config gives
+  a browse URL for the root (`paths.work_root.url`, `paths.storage_root.url`). Comments are a display, not where
+  execution state is stored (§8.1).
 
 ### 4.1 Eligibility
 
@@ -246,7 +248,7 @@ extends the harness environment.
 ### 5.4 Binding
 
 A binding says how to read one dataset. It is data, not code. The worker writes it once per stage into
-`paths.state_dir`, and the workflow holds its path and hash (§8.1). The status comment shows a copy. A new
+`paths.state_dir`, and the workflow holds its path and hash (§8.1). The test report comment shows a copy. A new
 snippet's PR includes the binding as `examples/<record-id>.yaml`, so its reviewer reviews both.
 
 ```yaml
@@ -425,7 +427,7 @@ recoverable by re-reading the recorded box from the source, and approximately fr
 - the snippet name and `snippets_commit` for each array, plus the harness commit and environment digest
 - the seed and batch, `round_id`, `crop_id`, and network bytes fetched
 
-**Placement.** Published crops go in `<storage.root>/{modality}-{organism}-{name}/<crop_id>/`, with folder
+**Placement.** Published crops go in `<paths.storage_root>/{modality}-{organism}-{name}/<crop_id>/`, with folder
 naming as in mia-agentic-search's `tools/miao_layout.py`. `manifest.json` in that folder is an index rebuilt
 from the `crop.json` files and `WITHDRAWN.yaml` (§5.6). Being present in the folder is what makes a crop
 published (§7.6).
@@ -585,7 +587,7 @@ its workspace, and the verify job writes `preview/` in its own (§6.7); a `mia-d
 `work_root/test-pr/<pr>/<head>/`. The `galleries` branch (below) is the
 reviewed artefact. Only files the verify job checked (`raw.png`, which must decode as a 256×256 16-bit PNG) or
 wrote (`overlay.png`) leave the cluster; anything else a PR-head snippet drops in `crops/` is never published.
-`storage.root` must still be under the csub policy's `allowed_roots`: production crop and verify jobs mount the
+`paths.storage_root` must still be under the csub policy's `allowed_roots`: production crop and verify jobs mount the
 dataset folder read-only for `--existing` (§7.5). Before adopting a PR's example binding, the worker validates
 it: same record, URLs from the record, valid schema.
 
@@ -642,8 +644,8 @@ galleries show they're needed (§15).
 4. It sets `data:done`, or `needs-human` if fewer than half of the (lowered) `n` passed.
 
 **Partial results stay published.** Crops that passed verification are published even when the round ends in
-`needs-human`. They each passed every check. The status comment says how many were published, and that the
-round still needs attention.
+`needs-human`. They each passed every check. The `needs-human` comment says how many were published, and that
+the round still needs attention.
 
 ### 7.6 Publication
 
@@ -792,8 +794,11 @@ Agents run inside jobs, and their internal tool loops are not Temporal activitie
 github:   {data_repo: JaneliaSciComp/mia-workflow-data, snippets_repo: JaneliaSciComp/mia-snippets,
            catalog_repo: AI-HHMI/mia-agentic-search, auth: app, …}
 temporal: {address: …, namespace: mia-data}
-paths:    {state_dir: /shared/TBD/mia-data-state, work_root: /shared/TBD/mia-data-work}
-storage:  {root: /shared/TBD/mia-crops}
+paths:    {state_dir: /shared/TBD/mia-data-state,
+           work_root: {path: /shared/TBD/mia-data-work, url: https://fileglancer.example.org/browse/…/mia-data-work},
+           storage_root: {path: /shared/TBD/mia-crops, url: https://fileglancer.example.org/browse/…/mia-crops}}
+                                                            # a root is a path, or {path, url}; url makes the
+                                                            # issue comments link the folders they mention
 gallery:  {branch: galleries}                               # orphan branch of github.data_repo (§7.4)
 crops:    {size: 256, per_round: 16, test_per_round: 4, per_plane: 4, per_file: 8,
            licences: [CC0-1.0, CC-BY-4.0, CC-BY-3.0, MIT]}
@@ -853,7 +858,7 @@ with stub Activities.
 - **Gallery commits:** writing the same file twice makes one commit; a retry after a crash completes the set;
   the branch is created once (zarr-doctor's `test_github_api.py` at `7abe195~1` covered this).
 - **Pinning:** changing config, `main` or the harness between retries doesn't change an admitted round.
-- **The status comment** renders correctly, and the **replay test** passes on recorded histories for both
+- **The stage comments** render correctly, and the **replay test** passes on recorded histories for both
   paths.
 
 **`mia-snippets`:**
@@ -952,7 +957,7 @@ environment.
 - **2D datasets from the catalog**, not just planes of 3D volumes.
 - **A label-alignment check or an agent quality review** in production, if the galleries show bad crops get
   through.
-- **Gallery hosting off GitHub** (fileglancer or an HTTP server over `storage.root`) with an `index.html`,
+- **Gallery hosting off GitHub** (fileglancer or an HTTP server over `paths.storage_root`) with an `index.html`,
   once the `galleries` branch outgrows a demo.
 - **Per-dataset stretch** (percentiles over the whole volume instead of per crop), if per-crop stretching
   turns out to flatten contrast between crops of one dataset.
