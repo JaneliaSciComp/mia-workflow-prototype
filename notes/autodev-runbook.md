@@ -99,8 +99,9 @@ nodes; P3 csub broker policy (`allowed_roots`, `[agents]`, data hosts, redirect 
 2. `pixi run md check` verifies repos, Temporal, csub, dirs and the harness pin.
 3. `scripts/autodev-up.sh` first (it owns the one shared Temporal dev server), then `scripts/mia-data-up.sh`:
    it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and applies the poll schedule.
-   It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Needs `temporal` on PATH
-   (or `$TEMPORAL`).
+   It refuses to run when no Temporal is healthy. Stop: `tmux kill-session -t mia-data`. Uses `temporal` from PATH
+   (or `$TEMPORAL`); otherwise it downloads one into `<state_dir>-host/bin`. The shared Temporal server lives
+   in whichever tmux session started it, so `ad down` on that deployment stops it for mia-data too.
 4. `pixi run md init-labels` creates the `data:*` labels; `pixi run md seed` seeds dataset issues from the catalog.
 5. `pixi run md test-pr <pr>` runs the crop check on a snippet PR and reports on the PR.
 6. Labels on a dataset issue: `data:go` starts a run; `data:approve` approves the snippet PR / crops for publish.

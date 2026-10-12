@@ -39,9 +39,11 @@ RUN=/scratch/$USER/$DEPLOY   # node-local: the csub broker's unix socket
 HOST=$STATE-host
 mkdir -p "$STATE/logs" "$HOST/logs" "$WORK" "$STORE" "$RUN"
 
-# autodev-up.sh downloads a temporal CLI into its own <state>-host/bin; put it on PATH or set $TEMPORAL.
-TEMPORAL=${TEMPORAL:-$(command -v temporal || true)}
-[ -x "$TEMPORAL" ] || { echo "temporal CLI not found: put it on PATH or set \$TEMPORAL"; exit 1; }
+TEMPORAL=${TEMPORAL:-$(command -v temporal || echo "$HOST/bin/temporal")}
+if [ ! -x "$TEMPORAL" ]; then
+  mkdir -p "$HOST/bin"
+  curl -sSL "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64" | tar xz -C "$HOST/bin" temporal
+fi
 if tmux has-session -t "$DEPLOY" 2>/dev/null; then echo "already running: tmux attach -t $DEPLOY"; exit 0; fi
 "$TEMPORAL" operator cluster health --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
   || { echo "no healthy Temporal at $TEMPORAL_ADDRESS: start it with scripts/autodev-up.sh first"; exit 1; }
@@ -60,7 +62,7 @@ tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh'
 cat <<MSG
 mia-data '$DEPLOY' running in tmux (windows: broker, worker; Temporal is shared, namespace $NS).
   attach:      tmux attach -t $DEPLOY
-  logs:        tail -f $STATE/logs/worker.log   (host: $HOST/logs)
+  logs:        tmux attach -t $DEPLOY   (broker log: $HOST/logs/broker.log)
   Temporal UI: http://localhost:8233 (ssh -L 8233:localhost:8233 $(hostname -f))
   stop:        tmux kill-session -t $DEPLOY
   trigger:     add the label 'data:go' to a dataset issue

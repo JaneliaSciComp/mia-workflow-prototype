@@ -67,7 +67,6 @@ fi
 "$TEMPORAL" operator namespace describe -n "$NS" --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
   || "$TEMPORAL" operator namespace create -n "$NS" --address "$TEMPORAL_ADDRESS"
 
-
 # cwd = $STATE, which sandbox-run.sh binds read-write; the repo (code + pixi env) is read-only.
 tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh' --ro '$REPO' --ro '$CFG' \
   --ro '$SECRET' --rw '$WORK' --rw '$RUN' --allow github.com --allow api.github.com --allow localhost -- \
@@ -76,7 +75,7 @@ tmux new-window -t "$DEPLOY" -n worker "cd '$STATE' && '$SANDBOX/sandbox-run.sh'
 "$PY" -m autodev.cli schedule apply
 
 cat <<MSG
-autodev '$DEPLOY' running in tmux (windows: temporal, broker, worker).
+autodev '$DEPLOY' running in tmux (windows: $(tmux list-windows -t "$DEPLOY" -F '#W' | paste -sd, -); Temporal at $TEMPORAL_ADDRESS).
   attach:      tmux attach -t $DEPLOY
   logs:        tail -f $STATE/logs/worker.log   (host: $HOST/logs)
   Temporal UI: http://localhost:8233 (ssh -L 8233:localhost:8233 $(hostname -f))
