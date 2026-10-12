@@ -70,7 +70,7 @@ def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",)):
     async def login(cfg):
         return "bot"
 
-    probe = SimpleNamespace(allow_claude=True, allowed_hosts=hosts, user="u", env_allow=list(env_allow),
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, user="u", env_allow=list(env_allow),
                             allowed_roots=list(roots))
     monkeypatch.setattr(cli, "GitHub", _GH)
     monkeypatch.setattr(cli, "_client", client)

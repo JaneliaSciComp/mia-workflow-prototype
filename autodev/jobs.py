@@ -26,7 +26,7 @@ class JobSpec:
     allow_hosts: list[str] = field(default_factory=list)
     ro_mounts: list[str] = field(default_factory=list)   # absolute paths
     rw_mounts: list[str] = field(default_factory=list)   # absolute paths, besides the workspace
-    claude: bool = False
+    agent: str | None = None  # csub launcher agent mode, e.g. "claude"; gated by the policy [agents] table
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -92,7 +92,7 @@ class CsubJobs:
         else:
             req = {"command": spec.command, "shell": True, "cwd": spec.workspace, "name": spec.name,
                    "cpus": spec.cpus, "mem_mb": spec.mem_mb, "walltime_min": spec.walltime_min,
-                   "allow_hosts": list(spec.allow_hosts), "claude": spec.claude, "session": self.session,
+                   "allow_hosts": list(spec.allow_hosts), "agent": spec.agent, "session": self.session,
                    "mounts": [{"path": spec.workspace, "mode": "rw"}, *({"path": m, "mode": "rw"} for m in spec.rw_mounts),
                               *({"path": m, "mode": "ro"} for m in spec.ro_mounts)]}
             if spec.env:

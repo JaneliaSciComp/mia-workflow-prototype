@@ -26,7 +26,7 @@ def test_csub_problems_roots_are_path_prefixes():
 
     cfg = SimpleNamespace(agent=SimpleNamespace(allow_hosts=[]), paths=SimpleNamespace(work_root=Path("/x/work2")))
     hosts = ["api.anthropic.com", "claude.ai", "platform.claude.com"]
-    probe = SimpleNamespace(allow_claude=True, allowed_hosts=hosts, allowed_roots=["/x/work"])
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, allowed_roots=["/x/work"])
     assert any("allowed_roots" in m for m in _csub_problems(cfg, probe))
     probe.allowed_roots = ["/x"]
     assert _csub_problems(cfg, probe) == []

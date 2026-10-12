@@ -57,8 +57,8 @@ round summary count, so a short prefix approved earlier cannot approve a later h
 
 1. **Service account** on the cluster with rootless podman / bwrap set up (agentic-sandbox README), a csub
    broker installed for it (csub `deploy/INSTALL.md`), and an LSF billing group in its broker policy.
-2. **Broker policy** (`~svc/.config/csub/broker.toml`): `allow_claude = true`; `allowed_hosts` = the three
-   Anthropic hosts + `agent.allow_hosts`; `allowed_roots` contains `paths.work_root`. Config rejects GitHub
+2. **Broker policy** (`~svc/.config/csub/broker.toml`): `[agents] claude = ["api.anthropic.com", "claude.ai", "platform.claude.com"]`;
+   `allowed_hosts` ⊇ `agent.allow_hosts`; `allowed_roots` contains `paths.work_root`. Config rejects GitHub
    hosts in `agent.allow_hosts`, and `agent.extra_mounts` must be absolute and end in `:ro`.
 3. **Claude** for the service account: `claude auth login` as that account (a team seat).
    `agent.api_key_env` is refused by `autodev-up.sh` for now.

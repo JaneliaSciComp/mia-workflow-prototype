@@ -138,7 +138,7 @@ def test_match_job(tmp_path):
     s = match_job(cfg, ws, pins, "record.yaml")
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
-    assert s.claude and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
+    assert s.agent == "claude" and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
     assert '--allowedTools "Bash(harness smoke:*),Read,Write,Glob,Grep"' in s.command and "> claude.json" in s.command
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
@@ -155,7 +155,7 @@ def test_crop_job_cache_mode(tmp_path, trusted):
     assert (cache in s.rw_mounts, cache in s.ro_mounts) == (trusted, not trusted)
     assert s.env["MIA_HARNESS_CACHE_WRITABLE"] == ("1" if trusted else "0") and Path(cache).is_dir()
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
-    assert "--n 4 --seed s-t --round i1-e2 --batch 0 --out crops" in s.command and not s.claude
+    assert "--n 4 --seed s-t --round i1-e2 --batch 0 --out crops" in s.command and s.agent is None
 
 
 def test_crop_job_mounts_the_existing_manifests_dir(tmp_path):

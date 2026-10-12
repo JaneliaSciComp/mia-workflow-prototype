@@ -99,7 +99,7 @@ class AgentJobs:
         spec = lambda: jobs.JobSpec(  # noqa: E731  built lazily: env is read only when no id file exists
             name=f"autodev-{issue}-r{rnd}",  # csub rejects names containing the username (autodev-<you>); session = deployment
             command=job_script(self.cfg, ws.base_sha), workspace=ws.dir, walltime_min=a.walltime_min, cpus=a.cpus,
-            mem_mb=a.mem_mb, allow_hosts=list(a.allow_hosts), claude=True,
+            mem_mb=a.mem_mb, allow_hosts=list(a.allow_hosts), agent="claude",
             ro_mounts=[m.removesuffix(":ro") for m in a.extra_mounts],  # Config guarantees ":ro"
             env={"ANTHROPIC_API_KEY": os.environ[a.api_key_env]} if a.api_key_env else {})
         return JobRef(await self.jobs.submit(job_key, spec), a.walltime_min)

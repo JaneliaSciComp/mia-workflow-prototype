@@ -146,7 +146,7 @@ async def test_submit_match_once(tmp_path):
     t = _setup(tmp_path)
     assert await _submit_match(t) == "777" == await _submit_match(t)
     s = t.csub.submitted
-    assert len(s) == 1 and s[0]["claude"] and "data.example.org" in s[0]["allow_hosts"]
+    assert len(s) == 1 and s[0]["agent"] == "claude" and "data.example.org" in s[0]["allow_hosts"]
     assert not any(m["path"] == str(tmp_path / "dl") for m in s[0]["mounts"])  # its files are copied into the ws
 
 

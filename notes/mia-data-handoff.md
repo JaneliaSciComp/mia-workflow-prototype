@@ -1,7 +1,7 @@
 # mia-data handoff: what was built on 2026-10-11/12 and what you need to do to try it
 
 Branch `mia-crops-poc` in this repo (26 commits after `42c1c19`), and a new local repo at
-`~/dev/mia-snippets` (`main`, 24 commits, **not on GitHub**). Everything follows `notes/mia-crops-spec.md`
+`<harness.dir>` (your mia-snippets checkout) (`main`, 24 commits, **not on GitHub**). Everything follows `notes/mia-crops-spec.md`
 (now v0.9) and `notes/plans/2026-10-11-mia-crops-poc.md`. Nothing was pushed, no GitHub repos were created, and
 no broker policy was edited. Each task was implemented by one agent and reviewed by another; every Important
 finding was fixed and re-reviewed; both repos then had a whole-branch review and one fix wave. The rulings I made
@@ -22,7 +22,7 @@ on your behalf are listed at the end: read them, they are the decisions you did 
   `test-pr <pr> --binding <file> --record <id>`, `crops-by-snippet <name>`, `reindex [dataset]`.
 - `scripts/mia-data-up.sh`, `mia_data.yaml.example`, and a "mia-data" section in `notes/autodev-runbook.md`.
 
-**`~/dev/mia-snippets`** (`cd harness && pixi run test`: 122; `pixi run ci-test`: 14)
+**`<harness.dir>` (your mia-snippets checkout)** (`cd harness && pixi run test`: 122; `pixi run ci-test`: 14)
 - `SPEC.md`, `harness/` (`smoke`, `crop`, `verify`, `preview`; `io` with range reads, dataset cache, byte cap,
   host checks on every redirect hop), `ci/check_pr.py` + `.github/workflows/check.yml` (runs the checker from
   `origin/main`, not the PR), `harness/allowlist.txt`, `ci/maintainers.txt` (= `krokicki`).
@@ -34,7 +34,7 @@ on your behalf are listed at the end: read them, they are the decisions you did 
 
 1. **Repos.** Create `JaneliaSciComp/mia-workflow-data` **with an initial commit** (the galleries branch is
    created through the trees API, which 409s on an empty repo) and `JaneliaSciComp/mia-snippets`; then
-   `cd ~/dev/mia-snippets && git remote add origin … && git push -u origin main` (push `main` before opening
+   `cd <harness.dir> && git remote add origin … && git push -u origin main` (push `main` before opening
    any PR: CI runs the checker from `origin/main`). Install the autodev GitHub App on both with Issues RW,
    Pull requests RW, Contents RW (both), Commit statuses RW, Checks R, Metadata R. Branch protection settings are
    in the mia-snippets README; apply them after the first `test-pr` has posted a `mia-data/crops` status.
@@ -85,7 +85,7 @@ on your behalf are listed at the end: read them, they are the decisions you did 
    executed; those steps are the checklist above. Cost: one morning of setup.
 3. `GitHub.label_event` returns `(actor, event id, created_at)`; the approve gate needs the timestamp. Cost: a
    3-tuple unpack if autodev ever calls it directly.
-4. `mia-snippets` lives at `~/dev/mia-snippets` and was never pushed. Cost: you push it.
+4. `mia-snippets` lives at `<harness.dir>` (your mia-snippets checkout) and was never pushed. Cost: you push it.
 5. Subagent commits keep their own harness attribution trailer. Cost: none.
 6. Task 11's real-data smokes ran on this host directly, not through csub. Cost: the csub path is first exercised
    by you.

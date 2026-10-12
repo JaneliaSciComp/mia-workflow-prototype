@@ -166,7 +166,7 @@ def match_job(cfg, ws, pins, record_path: str = "record.yaml") -> JobSpec:
             f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
             f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err')
     return _spec(cfg, "match", ws, pins, body, hosts(record_urls(rec), cfg), [snap],
-                 record=pins.record, claude=True, cpus=cfg.agent.cpus, mem_mb=cfg.agent.mem_mb)
+                 record=pins.record, agent="claude", cpus=cfg.agent.cpus, mem_mb=cfg.agent.mem_mb)
 
 
 def smoke_job(cfg, ws, pins, binding_path: str, snapshot, record_path: str) -> JobSpec:

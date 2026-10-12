@@ -34,7 +34,7 @@ async def test_plain_job_spec(tmp_path):
                                                      allow_hosts=["pypi.org"], ro_mounts=["/data", "/tools"],
                                                      env={"A": "1"}))
     s = fake.submitted[0]
-    assert s["claude"] is False and s["env"] == {"A": "1"} and s["session"] == "dep" and s["cwd"] == ws
+    assert s["agent"] is None and s["env"] == {"A": "1"} and s["session"] == "dep" and s["cwd"] == ws
     assert s["mounts"] == [{"path": ws, "mode": "rw"}, {"path": "/data", "mode": "ro"}, {"path": "/tools", "mode": "ro"}]
     assert (s["name"], s["command"], s["cpus"], s["mem_mb"], s["walltime_min"], s["allow_hosts"]) == \
         ("harness", "echo hi", 2, 8000, 30, ["pypi.org"])

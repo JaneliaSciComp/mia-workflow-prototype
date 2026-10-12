@@ -112,7 +112,7 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert ref.job_id == "777" and await j.submit(7, K, 1, ws) == ref
     assert len(fake.submitted) == 1
     spec = fake.submitted[0]
-    assert spec["claude"] is True and spec["shell"] is True and spec["cwd"] == ws.dir
+    assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
 

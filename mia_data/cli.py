@@ -70,8 +70,9 @@ async def cmd_check(cfg, args) -> int:
         n = cfg.network
         want = [*n.package_hosts, *n.redirect_hosts, *(x for v in n.redirect_hosts.values() for x in v), *DATA_HOSTS]
         bad = [f"host not allowed: {h}" for h in missing_hosts(want, list(p.allowed_hosts))]
-        if not p.allow_claude:
-            bad.append("allow_claude is false")
+        if "claude" not in p.agents:
+            bad.append('agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
+                       '"claude.ai", "platform.claude.com"])')
         if miss := [e for e in HARNESS_ENV if not any(fnmatchcase(e, pat) for pat in p.env_allow)]:
             bad.append(f"env not allowed: {', '.join(miss)} (broker.toml [broker]: add \"MIA_HARNESS_*\" to env_allow)")
         mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.storage.root]  # every job mounts under these
