@@ -1,6 +1,7 @@
 # MIA crops: snippets, development and production cropping — Spec
 
-**Status:** draft v0.8 · 2026-10-11 · not yet approved. A proof of concept: 2D PNG crops only.
+**Status:** draft v0.9 · 2026-10-12 · not yet approved. A proof of concept: 2D PNG crops only.
+v0.9: test crops stay in their job workspaces (§7.4); jobs run the harness environment's entry point directly (§6).
 **Repos:** this repo (orchestration, new package `mia_data/`), [JaneliaSciComp/mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) (issues and crop galleries),
 [JaneliaSciComp/mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) (conversion snippets + their harness), [AI-HHMI/mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) (read-only input)
 
@@ -312,7 +313,9 @@ Withdrawing is human-only (§5.5) and never deletes the snippet. Its effects:
 The harness is the executable half of the spec. It is a pip-installable package with a CLI, run in a pixi
 environment. Humans own it. Agents use it and never modify it.
 
-- **Pinning.** `harness.dir` is a configured checkout of `mia-snippets` with `pixi install` done. A round
+- **Pinning.** `harness.dir` is a configured checkout of `mia-snippets` with `pixi install` done in `harness/`.
+  Jobs run `<harness.dir>/harness/.pixi/envs/default/bin/harness` directly, not `pixi run`, which wants the
+  install lock on a prefix that jobs mount read-only. A round
   records that checkout's `git rev-parse HEAD` and the sha256 of `harness/pixi.lock` when it is admitted. A
   job is refused, sending the round to `needs-human`, if the checkout has moved since. `ponytail:` one
   environment per harness commit, if harness updates ever need to overlap in-flight rounds.
@@ -577,11 +580,14 @@ PR head, a merge commit, or a matched binding's `snippets_commit`):
 1. **crop job:** `harness crop --n 4` (`test_per_round`)
 2. **verify job:** `harness verify`, then `harness preview` (no snippet code, §6.4)
 
-Output goes to `<storage.root>/_tests/<record-id>/<round-id>/<sha>/`: the crop job's workspace is its `crops/`
-subdirectory, and the verify job writes `preview/` beside it (§6.7). Only files the verify job checked
-(`raw.png`, which must decode as a 256×256 16-bit PNG) or wrote (`overlay.png`) leave the cluster; anything
-else a PR-head snippet drops in `crops/` is never published. `storage.root` must be under the csub policy's `allowed_roots`. Before adopting a PR's example binding,
-the worker validates it: same record, URLs from the record, valid schema.
+Test crops stay in the job workspaces under `work_root/issue-<n>/<round-id>/`: the crop job writes `crops/` in
+its workspace, and the verify job writes `preview/` in its own (§6.7); a `mia-data test-pr` run's are under
+`work_root/test-pr/<pr>/<head>/`. The `galleries` branch (below) is the
+reviewed artefact. Only files the verify job checked (`raw.png`, which must decode as a 256×256 16-bit PNG) or
+wrote (`overlay.png`) leave the cluster; anything else a PR-head snippet drops in `crops/` is never published.
+`storage.root` must still be under the csub policy's `allowed_roots`: production crop and verify jobs mount the
+dataset folder read-only for `--existing` (§7.5). Before adopting a PR's example binding, the worker validates
+it: same record, URLs from the record, valid schema.
 
 **Report.** The worker posts on the data issue, and on the PR if there is one:
 - the verify results
