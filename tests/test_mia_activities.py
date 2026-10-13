@@ -187,8 +187,9 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     n = await t.a.open_snippet_issue(1, ROUND, draft)
     assert await t.a.open_snippet_issue(1, ROUND, draft) == n and len(t.snip.created) == 1
     title, body, labels = t.snip.created[0]
-    assert labels == ["snippets:go"] and title == "New snippet for tiff/zip (data#1)"
-    assert body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->") and "<!-- x" not in body
+    assert labels == ["snippets:go"] and title == "New snippet for tiff/zip: rec-1"
+    assert body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->\n\nFor [o/data#1](https://github.com/o/data/issues/1): "
+                           "dataset `rec-1` has no snippet that reads it.\n\n") and "<!-- x" not in body
 
 
 def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/examples/rec-1.yaml")):

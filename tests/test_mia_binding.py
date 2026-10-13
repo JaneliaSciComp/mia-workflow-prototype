@@ -45,10 +45,17 @@ def test_unknown_snippet_record_and_label_fields_rejected():
     b = copy.deepcopy(B)
     b["raw"][0]["snippet"] = "nope"
     b["record"], b["record_commit"] = "other", "f" * 40
-    b["labels"][0].update(label_key="Manual-gt", pairs_with=1)
+    b["labels"][0].update(label_key="../raw", pairs_with=1)  # a path, not a file name
     errs = check(b)
     assert len(errs) == 5, errs
     assert check({"record": "x", "raw": []}) and check("not a mapping")
+
+
+def test_catalog_label_names_accepted():
+    for key in ("unknown-cell-labels", "manual_gt-nucleus-instance", "Manual-gt"):
+        b = copy.deepcopy(B)
+        b["labels"][0]["label_key"] = key
+        assert check(b) == [], key
 
 
 def test_s3_url_rewritten_and_accepted():

@@ -186,9 +186,11 @@ mia-snippets/
 
 ```python
 # snippets/<name>/snippet.py
+from mia_harness.api import IO, Array, Source   # the only harness module a snippet may import; hints required (CI)
+
 SPEC_VERSION = 1
 
-def open_array(src: harness.Source, io: harness.IO) -> harness.Array:
+def open_array(src: Source, io: IO) -> Array:
     """Open one array (raw or label) described by `src`. Must not read voxel data yet."""
 
 class Array(Protocol):                     # defined in harness/api.py
