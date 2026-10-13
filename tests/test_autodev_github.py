@@ -214,3 +214,17 @@ async def test_upsert_file_skips_existing(gh):
     assert await gh.upsert_file("a/f.json", b"{}", "b", "m") is False
     assert put.call_count == 1
     assert json.loads(put.calls[0].request.content) == {"message": "m", "branch": "b", "content": "e30="}
+
+
+@respx.mock
+async def test_conditional_get_replaces_cached_etag_on_change(gh):
+    route = respx.get(f"{API}{R}/pulls/5").mock(
+        side_effect=[
+            httpx.Response(200, json={"n": 1}, headers={"etag": '"a"'}),
+            httpx.Response(200, json={"n": 2}, headers={"etag": '"b"'}),
+            httpx.Response(304),
+        ]
+    )
+    assert [(await gh.get_pr(5))["n"] for _ in range(3)] == [1, 2, 2]
+    assert "if-none-match" not in route.calls[0].request.headers
+    assert [c.request.headers["if-none-match"] for c in route.calls[1:]] == ['"a"', '"b"']

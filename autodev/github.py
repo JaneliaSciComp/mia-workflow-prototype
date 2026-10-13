@@ -55,6 +55,10 @@ class GitHub:
         self._creates_per_hour = creates_per_hour
         self._last_write = 0.0
         self._creates: collections.deque[float] = collections.deque()  # times of recent POSTs, for the hourly cap
+        # ETag and last 200 response of each conditional GET, keyed by (path, params). GitHub does not count a
+        # 304 against the rate limit, so polling a quiet PR is nearly free. Lives in the worker process.
+        # ponytail: unbounded; one entry per polled URL. Bound it if a worker ever polls thousands of PRs.
+        self._etags: dict[tuple, tuple[str, httpx.Response]] = {}
         # Contents API PUTs to one branch race (409 "is at X but expected Y"); serialize them in-process.
         self._commit_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
@@ -115,24 +119,25 @@ class GitHub:
         write: bool | None = None,
         attempts: int = 8,
         headers: dict | None = None,
+        conditional: bool = False,
     ) -> httpx.Response | None:
         """One API call with retries. With `ok404`, a 404 returns None instead of raising.
 
-        `write` marks a request that counts against the write throttle; it defaults to "not a GET"."""
+        `write` marks a request that counts against the write throttle; it defaults to "not a GET".
+        `conditional` (GETs only) sends the ETag of the last 200 for this URL as If-None-Match, and a 304
+        answer returns that cached response, so callers never see the 304."""
         if write is None:
             write = method != "GET"
         create = write and method == "POST"
+        cache_key = (path, tuple(sorted((params or {}).items()))) if conditional and method == "GET" else None
         for attempt in range(attempts):
             if write:
                 await self._throttle(create)
+            request_headers = {**(headers or {}), "Authorization": f"Bearer {self._token_fn()}"}
+            if cache_key in self._etags:
+                request_headers["If-None-Match"] = self._etags[cache_key][0]
             try:
-                response = await self._client.request(
-                    method,
-                    path,
-                    json=json,
-                    params=params,
-                    headers={**(headers or {}), "Authorization": f"Bearer {self._token_fn()}"},
-                )
+                response = await self._client.request(method, path, json=json, params=params, headers=request_headers)
             except httpx.TransportError as error:
                 log.warning("github %s %s transport error %s (attempt %d)", method, path, error, attempt + 1)
                 await self._sleep(min(2**attempt, 60))
@@ -145,6 +150,8 @@ class GitHub:
             if response.status_code >= 500:
                 await self._sleep(min(2**attempt, 60))
                 continue
+            if response.status_code == 304 and cache_key in self._etags:
+                return self._etags[cache_key][1]
             if response.status_code == 404 and ok404:
                 return None
             if response.is_error:
@@ -153,14 +160,23 @@ class GitHub:
                 )
             if write:
                 log.info("github %s %s -> %d", method, path, response.status_code)
+            if cache_key is not None:
+                if response.headers.get("etag"):
+                    self._etags[cache_key] = (response.headers["etag"], response)
+                else:
+                    self._etags.pop(cache_key, None)
             return response
         raise GitHubError(f"{method} {path}: gave up after {attempts} attempts")
 
-    async def _paged(self, path: str, params: dict | None = None) -> AsyncIterator[dict]:
-        """Yield every item of a paginated list endpoint."""
+    async def _paged(self, path: str, params: dict | None = None, conditional: bool = False) -> AsyncIterator[dict]:
+        """Yield every item of a paginated list endpoint. Each page has its own URL, so its own ETag."""
         page = 1
         while True:
-            items = (await self.request("GET", path, params={**(params or {}), "per_page": 100, "page": page})).json()
+            items = (
+                await self.request(
+                    "GET", path, params={**(params or {}), "per_page": 100, "page": page}, conditional=conditional
+                )
+            ).json()
             for item in items:
                 yield item
             if len(items) < 100:
@@ -245,7 +261,9 @@ class GitHub:
         ).json()
 
     async def issue_comments(self, number: int) -> list[dict]:
-        return [comment async for comment in self._paged(f"/repos/{self.repo}/issues/{number}/comments")]
+        return [
+            comment async for comment in self._paged(f"/repos/{self.repo}/issues/{number}/comments", conditional=True)
+        ]
 
     # --- pull requests ---------------------------------------------------------------------
 
@@ -267,21 +285,27 @@ class GitHub:
         ).json()
 
     async def get_pr(self, number: int) -> dict:
-        return (await self.request("GET", f"/repos/{self.repo}/pulls/{number}")).json()
+        return (await self.request("GET", f"/repos/{self.repo}/pulls/{number}", conditional=True)).json()
 
     async def pr_reviews(self, number: int) -> list[dict]:
-        return [review async for review in self._paged(f"/repos/{self.repo}/pulls/{number}/reviews")]
+        return [review async for review in self._paged(f"/repos/{self.repo}/pulls/{number}/reviews", conditional=True)]
 
     async def pr_review_comments(self, number: int) -> list[dict]:
         """The inline (per-line) comments of the PR's reviews."""
-        return [comment async for comment in self._paged(f"/repos/{self.repo}/pulls/{number}/comments")]
+        return [
+            comment async for comment in self._paged(f"/repos/{self.repo}/pulls/{number}/comments", conditional=True)
+        ]
 
     async def check_state(self, sha: str, required: list[str] = ()) -> str:
         """Overall CI state of a commit (success | pending | failure | none), combining check runs and statuses."""
         runs = (
-            await self.request("GET", f"/repos/{self.repo}/commits/{sha}/check-runs", params={"per_page": 100})
+            await self.request(
+                "GET", f"/repos/{self.repo}/commits/{sha}/check-runs", params={"per_page": 100}, conditional=True
+            )
         ).json()["check_runs"]
-        statuses = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status")).json()["statuses"]
+        statuses = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}/status", conditional=True)).json()[
+            "statuses"
+        ]
         return combine_checks(runs, statuses, required)
 
     async def merge_pr(self, number: int, sha: str) -> tuple[bool, str]:
