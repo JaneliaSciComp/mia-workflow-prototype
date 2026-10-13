@@ -14,7 +14,7 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from .models import JobOutcome
 
@@ -41,6 +41,12 @@ class JobSpec:
     env: dict[str, str] = field(default_factory=dict)
 
 
+@overload
+def read_untrusted(
+    job_dir: Path, rel: str, limit: int, tail: bool = ..., binary: Literal[False] = ...
+) -> str | None: ...
+@overload
+def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = ..., *, binary: Literal[True]) -> bytes | None: ...
 def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = False, binary: bool = False) -> str | bytes | None:
     """Read a file a sandboxed job could have tampered with. Returns None for anything suspicious.
 

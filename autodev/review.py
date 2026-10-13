@@ -9,6 +9,7 @@ own comments; `bot` is its login.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from .models import Feedback
 
@@ -26,7 +27,9 @@ def _login(item: dict) -> str | None:
 def _is_human_writer(login: str | None, permissions: dict[str, str], bot: str, allow_self: bool) -> bool:
     """A person with write access, and not the bot itself unless `allow_self` (under a personal token the
     reviewer and the bot are the same account)."""
-    return bool(login) and permissions.get(login) in WRITE_PERMISSIONS and (allow_self or login != bot)
+    if not login:
+        return False
+    return permissions.get(login) in WRITE_PERMISSIONS and (allow_self or login != bot)
 
 
 def _is_ours(body: str | None, marker_prefix: str) -> bool:
@@ -61,8 +64,8 @@ def approved(
     a later head the agent happens to produce. GitHub's ISO-8601 UTC timestamps compare correctly as strings."""
     latest: dict[str, dict] = {}
     for review in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
-        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and _login(review):
-            latest[_login(review)] = review
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and (login := _login(review)):
+            latest[login] = review
     if any(
         review["state"] == "APPROVED"
         and review.get("commit_id") == head_sha
@@ -134,7 +137,7 @@ def handled_ids(comments: list[dict], marker_prefix: str, bot: str) -> set[str]:
     return handled
 
 
-def combine_checks(check_runs: list[dict], statuses: list[dict], required: list[str] = ()) -> str:
+def combine_checks(check_runs: list[dict], statuses: list[dict], required: Sequence[str] = ()) -> str:
     """Fold check runs and commit statuses into one state: failure beats pending beats success.
 
     "none" means nothing reported and nothing is required; a missing required check counts as pending."""
@@ -142,7 +145,9 @@ def combine_checks(check_runs: list[dict], statuses: list[dict], required: list[
         "pending" if run.get("status") != "completed" else "failure" if run.get("conclusion") in _FAILED else "success"
         for run in check_runs
     ]
-    states += [{"success": "success", "pending": "pending"}.get(status.get("state"), "failure") for status in statuses]
+    states += [
+        {"success": "success", "pending": "pending"}.get(status.get("state") or "", "failure") for status in statuses
+    ]
     seen = {run.get("name") for run in check_runs} | {status.get("context") for status in statuses}
     if not states and not required:
         return "none"

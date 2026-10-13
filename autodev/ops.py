@@ -17,12 +17,12 @@ from typing import TYPE_CHECKING
 from .config import PROJECT_DIR
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config import Deployment
 
 UP_SCRIPT = PROJECT_DIR / "scripts" / "autodev-up.sh"
 
 
-def log_files(cfg: Config) -> dict[str, Path]:
+def log_files(cfg: Deployment) -> dict[str, Path]:
     """Log name -> path. Worker logs are in the state dir; temporal/broker logs are host-only, beside it."""
     state = cfg.paths.state_dir
     host = state.with_name(state.name + "-host") / "logs"
@@ -36,17 +36,17 @@ def _tmux(*args: str, **kwargs) -> subprocess.CompletedProcess:
         sys.exit("tmux not found on PATH")
 
 
-def is_running(cfg: Config) -> bool:
+def is_running(cfg: Deployment) -> bool:
     return _tmux("has-session", "-t", f"={cfg.deployment}", capture_output=True).returncode == 0
 
 
-def cmd_up(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_up(cfg: Deployment, args: argparse.Namespace) -> int:
     script = getattr(args, "up_script", UP_SCRIPT)
     config_env = getattr(args, "config_env", "AUTODEV_CONFIG")
     return subprocess.run([str(script)], env={**os.environ, config_env: str(args.config_path)}).returncode
 
 
-def cmd_down(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_down(cfg: Deployment, args: argparse.Namespace) -> int:
     if not is_running(cfg):
         print(f"{cfg.deployment}: not running")
         return 0
@@ -56,11 +56,11 @@ def cmd_down(cfg: Config, args: argparse.Namespace) -> int:
     return returncode
 
 
-def cmd_restart(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_restart(cfg: Deployment, args: argparse.Namespace) -> int:
     return cmd_down(cfg, args) or cmd_up(cfg, args)
 
 
-def cmd_ps(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_ps(cfg: Deployment, args: argparse.Namespace) -> int:
     """Print whether the session is up, its windows, and where the logs are."""
     if not is_running(cfg):
         print(f"{cfg.deployment}: not running")
@@ -81,13 +81,13 @@ def cmd_ps(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_attach(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_attach(cfg: Deployment, args: argparse.Namespace) -> int:
     if not is_running(cfg):
         sys.exit(f"{cfg.deployment} is not running (run `up` first)")
     return _tmux("attach", "-t", f"={cfg.deployment}").returncode
 
 
-def cmd_logs(cfg: Config, args: argparse.Namespace) -> int:
+def cmd_logs(cfg: Deployment, args: argparse.Namespace) -> int:
     path = log_files(cfg)[args.name]
     if not path.is_file():
         sys.exit(f"no log at {path}")
