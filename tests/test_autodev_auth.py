@@ -4,12 +4,11 @@ import json
 import httpx
 import pytest
 import respx
+from autodev_helpers import API, make_cfg
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from autodev.auth import AppTokens, app_jwt, bot_login, noreply_email, token_fn
-
-from autodev_helpers import API, make_cfg
 
 
 def _unb64(s: str) -> bytes:

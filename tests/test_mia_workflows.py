@@ -9,19 +9,30 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from mia_helpers import FakeGH, make_cfg
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.exceptions import ApplicationError
 from temporalio.client import WorkflowHistory
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from mia_data import workflows
 from mia_data.activities import Activities
-from mia_data.models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
-                             RoundLimits, SmokeResult, VerifyResult)
+from mia_data.models import (
+    DatasetState,
+    GalleryResult,
+    JobArgs,
+    JobDone,
+    LabelEvent,
+    MatchResult,
+    Pins,
+    PrUpdate,
+    RoundLimits,
+    SmokeResult,
+    VerifyResult,
+)
 from mia_data.workflows import MiaDataDataset
-from mia_helpers import FakeGH, make_cfg
 
 SHA = "a" * 40
 PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x")
@@ -43,11 +54,11 @@ def shift(iso, seconds):
 
 
 class Mocks:
-    def __init__(self, outcome="matched", smoke=SmokeResult(True, True), states=None, test_ok=4, prod_ok=16,
+    def __init__(self, outcome="matched", smoke=None, states=None, test_ok=4, prod_ok=16,
                  n_effective=16, await_failures=0, gate=None, gate_on="", test_ok_by=None, pr_now=None, trees=None,
                  revisions=5):
         self.calls: list[tuple[str, tuple]] = []
-        self.outcome, self.smoke, self.states = outcome, smoke, states or {}
+        self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
         self.test_ok, self.prod_ok, self.n_effective = test_ok, prod_ok, n_effective
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
@@ -532,7 +543,7 @@ async def test_revision_limit(env):
         await idle(h, m, "developing")
         for sha in (H1, H2):
             await wake(h, m, head(sha))
-            await until(lambda: (sha, "failure") in statuses(m))
+            await until(lambda sha=sha: (sha, "failure") in statuses(m))
             await idle(h, m, "testing")
         await wake(h, m, head(H3))
         await idle(h, m, "needs-human")

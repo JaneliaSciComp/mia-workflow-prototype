@@ -11,9 +11,10 @@ import asyncio
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .models import JobOutcome
 

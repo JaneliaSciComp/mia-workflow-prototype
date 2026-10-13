@@ -8,17 +8,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import shutil
 import signal
 import subprocess
 import sys
-import json
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -318,9 +319,16 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     """Create or update the Temporal schedule that runs MiaDataPoll every poll interval."""
-    from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
-                                   ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec,
-                                   ScheduleUpdate)
+    from temporalio.client import (
+        Schedule,
+        ScheduleActionStartWorkflow,
+        ScheduleAlreadyRunningError,
+        ScheduleIntervalSpec,
+        ScheduleOverlapPolicy,
+        SchedulePolicy,
+        ScheduleSpec,
+        ScheduleUpdate,
+    )
 
     from .workflows import MiaDataPoll
 

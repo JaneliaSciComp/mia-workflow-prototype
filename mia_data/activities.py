@@ -13,13 +13,14 @@ import dataclasses
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
-import logging
 import shutil
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from temporalio import activity
@@ -34,10 +35,32 @@ from . import publish as crop_publish
 from .binding import check_binding, hosts, record_urls
 from .config import HUMAN_LABELS, STAGES
 from .gallery import gallery_files, publish_gallery
-from .jobspec import (SHA_RE, HostsNotAllowed, PinMoved, check_hosts_allowed, crop_job, harness_pin, match_job,
-                      match_prompt, smoke_job, snapshot, verify_job)
-from .models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
-                     RoundLimits, SmokeResult, VerifyResult)
+from .jobspec import (
+    SHA_RE,
+    HostsNotAllowed,
+    PinMoved,
+    check_hosts_allowed,
+    crop_job,
+    harness_pin,
+    match_job,
+    match_prompt,
+    smoke_job,
+    snapshot,
+    verify_job,
+)
+from .models import (
+    DatasetState,
+    GalleryResult,
+    JobArgs,
+    JobDone,
+    LabelEvent,
+    MatchResult,
+    Pins,
+    PrUpdate,
+    RoundLimits,
+    SmokeResult,
+    VerifyResult,
+)
 from .publish import CROP_ID_RE, Conflict
 from .seed import ID_RE, MARKER_RE
 from .status import render_binding, render_crops_table, render_links, render_stage
@@ -63,10 +86,9 @@ CROP_STATUS = {"pending": "test crops running", "success": "test crops passed", 
 PERMANENT = (HostsNotAllowed, PinMoved, Conflict, ValueError, FileNotFoundError,
              yaml.YAMLError)  # inputs that a retry can't fix
 
-_Fn = TypeVar("_Fn", bound=Callable[..., Awaitable])
 
 
-def mia_permanent_errors(fn: _Fn) -> _Fn:
+def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: autodev's permanent_errors, plus mia-data's own permanent failures.
 
     A moved pin, a host outside the policy, a publication conflict, a bad input (malformed YAML too) or a
@@ -700,7 +722,7 @@ class Activities:
                         done.append(f"{kind} #{number}")
                 except Exception:
                     log.exception("poll: issue #%s %s failed", number, label)
-        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        recent = datetime.now(UTC) - timedelta(days=1)
         # ponytail: the first page (50 most recently updated PRs); paginate if more than 50 are active
         for pr_data in await gh_snippets.list_prs(state="all"):
             try:

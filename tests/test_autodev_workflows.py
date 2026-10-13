@@ -8,15 +8,31 @@ from pathlib import Path
 
 import pytest
 from temporalio import activity
-from temporalio.exceptions import ApplicationError
 from temporalio.client import WorkflowHistory
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from autodev import workflows
-from autodev.models import (AwaitInput, CommentInput, FailureInput, Feedback, IssueInput, JobOutcome, JobRef,
-                            MergeInput, MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput,
-                            StageInput, SubmitInput, Workspace)
+from autodev.models import (
+    AwaitInput,
+    CommentInput,
+    FailureInput,
+    Feedback,
+    IssueInput,
+    JobOutcome,
+    JobRef,
+    MergeInput,
+    MergeResult,
+    ObserveInput,
+    PrRef,
+    PrSnapshot,
+    PublishInput,
+    RoundInput,
+    StageInput,
+    SubmitInput,
+    Workspace,
+)
 from autodev.workflows import IssueWorkflow
 
 

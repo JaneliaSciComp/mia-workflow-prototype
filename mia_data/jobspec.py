@@ -17,10 +17,11 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Callable
 from importlib.resources import files
 from pathlib import Path
 from string import Template
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import yaml
 

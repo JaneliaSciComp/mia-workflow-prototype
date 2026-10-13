@@ -26,7 +26,7 @@ def describe_failure(kind: str, job: JobDone) -> str:
 
 def judge(verify: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
     """(passed, descriptions of failed jobs): passed when both jobs succeeded and every test crop verified."""
-    failed = [describe_failure(kind, job) for kind, job in zip(("crop", "verify"), jobs) if not job_succeeded(job)]
+    failed = [describe_failure(kind, job) for kind, job in zip(("crop", "verify"), jobs, strict=False) if not job_succeeded(job)]
     return not failed and verify.ok_count > 0 and not verify.errors, failed
 
 

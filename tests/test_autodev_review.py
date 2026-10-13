@@ -1,12 +1,11 @@
 import httpx
 import pytest
 import respx
+from autodev_helpers import API, R
 
 from autodev.github import GitHub
 from autodev.models import Feedback
 from autodev.review import approved, combine_checks, feedback, handled_ids, latest_round_at
-
-from autodev_helpers import API, R
 
 MP = "<!-- autodev:"
 HEAD = "abc1234def5678"

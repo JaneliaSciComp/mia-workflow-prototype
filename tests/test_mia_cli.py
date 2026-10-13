@@ -1,9 +1,10 @@
 import json
 from types import SimpleNamespace
 
+from mia_helpers import make_cfg
+
 from mia_data import cli
 from mia_data.cli import DATA_HOSTS, main
-from mia_helpers import make_cfg
 
 
 def _run(monkeypatch, tmp_path, argv, **cfg_over):
@@ -97,7 +98,7 @@ def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
     out = capsys.readouterr().out.split("\n")
-    assert [l[:3] for l in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
+    assert [line[:3] for line in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert "github snippets" in out[1] and "RuntimeError" in out[1]
 
 
@@ -125,7 +126,7 @@ def test_check_wants_an_installed_harness_env(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
-    pin = next(l for l in capsys.readouterr().out.split("\n") if "harness pin" in l)
+    pin = next(line for line in capsys.readouterr().out.split("\n") if "harness pin" in line)
     assert pin.startswith("BAD") and "cd harness && pixi install" in pin
 
 
@@ -136,7 +137,7 @@ def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
-    row = next(l for l in capsys.readouterr().out.split("\n") if "csub broker" in l)
+    row = next(line for line in capsys.readouterr().out.split("\n") if "csub broker" in line)
     assert row.startswith("BAD") and "MIA_HARNESS_JOB_BYTES" in row and "MIA_HARNESS_COMMIT," not in row
     assert 'add "MIA_HARNESS_*" to env_allow' in row
     assert f'add "{cfg.harness.dir}", "{cfg.paths.storage_root}" to allowed_roots' in row
@@ -149,7 +150,7 @@ def test_check_flags_policy_queue_lsf_does_not_have(monkeypatch, tmp_path, capsy
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
-    row = next(l for l in capsys.readouterr().out.split("\n") if "csub broker" in l)
+    row = next(line for line in capsys.readouterr().out.split("\n") if "csub broker" in line)
     assert row.startswith("BAD") and "not an LSF queue: long" in row and "gpu" not in row.split("not an LSF queue:")[1].split("(")[0]
 
 
@@ -165,6 +166,7 @@ def test_help_lists_devops_commands(capsys):
 
 def test_devops_commands_drive_the_mia_session(monkeypatch, tmp_path, capsys):
     import subprocess
+
     from autodev import ops
     calls = []
 

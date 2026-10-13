@@ -14,8 +14,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import math
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable
+from collections.abc import Awaitable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -23,9 +24,23 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
+
     from .crop_test import describe_failure, job_succeeded, judge
-    from .models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
-                         RoundLimits, SmokeResult, Test, VerifyResult, job_key)
+    from .models import (
+        DatasetState,
+        GalleryResult,
+        JobArgs,
+        JobDone,
+        LabelEvent,
+        MatchResult,
+        Pins,
+        PrUpdate,
+        RoundLimits,
+        SmokeResult,
+        Test,
+        VerifyResult,
+        job_key,
+    )
 
 GO, APPROVE = "data:go", "data:approve"
 BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
@@ -48,7 +63,7 @@ def _parse_time(iso: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(iso)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @workflow.defn(name="MiaDataDataset")

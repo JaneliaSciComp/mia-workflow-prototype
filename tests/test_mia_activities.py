@@ -5,14 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from autodev_helpers import GIT_ID, run_git
+from mia_helpers import FakeGH, make_cfg
 from temporalio.exceptions import ApplicationError
+from test_autodev_agent import FakeCsub
 
 from autodev.jobs import CsubJobs
-from autodev_helpers import GIT_ID, run_git
 from mia_data.activities import Activities
 from mia_data.models import DatasetState, JobArgs, job_key
-from mia_helpers import FakeGH, make_cfg
-from test_autodev_agent import FakeCsub
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
 RECORD = {"data": {"download_url": "https://data.example.org/a.zip", "formats": ["tiff"]},

@@ -91,7 +91,7 @@ class Config(BaseModel):
     agent: AgentCfg = AgentCfg()
 
     @model_validator(mode="after")
-    def _finish(self) -> "Config":
+    def _finish(self) -> Config:
         """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")

@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from autodev_helpers import K, make_cfg, make_origin, run_git
 from csub.protocol import CsubError, JobSpec, ProtocolError
 from csub.transport.base import TransportError
 from temporalio.exceptions import ApplicationError
@@ -13,8 +14,6 @@ from autodev.activities import Activities
 from autodev.agent import AgentJobs, csub_client, job_script, log_tail, read_result, render_prompt
 from autodev.gitops import Mirror
 from autodev.models import SubmitInput, Workspace
-
-from autodev_helpers import K, make_cfg, make_origin, run_git
 
 ISSUE = {"number": 7, "title": "Add feature", "body": "Please add feature.txt"}
 

@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 
 import yaml
-
-from mia_data.cli import run_test_pr
 from test_autodev_agent import FakeCsub
 from test_mia_activities import BINDING, REC_SHA, SNIP_SHA, _crop, _setup
+
+from mia_data.cli import run_test_pr
 
 PR, H2 = 7, "b" * 40
 

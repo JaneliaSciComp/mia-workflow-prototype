@@ -1,8 +1,8 @@
 import pytest
+from mia_helpers import make_cfg
 from pydantic import ValidationError
 
 from mia_data.config import PROJECT_DIR, load_config
-from mia_helpers import make_cfg
 
 
 def test_example_config_loads(monkeypatch):

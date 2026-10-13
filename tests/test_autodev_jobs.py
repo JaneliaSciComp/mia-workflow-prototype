@@ -1,10 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
+from test_autodev_agent import FakeCsub
 
 from autodev.jobs import CsubJobs, JobSpec
-
-from test_autodev_agent import FakeCsub
 
 
 def _jobs(tmp_path, fake):
@@ -62,9 +61,10 @@ async def test_wait_reads_exit_code_when_csub_forgot_the_job(tmp_path):
 
 
 async def test_recorded_id_skips_building_the_spec(tmp_path, monkeypatch):
+    from autodev_helpers import K, make_cfg
+
     from autodev.agent import AgentJobs
     from autodev.models import Workspace
-    from autodev_helpers import K, make_cfg
 
     monkeypatch.delenv("UNSET_KEY", raising=False)
     j = AgentJobs(make_cfg(tmp_path, agent={"api_key_env": "UNSET_KEY"}), client_factory=lambda: pytest.fail("client used"))

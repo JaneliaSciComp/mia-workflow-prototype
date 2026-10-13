@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from autodev_helpers import API, K, R, agent_commit, make_cfg, make_origin, run_git
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
@@ -13,8 +14,6 @@ from autodev.decide import WAIT, decide
 from autodev.github import GitHub
 from autodev.gitops import GitError, Mirror
 from autodev.models import FailureInput, Feedback, ObserveInput, PublishInput, RoundInput, StageInput
-
-from autodev_helpers import API, K, R, agent_commit, make_cfg, make_origin, run_git
 
 
 @pytest.fixture(autouse=True)

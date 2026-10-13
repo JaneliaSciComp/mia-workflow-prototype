@@ -6,14 +6,25 @@ from pathlib import Path
 
 import pytest
 import yaml
+from autodev_helpers import GIT_ID, make_origin, run_git
+from mia_helpers import make_cfg
 
 from autodev.gitops import GitError
-from autodev_helpers import GIT_ID, make_origin, run_git
 from mia_data import jobspec
-from mia_data.jobspec import (HostsNotAllowed, PinMoved, assert_pin, check_hosts_allowed, crop_job, harness_pin,
-                              match_job, match_prompt, smoke_job, snapshot, verify_job)
+from mia_data.jobspec import (
+    HostsNotAllowed,
+    PinMoved,
+    assert_pin,
+    check_hosts_allowed,
+    crop_job,
+    harness_pin,
+    match_job,
+    match_prompt,
+    smoke_job,
+    snapshot,
+    verify_job,
+)
 from mia_data.models import Pins
-from mia_helpers import make_cfg
 
 RECORD = {"data": {"download_url": "https://data.example.org/a.zip"}}
 BINDING = {"record": "rec-1", "record_commit": "c" * 40,

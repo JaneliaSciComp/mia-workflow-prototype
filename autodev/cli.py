@@ -11,9 +11,10 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from . import ops
@@ -178,9 +179,16 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     """Create or update the Temporal schedule that runs PollWorkflow every poll interval."""
-    from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
-                                   ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec,
-                                   ScheduleUpdate)
+    from temporalio.client import (
+        Schedule,
+        ScheduleActionStartWorkflow,
+        ScheduleAlreadyRunningError,
+        ScheduleIntervalSpec,
+        ScheduleOverlapPolicy,
+        SchedulePolicy,
+        ScheduleSpec,
+        ScheduleUpdate,
+    )
 
     from .workflows import PollWorkflow
 

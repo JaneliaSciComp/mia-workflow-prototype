@@ -12,7 +12,8 @@ import base64
 import collections
 import logging
 import time
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -53,7 +54,7 @@ class GitHub:
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
 
     @classmethod
-    def for_autodev(cls, cfg: Config, tokens: Callable[[], str | None] | None = None) -> "GitHub":
+    def for_autodev(cls, cfg: Config, tokens: Callable[[], str | None] | None = None) -> GitHub:
         return cls(cfg.github.repo, tokens or token_fn(cfg), api_url=cfg.github.api_url)
 
     @property

@@ -16,9 +16,27 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from .decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, decide
-    from .models import (KEY_RE, AwaitInput, CommentInput, FailureInput, Feedback, IssueInput, JobOutcome, JobRef,
-                         MergeInput, MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput,
-                         StageInput, Status, SubmitInput, Workspace)
+    from .models import (
+        KEY_RE,
+        AwaitInput,
+        CommentInput,
+        FailureInput,
+        Feedback,
+        IssueInput,
+        JobOutcome,
+        JobRef,
+        MergeInput,
+        MergeResult,
+        ObserveInput,
+        PrRef,
+        PrSnapshot,
+        PublishInput,
+        RoundInput,
+        StageInput,
+        Status,
+        SubmitInput,
+        Workspace,
+    )
 
 ROUND_DONE_LOG = "issue #%d round %d: job %s ended %s"
 MAX_POLLS_PER_EXECUTION = 500

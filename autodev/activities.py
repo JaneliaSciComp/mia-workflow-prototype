@@ -11,8 +11,9 @@ import asyncio
 import functools
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
+from typing import TYPE_CHECKING
 
 from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
@@ -22,9 +23,26 @@ from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
 from .github import GitHubError
 from .gitops import RejectedBundleError
-from .models import (AwaitInput, CommentInput, FailureInput, InvalidKeyError, IssueInput, JobOutcome, JobRef,
-                     MergeInput, MergeResult, ObserveInput, PrRef, PrSnapshot, PublishInput, RoundInput, StageInput,
-                     SubmitInput, Workspace, check_key)
+from .models import (
+    AwaitInput,
+    CommentInput,
+    FailureInput,
+    InvalidKeyError,
+    IssueInput,
+    JobOutcome,
+    JobRef,
+    MergeInput,
+    MergeResult,
+    ObserveInput,
+    PrRef,
+    PrSnapshot,
+    PublishInput,
+    RoundInput,
+    StageInput,
+    SubmitInput,
+    Workspace,
+    check_key,
+)
 from .review import WRITE_PERMISSIONS, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
@@ -45,7 +63,6 @@ PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside
 # ponytail: known secret shapes plus our own token (see neutralize); not a general secret scanner.
 SECRET_RE = re.compile(r"sk-ant-[\w-]+|gh[pousr]_\w+|github_pat_\w+|eyJ[\w-]+\.[\w-]+\.[\w-]+")
 
-_Fn = TypeVar("_Fn", bound=Callable[..., Awaitable])
 
 
 def neutralize(text: str, token: str | None = None) -> str:
@@ -58,7 +75,7 @@ def neutralize(text: str, token: str | None = None) -> str:
     return SECRET_RE.sub("[redacted]", text).replace("<!--", "&lt;!--")
 
 
-def permanent_errors(fn: _Fn) -> _Fn:
+def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: turn GitHub 4xx errors and bad keys into non-retryable failures.
 
     Retrying a request that cannot succeed would only burn the workflow's retry budget."""

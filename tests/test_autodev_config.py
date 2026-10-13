@@ -1,9 +1,8 @@
 import pytest
 import yaml
+from autodev_helpers import make_cfg
 
 from autodev.config import PROJECT_DIR, load_config
-
-from autodev_helpers import make_cfg
 
 EXAMPLE = PROJECT_DIR / "autodev.yaml.example"
 

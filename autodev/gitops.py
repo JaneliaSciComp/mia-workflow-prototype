@@ -13,8 +13,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 class GitError(RuntimeError):

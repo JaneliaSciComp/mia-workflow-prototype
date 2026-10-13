@@ -11,8 +11,9 @@ import asyncio
 import json
 import os
 import shlex
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from . import jobs
 from .jobs import read_untrusted
