@@ -4,12 +4,11 @@ import json
 import httpx
 import pytest
 import respx
+from autodev_helpers import API, make_cfg
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from autodev.auth import AppTokens, app_jwt, bot_login, noreply_email, token_fn
-
-from autodev_helpers import API, make_cfg
 
 
 def _unb64(s: str) -> bytes:
@@ -22,8 +21,9 @@ def key():
 
 
 def _pem(key) -> bytes:
-    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                             serialization.NoEncryption())
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
 
 
 def test_app_jwt_is_signed_and_backdated(key):
@@ -38,10 +38,12 @@ def test_app_jwt_is_signed_and_backdated(key):
 def test_app_tokens_are_cached_until_near_expiry(key, tmp_path):
     kp = tmp_path / "app.pem"
     kp.write_bytes(_pem(key))
-    route = respx.post(f"{API}/app/installations/7/access_tokens").mock(side_effect=[
-        httpx.Response(201, json={"token": "t1", "expires_at": "2026-10-10T12:00:00Z"}),
-        httpx.Response(201, json={"token": "t2", "expires_at": "2026-10-10T13:00:00Z"}),
-    ])
+    route = respx.post(f"{API}/app/installations/7/access_tokens").mock(
+        side_effect=[
+            httpx.Response(201, json={"token": "t1", "expires_at": "2026-10-10T12:00:00Z"}),
+            httpx.Response(201, json={"token": "t2", "expires_at": "2026-10-10T13:00:00Z"}),
+        ]
+    )
     now = [1791633600.0 - 3600]  # 2026-10-10T11:00:00Z
     tokens = AppTokens(42, 7, kp, clock=lambda: now[0])
     assert tokens() == "t1" and tokens() == "t1" and route.call_count == 1
@@ -79,5 +81,6 @@ async def test_bot_login_app_mode(tmp_path, key):
 @respx.mock
 async def test_noreply_email_uses_the_bot_user_id(tmp_path):
     respx.get(f"{API}/users/autodev-bot%5Bbot%5D").mock(return_value=httpx.Response(200, json={"id": 123}))
-    assert await noreply_email(make_cfg(tmp_path), "autodev-bot[bot]") == \
-        "123+autodev-bot[bot]@users.noreply.github.com"
+    assert (
+        await noreply_email(make_cfg(tmp_path), "autodev-bot[bot]") == "123+autodev-bot[bot]@users.noreply.github.com"
+    )

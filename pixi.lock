@@ -32,6 +32,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.14-h5f976f7_3_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyyaml-6.0.3-py312h8a5da7c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/readline-8.3-hd6e31c0_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/ruff-0.17.0-hf19af3b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/yaml-0.2.5-hebe6cf0_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
@@ -436,6 +437,21 @@ packages:
     - readline >=8.3,<9.0a0
   size: 348899
   timestamp: 1787033801506
+- conda: https://conda.anaconda.org/conda-forge/linux-64/ruff-0.17.0-hf19af3b_0.conda
+  sha256: a79ec28ded75f038db0d79459caf335ad90c1ad4e206ace01d60b08a66c882fa
+  md5: 09bc0855b5d157b2d603a1dc4d0721b1
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/ruff?source=compressed-mapping
+  run_exports: {}
+  size: 8926625
+  timestamp: 1791586553873
 - conda: https://conda.anaconda.org/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
   build_number: 104
   sha256: a1a241d172c1ccab067ba245206dd048bc3c2d1b84504b53c9468e99adfc16a1
@@ -930,7 +946,7 @@ packages:
   - pydantic>=2
   - pyyaml
   - cryptography
-  requires_python: '>=3.11'
+  requires_python: '>=3.12'
 - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
   name: csub
   version: 0.1.0

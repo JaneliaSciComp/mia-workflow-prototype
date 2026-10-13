@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 
 import yaml
-
-from mia_data.cli import run_test_pr
 from test_autodev_agent import FakeCsub
 from test_mia_activities import BINDING, REC_SHA, SNIP_SHA, _crop, _setup
+
+from mia_data.cli import run_test_pr
 
 PR, H2 = 7, "b" * 40
 
@@ -25,9 +25,22 @@ class JobCsub(FakeCsub):
         else:
             (ws / "preview" / "c1").mkdir(parents=True)
             (ws / "preview" / "c1" / "overlay.png").write_bytes(b"ov")
-            (ws / "verify.json").write_text(json.dumps({"n": 1, "errors": [], "crops": [
-                {"crop_id": "c1", "ok": self.verify_ok, "errors": [] if self.verify_ok else ["overlay empty"],
-                 "files": self.files}]}))
+            (ws / "verify.json").write_text(
+                json.dumps(
+                    {
+                        "n": 1,
+                        "errors": [],
+                        "crops": [
+                            {
+                                "crop_id": "c1",
+                                "ok": self.verify_ok,
+                                "errors": [] if self.verify_ok else ["overlay empty"],
+                                "files": self.files,
+                            }
+                        ],
+                    }
+                )
+            )
         return super().submit(spec)
 
 
@@ -51,7 +64,9 @@ async def test_test_pr_passes(tmp_path, capsys):
     assert log[-1][4] == c["html_url"] and f"<!-- mia-data: test-pr {SNIP_SHA} -->" in c["body"]
     assert "1 of 1 crops verified" in c["body"] and "?raw=true" in c["body"]
     pre = f"galleries/_test-pr/rec-1/{PR}/{SNIP_SHA}"
-    assert sorted(t.data.puts) == [f"{pre}/{r}" for r in ("binding.yaml", "c1/overlay.png", "c1/raw.png", "verify.json")]
+    assert sorted(t.data.puts) == [
+        f"{pre}/{r}" for r in ("binding.yaml", "c1/overlay.png", "c1/raw.png", "verify.json")
+    ]
     crop = t.csub.submitted[0]
     assert f"--n 4 --seed test-pr-{PR}-{SNIP_SHA}" in crop["command"]
     assert crop["cwd"].startswith(str(t.cfg.paths.work_root / "test-pr" / str(PR) / SNIP_SHA))

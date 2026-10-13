@@ -3,6 +3,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .env
-autodev.yaml
-autodev-snippets.yaml
+autodev*.yaml
+!autodev.yaml.example
 mia_data.yaml
