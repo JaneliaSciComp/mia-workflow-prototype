@@ -22,6 +22,8 @@ All in the current directory:
    `record_commit: ${record_commit}` and `snippets_commit: ${snippets_commit}`. List every raw array under
    `raw` and every label array under `labels`, each with a `snippet` from `catalog/`, its `urls` (https, from
    `record.yaml`) and its `params`. Labels also need `pairs_with`, `label_key` and `segmentation_type`.
+   `label_key` is the catalog's label name exactly as `downloads.json` lists it (e.g. `unknown-cell-labels`);
+   it becomes a file name, so never rename it.
 3. Test it:
 
        harness smoke binding.yaml --snippets ./snapshot --record record.yaml --out smoke.json

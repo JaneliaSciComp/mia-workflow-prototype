@@ -522,15 +522,15 @@ class Activities:
         excerpt = yaml.safe_dump({k: rec.get(k) for k in ("title", "imaging", "data", "technical")}, sort_keys=False)
         d = draft or {}
         body = "\n\n".join([
-            m, f"New snippet needed for dataset `{pins.record}` ([{g.data_repo}#{issue}]"
-               f"(https://github.com/{g.data_repo}/issues/{issue})). Read "
-               f"[SPEC.md](https://github.com/{g.snippets_repo}/blob/main/SPEC.md) first, and add the binding you "
-               f"test as `examples/{pins.record}.yaml`.",
+            m, f"For [{g.data_repo}#{issue}](https://github.com/{g.data_repo}/issues/{issue}): "
+               f"dataset `{pins.record}` has no snippet that reads it.",
+            f"Read [SPEC.md](https://github.com/{g.snippets_repo}/blob/main/SPEC.md) first, and add the binding you "
+            f"test as `examples/{pins.record}.yaml`.",
             f"**Record** (at `{pins.record_commit}`):", _fenced(self._clean(excerpt[:8000]), "yaml"),
             "**What fails** (the match agent's report):", _fenced(self._clean(_text(d.get("what_fails"), 4000))),
             "**Tried:**", _fenced(self._clean(json.dumps(d.get("tried"), indent=1)[:8000]), "json"),
             "**Draft binding:**", _fenced(self._clean(yaml.safe_dump(d.get("draft_binding"), sort_keys=False)[:16000]), "yaml")])
-        title = f"New snippet for {self._clean(fmt)}/{container} ({g.data_repo.split('/')[-1]}#{issue})"
+        title = f"New snippet for {self._clean(fmt)}/{container}: {self._clean(pins.record)}"
         return (await gh.create_issue(title, body, ["snippets:go"]))["number"]
 
     @activity.defn(name="pr_state")
