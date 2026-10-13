@@ -43,7 +43,14 @@ def _tree(tmp_path, ids=("c1", "c2")):
 def test_gallery_files_only_verified(tmp_path):
     cw, vw, verified = _tree(tmp_path, ("c1", "c2", "c3"))
     files = gallery_files(cw, vw, verified[:2])
-    assert sorted(files) == ["binding.yaml", "c1/overlay.png", "c1/raw.png", "c2/overlay.png", "c2/raw.png", "verify.json"]
+    assert sorted(files) == [
+        "binding.yaml",
+        "c1/overlay.png",
+        "c1/raw.png",
+        "c2/overlay.png",
+        "c2/raw.png",
+        "verify.json",
+    ]
     (cw / "crops" / "c1" / "raw.png").write_bytes(b"swapped")
     with pytest.raises(ValueError):
         gallery_files(cw, vw, verified[:1])

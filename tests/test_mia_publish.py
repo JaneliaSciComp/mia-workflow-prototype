@@ -17,9 +17,13 @@ def _src(tmp_path, ids=("c1", "c2"), snippet="tiff-zip-member", name="src"):
     for c in ids:
         d = src / c
         (d / "labels").mkdir(parents=True)
-        files = {"raw.png": b"png" + c.encode(), "labels/k-x-instance.png": b"lab" + c.encode(),
-                 "crop.json": json.dumps({"crop_id": c, "plane": {"z": 0, "c": 0},
-                                          "snippets": [{"name": snippet, "commit": "4c1d"}]}).encode()}
+        files = {
+            "raw.png": b"png" + c.encode(),
+            "labels/k-x-instance.png": b"lab" + c.encode(),
+            "crop.json": json.dumps(
+                {"crop_id": c, "plane": {"z": 0, "c": 0}, "snippets": [{"name": snippet, "commit": "4c1d"}]}
+            ).encode(),
+        }
         for rel, data in files.items():
             (d / rel).write_bytes(data)
         verified.append({"crop_id": c, "files": {r: hashlib.sha256(v).hexdigest() for r, v in files.items()}})
@@ -72,6 +76,7 @@ def test_concurrent_publishers(tmp_path, monkeypatch):
     def lockstep(a, b):  # both attempts have copied the crop; both now rename it
         barrier.wait(timeout=10)
         rename(a, b)
+
     monkeypatch.setattr("mia_data.publish.os.rename", lockstep)
 
     def run(src, verified):
@@ -79,6 +84,7 @@ def test_concurrent_publishers(tmp_path, monkeypatch):
             results.append(publish(ds, src, verified, {}, tmp_max_age_s=AGE))
         except Exception as e:  # noqa: BLE001
             errors.append(e)
+
     ts = [threading.Thread(target=run, args=s) for s in srcs]
     [t.start() for t in ts], [t.join() for t in ts]
     assert errors == []

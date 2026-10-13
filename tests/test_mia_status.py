@@ -2,9 +2,16 @@ from mia_data.status import render_binding, render_crops_table, render_links, re
 
 
 def rows(n, cid="i1-e2-b1-{:03d}"):
-    return [{"crop_id": cid.format(i), "raw_url": f"https://github.com/o/d/blob/g/p/{i}/raw.png?raw=true",
-             "overlay_url": f"https://github.com/o/d/blob/g/p/{i}/overlay.png?raw=true",
-             "plane": {"z": i, "c": 0}, "box": {"y": 10, "x": 20}} for i in range(n)]
+    return [
+        {
+            "crop_id": cid.format(i),
+            "raw_url": f"https://github.com/o/d/blob/g/p/{i}/raw.png?raw=true",
+            "overlay_url": f"https://github.com/o/d/blob/g/p/{i}/overlay.png?raw=true",
+            "plane": {"z": i, "c": 0},
+            "box": {"y": 10, "x": 20},
+        }
+        for i in range(n)
+    ]
 
 
 def test_crops_table_small_plain_large_details():
@@ -28,7 +35,9 @@ def test_binding_block_fences_and_neutralizes(tmp_path):
 
 
 def test_links_line_lists_only_given_urls():
-    assert render_links({"Workspace": None, "Crops": "https://fg.example/b/c d", "Gallery": "https://g/x"}) == \
-        "**Folders:** [Crops](https://fg.example/b/c%20d) · [Gallery](https://g/x)\n"
+    assert (
+        render_links({"Workspace": None, "Crops": "https://fg.example/b/c d", "Gallery": "https://g/x"})
+        == "**Folders:** [Crops](https://fg.example/b/c%20d) · [Gallery](https://g/x)\n"
+    )
     assert render_links({"Workspace": None}) == ""
     assert "<!--" not in render_stage("needs-human", "<!-- mia-data:status -->")

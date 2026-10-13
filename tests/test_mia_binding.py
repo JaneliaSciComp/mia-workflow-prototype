@@ -11,11 +11,25 @@ from tests.mia_helpers import make_cfg
 REC = yaml.safe_load((Path(__file__).parent / "fixtures/mia/records/bbbc034-hipsc-nuclei-3d.yaml").read_text())
 SHA = "37e18f6e" + "0" * 32
 ZIP = "https://data.broadinstitute.org/bbbc/BBBC034/"
-B = {"record": "bbbc034-hipsc-nuclei-3d", "record_commit": SHA, "snippets_commit": "4c1d",
-     "raw": [{"snippet": "tiff-zip-member", "urls": [ZIP + "BBBC034_v1_dataset.zip::AICS_12_134_C=2.tif"], "params": {}}],
-     "labels": [{"snippet": "tiff-zip-member", "urls": [ZIP + "BBBC034_v1_DatasetGroundTruth.zip::ground_truth_segmented.tif"],
-                 "params": {}, "pairs_with": 0, "label_key": "manual_gt-nucleus-instance", "segmentation_type": "instance"}],
-     "reasons": ["axes zyx"]}
+B = {
+    "record": "bbbc034-hipsc-nuclei-3d",
+    "record_commit": SHA,
+    "snippets_commit": "4c1d",
+    "raw": [
+        {"snippet": "tiff-zip-member", "urls": [ZIP + "BBBC034_v1_dataset.zip::AICS_12_134_C=2.tif"], "params": {}}
+    ],
+    "labels": [
+        {
+            "snippet": "tiff-zip-member",
+            "urls": [ZIP + "BBBC034_v1_DatasetGroundTruth.zip::ground_truth_segmented.tif"],
+            "params": {},
+            "pairs_with": 0,
+            "label_key": "manual_gt-nucleus-instance",
+            "segmentation_type": "instance",
+        }
+    ],
+    "reasons": ["axes zyx"],
+}
 NAMES = {"tiff-zip-member"}
 
 
@@ -27,8 +41,15 @@ def test_example_binding_passes():
     assert check(copy.deepcopy(B)) == []
 
 
-@pytest.mark.parametrize("url", ["https://evil.example.org/x.zip", "http://data.broadinstitute.org/x.zip",
-                                 "ftp://data.broadinstitute.org/x.zip", "HTTPS://data.broadinstitute.org/x"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example.org/x.zip",
+        "http://data.broadinstitute.org/x.zip",
+        "ftp://data.broadinstitute.org/x.zip",
+        "HTTPS://data.broadinstitute.org/x",
+    ],
+)
 def test_bad_urls_rejected(url):
     b = copy.deepcopy(B)
     b["raw"][0]["urls"] = [url]
@@ -73,8 +94,10 @@ def test_record_urls_include_sample_and_patterns():
 
 
 def test_hosts_add_redirects_and_packages(tmp_path):
-    cfg = make_cfg(tmp_path, network={"redirect_hosts": {"data.broadinstitute.org": ["cdn.broad.example"]},
-                                      "package_hosts": ["pypi.org"]})
+    cfg = make_cfg(
+        tmp_path,
+        network={"redirect_hosts": {"data.broadinstitute.org": ["cdn.broad.example"]}, "package_hosts": ["pypi.org"]},
+    )
     urls = B["raw"][0]["urls"] + ["s3://bucket/key", "https://DATA.broadinstitute.org/y"]
     assert hosts(urls, cfg) == ["bucket.s3.amazonaws.com", "cdn.broad.example", "data.broadinstitute.org", "pypi.org"]
     with pytest.raises(ValueError):

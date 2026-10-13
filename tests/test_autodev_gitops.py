@@ -2,11 +2,10 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from autodev_helpers import agent_commit, make_origin, run_git
 
 from autodev import gitops
 from autodev.gitops import GitError, Mirror, ProtectedPathError, RejectedBundleError
-
-from autodev_helpers import agent_commit, make_origin, run_git
 
 URL = "https://github.com/o/r.git"
 
@@ -56,7 +55,7 @@ def test_protected_path_refused_and_nothing_pushed(setup):
     agent_commit(ws / "repo", ".github/workflows/ci.yml", "on: [push, pull_request]\n", base)
     with pytest.raises(ProtectedPathError, match="ci.yml"):
         m.publish(ws / "result.bundle", base, "autodev/issue-7", "refs/autodev/7/k-r1", [".github/"], force=True)
-    with pytest.raises(Exception):
+    with pytest.raises(subprocess.CalledProcessError):
         run_git("rev-parse", "--verify", "refs/heads/autodev/issue-7", cwd=origin)
 
 
@@ -89,9 +88,9 @@ def _publish(m, ws, base, protected=(".github/",)):
 def _assert_refused(origin, m, ws, base, exc=ProtectedPathError):
     with pytest.raises(exc):
         _publish(m, ws, base)
-    with pytest.raises(Exception):
+    with pytest.raises(subprocess.CalledProcessError):
         run_git("rev-parse", "--verify", "refs/heads/autodev/issue-7", cwd=origin)
-    with pytest.raises(Exception):
+    with pytest.raises(subprocess.CalledProcessError):
         run_git("rev-parse", "--verify", PUB[1], cwd=m.path)
 
 

@@ -68,6 +68,8 @@ def test_logs_missing_file_exits(tmp_path):
 
 def test_cli_reads_deployment_from_config(tmp_path, tmux):
     y = tmp_path / "a.yaml"
-    y.write_text(f"deployment: autodev-zed\ngithub: {{repo: o/r}}\npaths: {{work_root: {tmp_path}/w, state_dir: {tmp_path}/s}}\n")
+    y.write_text(
+        f"deployment: autodev-zed\ngithub: {{repo: o/r}}\npaths: {{work_root: {tmp_path}/w, state_dir: {tmp_path}/s}}\n"
+    )
     assert main(["--config", str(y), "down"]) == 0
     assert ["tmux", "kill-session", "-t", "=autodev-zed"] in tmux.calls
