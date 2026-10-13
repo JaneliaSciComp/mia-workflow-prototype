@@ -1,4 +1,7 @@
-"""autodev command line."""
+"""The `autodev` command line: health checks, label setup, the worker, the poll schedule, and deployment
+management (up/down/ps/logs, from ops.py). Heavy imports happen inside the commands that need them so
+`--help` and the ops commands stay fast.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +13,16 @@ import signal
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from . import ops
 from .config import PROJECT_DIR, STAGES, load_config
+
+if TYPE_CHECKING:
+    from temporalio.client import Client
+
+    from .config import Config
 
 OPS = {"up": ops.cmd_up, "down": ops.cmd_down, "restart": ops.cmd_restart, "ps": ops.cmd_ps,
        "attach": ops.cmd_attach, "logs": ops.cmd_logs}
@@ -21,25 +30,28 @@ OPS = {"up": ops.cmd_up, "down": ops.cmd_down, "restart": ops.cmd_restart, "ps":
 log = logging.getLogger("autodev")
 
 
-def _setup_logging(cfg, name: str | None) -> None:
+def _setup_logging(cfg: Config, name: str | None) -> None:
+    """Log to stderr, and also to state_dir/logs/<name>.log when `name` is given (the worker)."""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if name:
         logs = cfg.paths.state_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(logs / f"{name}.log"))
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    for h in handlers:
-        h.setFormatter(fmt)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for handler in handlers:
+        handler.setFormatter(formatter)
     logging.basicConfig(level=logging.INFO, handlers=handlers)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def proxy_target(environ) -> str | None:
+def proxy_target(environ: dict) -> str | None:
+    """The host:port of $https_proxy, if set."""
     url = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
     return urlsplit(url).netloc if url else None
 
 
-async def _client(cfg):
+async def _client(cfg: Config) -> Client:
+    """Connect to Temporal, through the HTTPS proxy when the config says the sandbox requires it."""
     from temporalio.client import Client
     from temporalio.service import HttpConnectProxyConfig
 
@@ -52,52 +64,54 @@ async def _client(cfg):
                                                  http_connect_proxy_config=proxy), 10)
 
 
-def _csub_problems(cfg, p) -> list[str]:
+def _csub_problems(cfg: Config, probe: Any) -> list[str]:
+    """Ways the csub broker policy (from `csub probe`) would stop agent jobs from running."""
     need = set(cfg.agent.allow_hosts)  # Anthropic hosts come from the policy's [agents] claude entry
-    work = cfg.paths.work_root.resolve()
-    return [*([] if "claude" in p.agents else ['agent "claude" not in the policy [agents] table']),
-            *(f"host not allowed: {h}" for h in sorted(need - set(p.allowed_hosts))),
-            *([] if any(work.is_relative_to(Path(r).resolve()) for r in p.allowed_roots)
-              else [f"work_root {work} not under allowed_roots {p.allowed_roots}"])]
+    work_root = cfg.paths.work_root.resolve()
+    return [*([] if "claude" in probe.agents else ['agent "claude" not in the policy [agents] table']),
+            *(f"host not allowed: {host}" for host in sorted(need - set(probe.allowed_hosts))),
+            *([] if any(work_root.is_relative_to(Path(root).resolve()) for root in probe.allowed_roots)
+              else [f"work_root {work_root} not under allowed_roots {probe.allowed_roots}"])]
 
 
-async def cmd_check(cfg, args) -> int:
+async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
+    """Try every external dependency and print one ok/BAD line per check."""
     from .agent import csub_client
     from .auth import bot_login
     from .github import GitHub
 
     rows: list[tuple[str, bool, str]] = []
 
-    async def row(name, fn):
+    async def row(name: str, check: Callable[[], Awaitable[Any]]) -> None:
         try:
-            rows.append((name, True, str(await fn())))
-        except Exception as e:  # report every check, then fail
-            rows.append((name, False, f"{type(e).__name__}: {e}"))
+            rows.append((name, True, str(await check())))
+        except Exception as error:  # report every check, then fail
+            rows.append((name, False, f"{type(error).__name__}: {error}"))
 
     gh = None
 
     async def repo():
         nonlocal gh
         gh = GitHub.for_autodev(cfg)
-        r = (await gh.request("GET", f"/repos/{cfg.github.repo}")).json()
-        return f"{r['full_name']} (default branch {r['default_branch']})"
+        info = (await gh.request("GET", f"/repos/{cfg.github.repo}")).json()
+        return f"{info['full_name']} (default branch {info['default_branch']})"
 
     async def csub_ok():
-        p = await asyncio.to_thread(csub_client(cfg).probe)
-        problems = _csub_problems(cfg, p)
+        probe = await asyncio.to_thread(csub_client(cfg).probe)
+        problems = _csub_problems(cfg, probe)
         if problems:
             raise RuntimeError("; ".join(problems))
-        return f"broker user {p.user}, sandbox {p.sandbox}"
+        return f"broker user {probe.user}, sandbox {probe.sandbox}"
 
     async def temporal():
-        c = await _client(cfg)
-        return f"{cfg.temporal.address} ns={cfg.temporal.namespace} ({c.identity})"
+        client = await _client(cfg)
+        return f"{cfg.temporal.address} ns={cfg.temporal.namespace} ({client.identity})"
 
     async def dirs():
-        for d in (cfg.paths.state_dir, cfg.paths.work_root):
-            d.mkdir(parents=True, exist_ok=True)
-            (d / ".write-test").touch()
-            (d / ".write-test").unlink()
+        for directory in (cfg.paths.state_dir, cfg.paths.work_root):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / ".write-test").touch()
+            (directory / ".write-test").unlink()
         return f"{cfg.paths.state_dir}, {cfg.paths.work_root}"
 
     await row("github identity", lambda: bot_login(cfg))
@@ -112,18 +126,20 @@ async def cmd_check(cfg, args) -> int:
     return 0 if all(ok for _, ok, _ in rows) else 1
 
 
-async def cmd_init_labels(cfg, args) -> int:
+async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     from .github import GitHub
 
     gh = GitHub.for_autodev(cfg)
-    for stage, (color, desc) in STAGES.items():
-        if await gh.ensure_label(cfg.label(stage), color, desc):
+    for stage, (color, description) in STAGES.items():
+        if await gh.ensure_label(cfg.label(stage), color, description):
             print(f"created {cfg.label(stage)}")
     await gh.aclose()
     return 0
 
 
-async def cmd_worker(cfg, args) -> int:
+async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
+    """Run the Temporal worker until SIGTERM: one worker for workflows and short activities, one for the
+    long-running job waits."""
     from temporalio.worker import Worker
 
     from .activities import Activities
@@ -140,16 +156,18 @@ async def cmd_worker(cfg, args) -> int:
     # Agent commits are authored as the account that pushes them and opens the PR.
     mirror = Mirror(cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git", cfg.git_url, tokens,
                     author=(bot, await noreply_email(cfg, bot)))
-    acts = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
-    tq = cfg.task_queue
-    main = Worker(client, task_queue=tq, workflows=[IssueWorkflow, PollWorkflow], activities=acts.all(),
-                  max_concurrent_activities=8)
-    waits = Worker(client, task_queue=f"{tq}-await", activities=[acts.await_agent], max_concurrent_activities=20)
+    activities = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
+    task_queue = cfg.task_queue
+    main_worker = Worker(client, task_queue=task_queue, workflows=[IssueWorkflow, PollWorkflow],
+                         activities=activities.all(), max_concurrent_activities=8)
+    await_worker = Worker(client, task_queue=f"{task_queue}-await", activities=[activities.await_agent],
+                          max_concurrent_activities=20)
     task = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-    log.info("worker up as %s: %s ns=%s queues %s, %s-await", bot, cfg.temporal.address, cfg.temporal.namespace, tq, tq)
+    log.info("worker up as %s: %s ns=%s queues %s, %s-await", bot, cfg.temporal.address, cfg.temporal.namespace,
+             task_queue, task_queue)
     try:
-        async with main, waits:
+        async with main_worker, await_worker:
             await asyncio.Event().wait()
     except asyncio.CancelledError:
         log.info("worker shutting down")
@@ -158,7 +176,8 @@ async def cmd_worker(cfg, args) -> int:
     return 0
 
 
-async def cmd_schedule(cfg, args) -> int:
+async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
+    """Create or update the Temporal schedule that runs PollWorkflow every poll interval."""
     from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
                                    ScheduleIntervalSpec, ScheduleOverlapPolicy, SchedulePolicy, ScheduleSpec,
                                    ScheduleUpdate)
@@ -166,39 +185,41 @@ async def cmd_schedule(cfg, args) -> int:
     from .workflows import PollWorkflow
 
     client = await _client(cfg)
-    sid = f"{cfg.deployment}-poll"
-    sched = Schedule(
-        action=ScheduleActionStartWorkflow(PollWorkflow.execute, id=f"{cfg.deployment}-poll-run", task_queue=cfg.task_queue),
+    schedule_id = f"{cfg.deployment}-poll"
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow(PollWorkflow.execute, id=f"{cfg.deployment}-poll-run",
+                                           task_queue=cfg.task_queue),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
     try:
-        await client.create_schedule(sid, sched)
-        print(f"created schedule {sid}")
+        await client.create_schedule(schedule_id, schedule)
+        print(f"created schedule {schedule_id}")
     except ScheduleAlreadyRunningError:
-        await client.get_schedule_handle(sid).update(lambda _: ScheduleUpdate(schedule=sched))
-        print(f"updated schedule {sid}")
+        await client.get_schedule_handle(schedule_id).update(lambda _: ScheduleUpdate(schedule=schedule))
+        print(f"updated schedule {schedule_id}")
     return 0
 
 
-def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="autodev", description=__doc__)
-    p.add_argument("--config", help="path to autodev.yaml (default: $AUTODEV_CONFIG or ./autodev.yaml)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="autodev", description=__doc__)
+    parser.add_argument("--config", help="path to autodev.yaml (default: $AUTODEV_CONFIG or ./autodev.yaml)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="verify GitHub identity, Temporal, csub policy and directories")
     sub.add_parser("init-labels", help="create the stage labels")
     sub.add_parser("worker", help="run the Temporal worker")
-    s = sub.add_parser("schedule", help="manage the poll Schedule")
-    s.add_argument("action", choices=["apply"])
+    schedule = sub.add_parser("schedule", help="manage the poll Schedule")
+    schedule.add_argument("action", choices=["apply"])
     sub.add_parser("up", help="start this deployment (tmux: Temporal, broker, worker)")
     sub.add_parser("down", help="stop this deployment's tmux session")
     sub.add_parser("restart", help="down, then up")
     sub.add_parser("ps", help="show whether this deployment is running")
     sub.add_parser("attach", help="attach to the deployment's tmux session")
-    s = sub.add_parser("logs", help="tail a log (default: worker)")
-    s.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
-    s.add_argument("-n", "--lines", type=int, default=50)
-    s.add_argument("-f", "--follow", action="store_true", help="keep following the log (default: print the last lines and exit)")
-    args = p.parse_args(argv)
+    logs = sub.add_parser("logs", help="tail a log (default: worker)")
+    logs.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
+    logs.add_argument("-n", "--lines", type=int, default=50)
+    logs.add_argument("-f", "--follow", action="store_true",
+                      help="keep following the log (default: print the last lines and exit)")
+    args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if args.cmd in OPS:
         args.config_path = Path(args.config or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml").resolve()

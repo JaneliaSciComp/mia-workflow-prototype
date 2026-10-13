@@ -1,4 +1,10 @@
-"""Config: mia_data.yaml + environment overrides. Secrets come only from env / ./.env and key files."""
+"""mia-data configuration: mia_data.yaml, with a few environment-variable overrides.
+
+mia-data works with three GitHub repositories: the data repo (one issue per dataset, where humans label
+and the galleries branch lives), the snippets repo (mia-snippets, the loader code) and the catalog repo
+(mia-agentic-search, the dataset records and download state). Secrets come only from the environment,
+./.env and key files, never from the YAML.
+"""
 
 from __future__ import annotations
 
@@ -66,19 +72,20 @@ class PathsCfg(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _flatten(cls, d):
-        if isinstance(d, dict):
-            d = dict(d)
-            for k in ("work_root", "storage_root"):
-                if isinstance(v := d.get(k), dict):
-                    d[k], d[f"{k}_url"] = v.get("path"), v.get("url")
-        return d
+    def _flatten(cls, data):
+        """Accept `{path, url}` for a root and split it into the `<root>` and `<root>_url` fields."""
+        if isinstance(data, dict):
+            data = dict(data)
+            for key in ("work_root", "storage_root"):
+                if isinstance(value := data.get(key), dict):
+                    data[key], data[f"{key}_url"] = value.get("path"), value.get("url")
+        return data
 
-    def link(self, p: Path) -> str | None:
-        """The browse URL of `p`, from the url of the root it is under; None when that root has none."""
+    def link(self, path: Path) -> str | None:
+        """The browse URL of `path`, from the url of the root it is under; None when that root has none."""
         for root, url in ((self.work_root, self.work_root_url), (self.storage_root, self.storage_root_url)):
-            if url and p.is_relative_to(root):
-                rel = p.relative_to(root)
+            if url and path.is_relative_to(root):
+                rel = path.relative_to(root)
                 return url.rstrip("/") + ("" if rel == Path() else "/" + quote(rel.as_posix()))
         return None
 
@@ -105,15 +112,16 @@ class LimitsCfg(BaseModel):
 
 
 class HarnessCfg(BaseModel):
-    dir: Path
+    dir: Path  # a checkout of the harness repo with its pixi environment installed
 
 
 class NetworkCfg(BaseModel):
     package_hosts: list[str] = ["pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.prefix.dev"]
-    redirect_hosts: dict[str, list[str]] = {}  # exact hosts, no patterns
+    redirect_hosts: dict[str, list[str]] = {}  # data host -> hosts it redirects to; exact names, no patterns
 
 
 class Config(BaseModel):
+    """The whole mia_data.yaml, validated, plus the derived names (labels, markers, queues) built from it."""
     deployment: str = "mia-data"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
@@ -127,38 +135,40 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _finish(self) -> "Config":
+        """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
-        g = self.github
-        if g.auth == "app" and not (g.app_id and g.installation_id and g.private_key_path):
+        github = self.github
+        if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
         for attr in ("private_key_path", "token_file"):
-            if getattr(g, attr):
-                setattr(g, attr, getattr(g, attr).expanduser())
-        p = self.paths
-        for o in (p, self.harness):
-            for k, v in vars(o).items():
-                if isinstance(v, Path):
-                    setattr(o, k, v.expanduser().resolve())
-        for other in (p.work_root, p.storage_root):
-            if p.state_dir == other or p.state_dir in other.parents or other in p.state_dir.parents:
-                raise ValueError(f"paths.state_dir {p.state_dir} overlaps {other}")
-        for k, v in vars(self.limits).items():
-            if not (math.isfinite(v) and v > 0):
-                raise ValueError(f"limits.{k} must be finite and positive")
+            if getattr(github, attr):
+                setattr(github, attr, getattr(github, attr).expanduser())
+        paths = self.paths
+        for section in (paths, self.harness):
+            for name, value in vars(section).items():
+                if isinstance(value, Path):
+                    setattr(section, name, value.expanduser().resolve())
+        for other in (paths.work_root, paths.storage_root):  # state_dir holds secrets and is never mounted
+            if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
+                raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")
+        for name, value in vars(self.limits).items():
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(f"limits.{name} must be finite and positive")
         if self.limits.max_stage_attempts != 1:
             raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")
-        for k in ("allow_hosts", "extra_mounts", "api_key_env"):  # autodev's; mia-data's jobs never read them
-            if getattr(self.agent, k):
-                raise ValueError(f"agent.{k} is not used by mia-data (job hosts come from the binding and network.*, "
+        for name in ("allow_hosts", "extra_mounts", "api_key_env"):  # autodev's; mia-data's jobs never read them
+            if getattr(self.agent, name):
+                raise ValueError(f"agent.{name} is not used by mia-data (job hosts come from the binding and network.*, "
                                  "mounts from the job builders); remove it")
         if not self.crops.licences:
             raise ValueError("crops.licences must not be empty")
-        n = self.network
-        for h in n.package_hosts + list(n.redirect_hosts) + [x for v in n.redirect_hosts.values() for x in v]:
-            if is_github_host(h):
-                raise ValueError(f"network: {h!r} is a GitHub host")
-        if bad := [x for v in n.redirect_hosts.values() for x in v if "*" in x]:
+        network = self.network
+        redirect_targets = [target for targets in network.redirect_hosts.values() for target in targets]
+        for host in network.package_hosts + list(network.redirect_hosts) + redirect_targets:
+            if is_github_host(host):
+                raise ValueError(f"network: {host!r} is a GitHub host")
+        if bad := [target for target in redirect_targets if "*" in target]:
             raise ValueError(f"network.redirect_hosts: {bad} must be exact hosts, no '*'")
         return self
 
@@ -168,6 +178,7 @@ class Config(BaseModel):
 
     @property
     def await_queue(self) -> str:
+        """The task queue for the long-running job waits, kept apart from the short activities."""
         return self.deployment + "-await"
 
     def label(self, stage: str) -> str:
@@ -177,25 +188,26 @@ class Config(BaseModel):
         return f"mia-data/{self.github.data_repo}/issue-{issue}"
 
     def marker(self, text: str) -> str:
+        """The HTML comment hidden in our own GitHub comments so we can find them again."""
         return f"<!-- mia-data: {text} -->"
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load config; exits with a readable message if it is missing or invalid."""
+    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
     load_dotenv()
     path = Path(path or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml")
     if not path.is_file():
         sys.exit(f"mia-data: config not found at {path} (copy mia_data.yaml.example, or set $MIA_DATA_CONFIG)")
     data = yaml.safe_load(path.read_text()) or {}
-    for env, keys in _ENV_OVERRIDES.items():
-        if os.environ.get(env):
-            d = data
-            for k in keys[:-1]:
-                if d.get(k) is None:
-                    d[k] = {}
-                d = d[k]
-            d[keys[-1]] = os.environ[env]
+    for env_var, key_path in _ENV_OVERRIDES.items():
+        if os.environ.get(env_var):
+            node = data
+            for key in key_path[:-1]:
+                if node.get(key) is None:  # a bare `temporal:` in YAML parses as None
+                    node[key] = {}
+                node = node[key]
+            node[key_path[-1]] = os.environ[env_var]
     try:
         return Config(**data)
-    except ValidationError as e:
-        sys.exit(f"mia-data: invalid config {path}:\n{e}")
+    except ValidationError as err:
+        sys.exit(f"mia-data: invalid config {path}:\n{err}")

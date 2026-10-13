@@ -1,40 +1,55 @@
-"""§7.4 test crops: `judge` (pure, shared with MiaDataDataset) and `run_crop_test`, the activity methods in
-MiaDataDataset._crop's order without Temporal (used by `test-pr`). The orchestration is twice because the workflow
-can't await activity methods directly and `test-pr` has no worker; what a result means lives once, in `judge`."""
+"""Judging a test-crop run, and running one outside Temporal.
+
+`judge` is the single definition of "the test crops passed", shared by the workflow and the `test-pr`
+command. `run_crop_test` calls the activity methods in the same order as MiaDataDataset._crop but
+synchronously, for `test-pr`, which has no worker. The orchestration exists twice because the workflow
+cannot await activity methods directly; what a result means lives once, in `judge`.
+"""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from .models import GalleryResult, JobArgs, JobDone, Pins, VerifyResult, job_key
 
-
-def _ok(d: JobDone) -> bool:
-    return d.state == "DONE" and d.exit_code in (0, None)
-
-
-def _failed(kind: str, d: JobDone) -> str:
-    return f"{kind} job {d.job_id} ended {d.state} (exit {d.exit_code})"
+if TYPE_CHECKING:
+    from .activities import Activities
 
 
-def judge(v: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
-    """(passed, failed jobs): both jobs succeeded and every test crop verified."""
-    bad = [_failed(k, j) for k, j in zip(("crop", "verify"), jobs) if not _ok(j)]
-    return not bad and v.ok_count > 0 and not v.errors, bad
+def job_succeeded(job: JobDone) -> bool:
+    return job.state == "DONE" and job.exit_code in (0, None)
 
 
-async def run_crop_test(acts, *, issue: int, round_id: str, pins: Pins, sha: str, binding_path: str, seed: str,
-                        trusted: bool) -> tuple[VerifyResult, GalleryResult | None, list[JobDone]]:
-    """crop (`crops.test_per_round`, batch 0) → verify (+ preview) → read_verify → publish_gallery of the verified
-    crops, in workspaces crop-<sha> / verify-<sha> of the round, waiting synchronously. The jobs are returned, so
-    the caller judges them; an uncertain crop job skips verify."""
-    async def job(kind: str, **kw) -> tuple[str, JobDone]:
-        ws = await acts.prepare_job(issue, round_id, f"{kind}-{sha}", 1, binding_path)
-        jid = await acts.submit(job_key(issue, round_id, f"{kind}-{sha}", 1), kind, JobArgs(ws, round_id, pins, **kw))
-        o = await acts.jobs.wait(jid, ws, lambda _: None)
-        return ws, JobDone(o.job_id, o.state, o.exit_code)
+def describe_failure(kind: str, job: JobDone) -> str:
+    return f"{kind} job {job.job_id} ended {job.state} (exit {job.exit_code})"
 
-    cw, c = await job("crop", sha=sha, n=acts.cfg.crops.test_per_round, seed=seed, trusted=trusted)
-    if c.state not in ("DONE", "EXIT"):
-        return VerifyResult(0, 0, [f"crop job {c.job_id} ended {c.state}"], []), None, [c]
-    vw, d = await job("verify", crop_ws=cw)
-    v = await acts.read_verify(vw, cw)
-    return v, await acts.publish_gallery(issue, round_id, sha, cw, vw, v.crops) if v.crops else None, [c, d]
+
+def judge(verify: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
+    """(passed, descriptions of failed jobs): passed when both jobs succeeded and every test crop verified."""
+    failed = [describe_failure(kind, job) for kind, job in zip(("crop", "verify"), jobs) if not job_succeeded(job)]
+    return not failed and verify.ok_count > 0 and not verify.errors, failed
+
+
+async def run_crop_test(activities: Activities, *, issue: int, round_id: str, pins: Pins, sha: str, binding_path: str,
+                        seed: str, trusted: bool) -> tuple[VerifyResult, GalleryResult | None, list[JobDone]]:
+    """crop (`crops.test_per_round`, batch 0) → verify (+ preview) → read_verify → publish_gallery, in the
+    round's crop-<sha> / verify-<sha> workspaces, waiting for each job in turn.
+
+    Returns (verify result, gallery or None, the jobs) so the caller can `judge` them; an uncertain crop job
+    skips verify."""
+    async def run_job(kind: str, **job_args: Any) -> tuple[str, JobDone]:
+        workspace = await activities.prepare_job(issue, round_id, f"{kind}-{sha}", 1, binding_path)
+        job_id = await activities.submit(job_key(issue, round_id, f"{kind}-{sha}", 1), kind,
+                                         JobArgs(workspace, round_id, pins, **job_args))
+        outcome = await activities.jobs.wait(job_id, workspace, lambda _: None)
+        return workspace, JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+
+    crop_workspace, crop_job = await run_job("crop", sha=sha, n_crops=activities.cfg.crops.test_per_round, seed=seed,
+                                             trusted=trusted)
+    if crop_job.state not in ("DONE", "EXIT"):
+        return VerifyResult(0, 0, [f"crop job {crop_job.job_id} ended {crop_job.state}"], []), None, [crop_job]
+    verify_workspace, verify_job = await run_job("verify", crop_workspace=crop_workspace)
+    verify = await activities.read_verify(verify_workspace, crop_workspace)
+    gallery = (await activities.publish_gallery(issue, round_id, sha, crop_workspace, verify_workspace, verify.crops)
+               if verify.crops else None)
+    return verify, gallery, [crop_job, verify_job]

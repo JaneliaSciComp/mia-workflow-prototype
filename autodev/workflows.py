@@ -1,8 +1,14 @@
-"""Temporal workflows. No I/O here; activities are called by name (see activities.py)."""
+"""The Temporal workflows that drive one GitHub issue from `go` label to merged PR.
+
+Workflow code does no I/O of its own: every GitHub, git and cluster interaction is an activity, called by
+name so this module never imports the activity implementations (see activities.py). The workflow keeps
+its durable state in an `IssueInput` and hands that to continue_as_new when its history grows long.
+"""
 
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -21,31 +27,40 @@ QUEUE_SLACK = timedelta(hours=12)  # ponytail: covers LSF pending time; use sche
 
 
 class RoundFailed(Exception):
-    pass
+    """An agent round ended without a usable result (job failed, or no commits were made)."""
 
 
-def _err(e: BaseException) -> str:
-    while isinstance(e, ActivityError) and e.cause:
-        e = e.cause
-    return str(e) or type(e).__name__
+def error_message(error: BaseException) -> str:
+    """The message of the innermost cause of an activity failure, for posting to GitHub."""
+    while isinstance(error, ActivityError) and error.cause:
+        error = error.cause
+    return str(error) or type(error).__name__
 
 
 @workflow.defn
 class IssueWorkflow:
+    """One workflow per issue: prepare a workspace, run the agent, open a PR, then watch the PR until it
+    is merged, closed, or needs a human. Reviewer change requests start another agent round."""
+
     @workflow.init
     def __init__(self, inp: IssueInput) -> None:
-        self.s = inp
-        self.state = "STARTING"
+        self.state = inp  # durable: carried into continue_as_new
+        self.phase = "STARTING"  # for the status query only
         self.job_id: str | None = None
         self.last_error: str | None = None
         self.workspace: Workspace | None = None
 
     @workflow.query(name="status")
     def status(self) -> Status:
-        return Status(self.s.issue, self.state, self.s.round, self.s.pr, self.job_id, self.last_error)
+        state = self.state
+        return Status(state.issue, self.phase, state.round, state.pr, self.job_id, self.last_error)
 
-    async def _act(self, name: str, arg, seconds: int = 60, budget: timedelta = timedelta(hours=6), result_type=None):
-        # retry by time budget; activities raise non-retryable ApplicationError for permanent failures
+    async def _act(self, name: str, arg: Any, seconds: int = 60, budget: timedelta = timedelta(hours=6),
+                   result_type: type | None = None) -> Any:
+        """Run an activity with a per-attempt timeout and an overall retry budget.
+
+        Transient failures retry until the budget runs out; activities raise a non-retryable
+        ApplicationError for failures that a retry cannot fix."""
         return await workflow.execute_activity(
             name, arg, start_to_close_timeout=timedelta(seconds=seconds), schedule_to_close_timeout=budget,
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL), result_type=result_type)
@@ -55,89 +70,104 @@ class IssueWorkflow:
 
     @workflow.run
     async def execute(self, inp: IssueInput) -> str:
-        s = self.s
-        if not KEY_RE.fullmatch(s.key):  # unset, or a bad value from a hand-started run: it names directories
-            s.key = workflow.info().run_id[:8]
+        state = self.state
+        if not KEY_RE.fullmatch(state.key):  # unset, or a bad value from a hand-started run: it names directories
+            state.key = workflow.info().run_id[:8]
         try:
-            if s.pr is None:
-                s.pr = (await self._act("find_pr", s.issue, result_type=PrRef)).pr
-            if s.pr is None:
-                await self._act("set_stage", StageInput(s.issue, "working"))
-                res = await self._round(None)
-                if res.pr is None:
+            if state.pr is None:  # a restarted workflow may already have a PR from an earlier attempt
+                state.pr = (await self._act("find_pr", state.issue, result_type=PrRef)).pr
+            if state.pr is None:
+                await self._act("set_stage", StageInput(state.issue, "working"))
+                result = await self._run_round(None)
+                if result.pr is None:
                     raise RoundFailed("the agent made no commits; its summary is above")
-                s.pr = res.pr
-            await self._act("set_stage", StageInput(s.issue, "review"))
-            return await self._watch()
-        except (ActivityError, RoundFailed) as e:
-            self.state, self.last_error = "FAILED", _err(e)
-            await self._act("report_failure", FailureInput(s.issue, s.key, s.round, self.last_error, self.workspace),
+                state.pr = result.pr
+            await self._act("set_stage", StageInput(state.issue, "review"))
+            return await self._watch_pr()
+        except (ActivityError, RoundFailed) as error:
+            self.phase, self.last_error = "FAILED", error_message(error)
+            await self._act("report_failure",
+                            FailureInput(state.issue, state.key, state.round, self.last_error, self.workspace),
                             budget=timedelta(hours=24))
             return "failed"
 
-    async def _round(self, fb: Feedback | None) -> PrRef:
-        s = self.s
-        s.round += 1
-        self.state, self.job_id = "PREPARING", None
-        self.workspace = ws = await self._act(
-            "prepare_round", RoundInput(s.issue, s.key, s.round, s.pr, fb.text if fb else None),
+    async def _run_round(self, feedback: Feedback | None) -> PrRef:
+        """One agent round: prepare a workspace, submit the agent job, wait for it, publish its commits.
+
+        With `feedback`, the round is a revision of the existing PR; otherwise it is the first attempt."""
+        state = self.state
+        state.round += 1
+        self.phase, self.job_id = "PREPARING", None
+        self.workspace = workspace = await self._act(
+            "prepare_round",
+            RoundInput(state.issue, state.key, state.round, state.pr, feedback.text if feedback else None),
             seconds=600, result_type=Workspace)
-        job = await self._act("submit_agent", SubmitInput(s.issue, s.key, s.round, ws),
+        job = await self._act("submit_agent", SubmitInput(state.issue, state.key, state.round, workspace),
                               result_type=JobRef)
-        self.state, self.job_id = "RUNNING", job.job_id
-        await self._comment(s.pr or s.issue, f"Round {s.round} started: agent job `{job.job_id}`.",
-                            f"started {s.key}-{s.round}")
-        out = await workflow.execute_activity(
-            "await_agent", AwaitInput(job.job_id, ws), result_type=JobOutcome,
+        self.phase, self.job_id = "RUNNING", job.job_id
+        await self._comment(state.pr or state.issue, f"Round {state.round} started: agent job `{job.job_id}`.",
+                            f"started {state.key}-{state.round}")
+        # Waiting on the job runs on its own task queue so long waits don't starve the short activities.
+        outcome = await workflow.execute_activity(
+            "await_agent", AwaitInput(job.job_id, workspace), result_type=JobOutcome,
             task_queue=workflow.info().task_queue + "-await",
             start_to_close_timeout=timedelta(minutes=job.walltime_min) + QUEUE_SLACK,
             schedule_to_close_timeout=timedelta(minutes=job.walltime_min) + timedelta(hours=24),
             heartbeat_timeout=timedelta(minutes=3), retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL))
-        workflow.logger.info(ROUND_DONE_LOG, s.issue, s.round, out.job_id, out.state)
-        if out.state != "DONE" or out.exit_code not in (0, None):
-            raise RoundFailed(f"agent job {out.job_id} ended {out.state} (exit {out.exit_code})")
-        self.state = "PUBLISHING"
-        res = await self._act("publish_round", PublishInput(s.issue, s.key, s.round, ws, s.pr, fb.id if fb else None),
-                              seconds=300, result_type=PrRef)
-        if res.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
+        workflow.logger.info(ROUND_DONE_LOG, state.issue, state.round, outcome.job_id, outcome.state)
+        if outcome.state != "DONE" or outcome.exit_code not in (0, None):
+            raise RoundFailed(f"agent job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code})")
+        self.phase = "PUBLISHING"
+        result = await self._act(
+            "publish_round",
+            PublishInput(state.issue, state.key, state.round, workspace, state.pr, feedback.id if feedback else None),
+            seconds=300, result_type=PrRef)
+        if result.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
             self.workspace = None
-        return res
+        return result
 
-    async def _watch(self) -> str:
-        s = self.s
+    async def _watch_pr(self) -> str:
+        """Poll the PR until it is merged or closed, running revision rounds and escalations as needed.
+
+        Rolls the history over with continue_as_new when Temporal suggests it or the poll cap is hit."""
+        state = self.state
         for _ in range(MAX_POLLS_PER_EXECUTION):
-            self.state = "REVIEW"
-            snap = await self._act("observe_pr", ObserveInput(s.pr), result_type=PrSnapshot)
-            action, detail = decide(snap, s.handled, s.revisions, s.max_revisions)
+            self.phase = "REVIEW"
+            snapshot = await self._act("observe_pr", ObserveInput(state.pr), result_type=PrSnapshot)
+            action, detail = decide(snapshot, state.handled, state.revisions, state.max_revisions)
             if action == DONE:
-                await self._act("set_stage", StageInput(s.issue, "done"))
+                await self._act("set_stage", StageInput(state.issue, "done"))
                 return "merged"
             if action == CLOSED:
-                await self._act("set_stage", StageInput(s.issue, None))
+                await self._act("set_stage", StageInput(state.issue, None))
                 return "closed"
             if action == MERGE:
-                r = await self._act("merge_pr", MergeInput(s.issue, s.pr, snap.head_sha), result_type=MergeResult)
-                if r.merged:
-                    await self._act("set_stage", StageInput(s.issue, "done"))
+                merge = await self._act("merge_pr", MergeInput(state.issue, state.pr, snapshot.head_sha),
+                                        result_type=MergeResult)
+                if merge.merged:
+                    await self._act("set_stage", StageInput(state.issue, "done"))
                     return "merged"
-                await self._comment(s.pr, f"Approved, but merging failed: {r.message}", f"merge-failed {snap.head_sha}")
+                await self._comment(state.pr, f"Approved, but merging failed: {merge.message}",
+                                    f"merge-failed {snapshot.head_sha}")
             elif action == REVISE:
-                s.handled.append(detail.id)
-                s.revisions += 1
-                await self._act("set_stage", StageInput(s.issue, "working"))
-                await self._round(detail)
-                await self._act("set_stage", StageInput(s.issue, "review"))
+                state.handled.append(detail.id)
+                state.revisions += 1
+                await self._act("set_stage", StageInput(state.issue, "working"))
+                await self._run_round(detail)
+                await self._act("set_stage", StageInput(state.issue, "review"))
                 continue
             elif action == ESCALATE:
-                await self._comment(s.pr, f"Needs a human: {detail}.", f"escalate {detail} {snap.head_sha}")
-            await workflow.sleep(timedelta(minutes=s.poll_minutes))
+                await self._comment(state.pr, f"Needs a human: {detail}.", f"escalate {detail} {snapshot.head_sha}")
+            await workflow.sleep(timedelta(minutes=state.poll_minutes))
             if workflow.info().is_continue_as_new_suggested():
                 break
-        workflow.continue_as_new(s)
+        workflow.continue_as_new(state)
 
 
 @workflow.defn
 class PollWorkflow:
+    """Run on a schedule: find issues labelled `go` and start an IssueWorkflow for each."""
+
     @workflow.run
     async def execute(self) -> list[int]:
         return await workflow.execute_activity(

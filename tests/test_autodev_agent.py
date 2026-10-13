@@ -70,7 +70,7 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
     (tmp_path / "claude.err").write_text("\n".join(f"line {i}" for i in range(100)))
     (tmp_path / ".csub" / "jobs" / "9").mkdir(parents=True)
     (tmp_path / ".csub" / "jobs" / "9" / "stderr").write_text("bwrap: oops\n")
-    t = log_tail(tmp_path, n=5)
+    t = log_tail(tmp_path, lines=5)
     assert "line 99" in t and "line 90" not in t and "bwrap: oops" in t
 
 

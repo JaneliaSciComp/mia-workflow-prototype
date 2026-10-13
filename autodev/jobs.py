@@ -1,4 +1,9 @@
-"""Run one shell script as a csub job, submitted at most once per key, and wait for it."""
+"""Running shell scripts as csub (LSF sandbox) jobs, and reading what they leave behind.
+
+`CsubJobs` submits a job at most once per key, remembering the job id in a file so a worker restart or a
+Temporal retry reattaches to the running job instead of starting a second one. `read_untrusted` is how
+every file written by a sandboxed job is read back.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +13,19 @@ import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .models import JobOutcome
+
+if TYPE_CHECKING:
+    import csub
 
 JOB_KEY_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
 
 
 @dataclass
 class JobSpec:
+    """Everything csub needs to run one job."""
     name: str                      # csub job name (no username in it)
     command: str                   # shell script; runs with cwd = workspace
     workspace: str                 # rw mount + cwd; unique per job (the cwd-lookup key)
@@ -30,24 +39,27 @@ class JobSpec:
     env: dict[str, str] = field(default_factory=dict)
 
 
-def read_untrusted(d: Path, rel: str, limit: int, tail: bool = False, binary: bool = False) -> str | bytes | None:
-    """Read a file a sandboxed job could have tampered with: no symlinks, no FIFOs, bounded size. Text (str) unless
-    `binary`."""
+def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = False,
+                   binary: bool = False) -> str | bytes | None:
+    """Read a file a sandboxed job could have tampered with. Returns None for anything suspicious.
+
+    No symlinks, no FIFOs, nothing outside `job_dir`, and at most `limit` bytes (the last `limit` with
+    `tail`). Returns text unless `binary`."""
     try:
-        root = Path(d).resolve()
-        p = root / rel
-        if not p.resolve().is_relative_to(root):
+        root = Path(job_dir).resolve()
+        path = root / rel
+        if not path.resolve().is_relative_to(root):
             return None
-        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
                 return None
             # the opened file itself (not the path we checked earlier) must live inside the job dir
             if not Path(os.path.realpath(f"/proc/self/fd/{fd}")).is_relative_to(root):
                 return None
             if tail:
-                os.lseek(fd, max(0, st.st_size - limit), os.SEEK_SET)
+                os.lseek(fd, max(0, info.st_size - limit), os.SEEK_SET)
             data = os.read(fd, limit)
             return data if binary else data.decode(errors="replace")
         finally:
@@ -56,7 +68,8 @@ def read_untrusted(d: Path, rel: str, limit: int, tail: bool = False, binary: bo
         return None
 
 
-def csub_client(session: str):
+def csub_client(session: str) -> csub.Client:
+    """A csub client bound to `session`, which groups a deployment's jobs on the broker."""
     import csub
     from csub.client import load_client_config
 
@@ -64,61 +77,74 @@ def csub_client(session: str):
 
 
 class CsubJobs:
-    def __init__(self, session: str, id_dir: Path, client_factory=None, sleep=asyncio.sleep, poll_s: float = 60.0):
+    """Submit-once job runner. Job ids are remembered as `<key>.id` files in `id_dir`."""
+
+    def __init__(self, session: str, id_dir: Path, client_factory: Callable[[], Any] | None = None,
+                 sleep: Callable[[float], Any] = asyncio.sleep, poll_s: float = 60.0):
         self.session, self.id_dir = session, Path(id_dir)
         self._factory = client_factory or (lambda: csub_client(session))
         self._client = None
         self._sleep, self._poll_s = sleep, poll_s
 
     @property
-    def client(self):
+    def client(self) -> Any:
+        """The csub client, created on first use."""
         if self._client is None:
             self._client = self._factory()
         return self._client
 
     async def submit(self, key: str, spec: JobSpec | Callable[[], JobSpec]) -> str:
-        """Submit at most once per key: id file -> cwd lookup -> submit. Returns the job id.
+        """Submit at most once per key. Returns the job id.
 
-        A callable spec is built only when the id file is missing (it holds the workspace the cwd lookup needs)."""
+        The id file is checked first; failing that, the broker is asked for a job already running in the
+        spec's workspace (submitted before a crash, but never recorded). A callable `spec` is only built
+        when the id file is missing, so an expensive or environment-dependent spec is not built on reattach."""
         if not JOB_KEY_RE.fullmatch(key):
             raise ValueError(f"invalid job key {key!r}: want {JOB_KEY_RE.pattern}")
-        f = self.id_dir / f"{key}.id"
-        if f.exists():
-            return f.read_text().strip()
+        id_file = self.id_dir / f"{key}.id"
+        if id_file.exists():
+            return id_file.read_text().strip()
         spec = spec() if callable(spec) else spec
-        found = [s for s in await asyncio.to_thread(self.client.status) if os.path.realpath(getattr(s, "cwd", None) or "/nonexistent") == os.path.realpath(spec.workspace)]
-        if found:  # same workspace (unique per job): submitted, then the worker died before writing the id file
-            job_id = found[0].job_id
+        workspace = os.path.realpath(spec.workspace)
+        running = [status for status in await asyncio.to_thread(self.client.status)
+                   if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace]
+        if running:  # same workspace (unique per job): submitted, then the worker died before writing the id file
+            job_id = running[0].job_id
         else:
-            req = {"command": spec.command, "shell": True, "cwd": spec.workspace, "name": spec.name,
-                   "cpus": spec.cpus, "mem_mb": spec.mem_mb, "walltime_min": spec.walltime_min,
-                   "allow_hosts": list(spec.allow_hosts), "agent": spec.agent, "session": self.session,
-                   "mounts": [{"path": spec.workspace, "mode": "rw"}, *({"path": m, "mode": "rw"} for m in spec.rw_mounts),
-                              *({"path": m, "mode": "ro"} for m in spec.ro_mounts)]}
+            request = {"command": spec.command, "shell": True, "cwd": spec.workspace, "name": spec.name,
+                       "cpus": spec.cpus, "mem_mb": spec.mem_mb, "walltime_min": spec.walltime_min,
+                       "allow_hosts": list(spec.allow_hosts), "agent": spec.agent, "session": self.session,
+                       "mounts": [{"path": spec.workspace, "mode": "rw"},
+                                  *({"path": mount, "mode": "rw"} for mount in spec.rw_mounts),
+                                  *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts)]}
             if spec.env:
-                req["env"] = dict(spec.env)
-            job_id = (await asyncio.to_thread(self.client.submit, req)).job_id
-        f.parent.mkdir(parents=True, exist_ok=True)
-        tmp = f.with_suffix(".tmp")
+                request["env"] = dict(spec.env)
+            job_id = (await asyncio.to_thread(self.client.submit, request)).job_id
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = id_file.with_suffix(".tmp")
         tmp.write_text(job_id)
-        tmp.replace(f)
+        tmp.replace(id_file)
         return job_id
 
     async def wait(self, job_id: str, workspace: str, heartbeat: Callable[[str], None]) -> JobOutcome:
+        """Poll until the job is finished (or forgotten by LSF), calling `heartbeat` with each state seen.
+
+        The script writes its exit code to `exit_code` in the workspace; that file settles the outcome when
+        LSF has already forgotten the job."""
         # ponytail: one csub status call per job per poll; batch across jobs if many run at once.
         while True:
-            st = next(iter(await asyncio.to_thread(self.client.status, [job_id])), None)
-            state = st.state if st else "UNKNOWN"
+            status = next(iter(await asyncio.to_thread(self.client.status, [job_id])), None)
+            state = status.state if status else "UNKNOWN"
             heartbeat(state)
-            if st is None or st.terminal:
+            if status is None or status.terminal:
                 break
             await self._sleep(self._poll_s)
         raw = (read_untrusted(Path(workspace), "exit_code", 64) or "").strip()
         try:
-            code = int(raw) if raw.isascii() else None
+            file_code = int(raw) if raw.isascii() else None
         except ValueError:
-            code = None
-        if state == "UNKNOWN" and code is not None:  # LSF forgot the job, but the script ran to the end
-            state = "DONE" if code == 0 else "EXIT"
-        exit_code = st.exit_code if st and st.exit_code is not None else code
+            file_code = None
+        if state == "UNKNOWN" and file_code is not None:  # LSF forgot the job, but the script ran to the end
+            state = "DONE" if file_code == 0 else "EXIT"
+        exit_code = status.exit_code if status and status.exit_code is not None else file_code
         return JobOutcome(job_id, state, exit_code)

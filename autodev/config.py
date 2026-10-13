@@ -1,4 +1,9 @@
-"""Config: autodev.yaml + environment overrides. Secrets come only from env / ./.env and key files."""
+"""autodev configuration: autodev.yaml, with a few environment-variable overrides.
+
+Secrets are never in the YAML file. They come from the environment, from ./.env, or from key files whose
+paths the YAML names. The pydantic models validate the file and normalize paths on load, so the rest of the
+code can trust what it reads from a `Config`.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +18,14 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+# environment variable -> the YAML key path it overrides
 _ENV_OVERRIDES = {
     "AUTODEV_DEPLOYMENT": ("deployment",),
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "AUTODEV_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),
 }
 
-# stage -> (label color, description). `go` is set by humans; the rest by autodev.
+# stage -> (label color, description). Humans add `go`; autodev sets the rest.
 STAGES = {
     "go": ("0e8a16", "Ask autodev to implement this issue"),
     "working": ("fbca04", "autodev: agent job running"),
@@ -29,9 +35,10 @@ STAGES = {
 }
 
 
-def is_github_host(h: str) -> bool:
-    h = h.strip().lower().rstrip(".")
-    return any(h == b or h.endswith("." + b) for b in ("github.com", "githubusercontent.com"))
+def is_github_host(host: str) -> bool:
+    """True for github.com, githubusercontent.com and any of their subdomains."""
+    host = host.strip().lower().rstrip(".")
+    return any(host == base or host.endswith("." + base) for base in ("github.com", "githubusercontent.com"))
 
 
 class GitHubCfg(BaseModel):
@@ -76,6 +83,7 @@ class AgentCfg(BaseModel):
 
 
 class Config(BaseModel):
+    """The whole autodev.yaml, validated, plus the derived names (labels, branches, markers) built from it."""
     deployment: str = "autodev"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg()
@@ -84,37 +92,40 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _finish(self) -> "Config":
+        """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
-        g = self.github
-        if g.auth == "app" and not (g.app_id and g.installation_id and g.private_key_path):
+        github = self.github
+        if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
-        if bad := [b for b in g.trusted_bots if not b.endswith("[bot]")]:
+        if bad := [login for login in github.trusted_bots if not login.endswith("[bot]")]:
             raise ValueError(f"github.trusted_bots: {bad} must be app logins ending in '[bot]'")
         if self.agent.max_budget_usd is not None and self.agent.max_budget_usd <= 0:
             raise ValueError("agent.max_budget_usd must be positive")
-        # canonical: csub rejects non-canonical mounts, and round dirs (under work_root) are mounts
+        # Paths are made canonical because csub rejects non-canonical mounts, and round dirs (under work_root)
+        # are mounted into jobs.
         self.paths.state_dir = self.paths.state_dir.expanduser().resolve()
         self.paths.work_root = self.paths.work_root.expanduser().resolve()
         for attr in ("private_key_path", "token_file"):
-            if getattr(g, attr):
-                setattr(g, attr, getattr(g, attr).expanduser())
-        for h in self.agent.allow_hosts:
-            if is_github_host(h):
-                raise ValueError(f"agent.allow_hosts: {h.strip()!r} would let the agent reach GitHub")
-        secrets = [self.paths.state_dir, g.token_file, g.private_key_path]
-        for i, m in enumerate(self.agent.extra_mounts):
-            if not m.endswith(":ro"):
-                raise ValueError(f"agent.extra_mounts: {m!r} must end with ':ro'")
-            mp = Path(m.removesuffix(":ro"))
-            if not mp.is_absolute():
-                raise ValueError(f"agent.extra_mounts: {m!r} must be an absolute path")
-            mp = mp.resolve()
-            self.agent.extra_mounts[i] = f"{mp}:ro"
-            for sec in filter(None, secrets):
-                sec = Path(sec).resolve()
-                if mp == sec or mp in sec.parents or sec in mp.parents:
-                    raise ValueError(f"agent.extra_mounts: {m!r} overlaps {sec}, which the agent must not see")
+            if getattr(github, attr):
+                setattr(github, attr, getattr(github, attr).expanduser())
+        for host in self.agent.allow_hosts:
+            if is_github_host(host):
+                raise ValueError(f"agent.allow_hosts: {host.strip()!r} would let the agent reach GitHub")
+        # An extra mount must not expose anything that holds credentials or trusted state.
+        secrets = [self.paths.state_dir, github.token_file, github.private_key_path]
+        for index, mount in enumerate(self.agent.extra_mounts):
+            if not mount.endswith(":ro"):
+                raise ValueError(f"agent.extra_mounts: {mount!r} must end with ':ro'")
+            mount_path = Path(mount.removesuffix(":ro"))
+            if not mount_path.is_absolute():
+                raise ValueError(f"agent.extra_mounts: {mount!r} must be an absolute path")
+            mount_path = mount_path.resolve()
+            self.agent.extra_mounts[index] = f"{mount_path}:ro"
+            for secret in filter(None, secrets):
+                secret = Path(secret).resolve()
+                if mount_path == secret or mount_path in secret.parents or secret in mount_path.parents:
+                    raise ValueError(f"agent.extra_mounts: {mount!r} overlaps {secret}, which the agent must not see")
         return self
 
     @property
@@ -132,6 +143,7 @@ class Config(BaseModel):
 
     @property
     def marker_prefix(self) -> str:
+        """The start of every HTML-comment marker autodev hides in its own GitHub comments."""
         return f"<!-- {self.deployment}:"
 
     def marker(self, text: str) -> str:
@@ -143,11 +155,12 @@ class Config(BaseModel):
 
     @property
     def repo_slug(self) -> str:
+        """The repo name made safe for use as a directory name ("owner__repo")."""
         return self.github.repo.replace("/", "__")
 
 
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
-    """Minimal .env loader: KEY=VALUE lines; real env vars win."""
+    """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
     if not path.is_file():
         return
     for line in path.read_text().splitlines():
@@ -159,21 +172,21 @@ def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load config; exits with a readable message if it is missing or invalid."""
+    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
     load_dotenv()
     path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
     if not path.is_file():
         sys.exit(f"autodev: config not found at {path} (copy autodev.yaml.example, or set $AUTODEV_CONFIG)")
     data = yaml.safe_load(path.read_text()) or {}
-    for env, keys in _ENV_OVERRIDES.items():
-        if os.environ.get(env):
-            d = data
-            for k in keys[:-1]:
-                if d.get(k) is None:  # a bare `temporal:` in YAML is None
-                    d[k] = {}
-                d = d[k]
-            d[keys[-1]] = os.environ[env]
+    for env_var, key_path in _ENV_OVERRIDES.items():
+        if os.environ.get(env_var):
+            node = data
+            for key in key_path[:-1]:
+                if node.get(key) is None:  # a bare `temporal:` in YAML parses as None
+                    node[key] = {}
+                node = node[key]
+            node[key_path[-1]] = os.environ[env_var]
     try:
         return Config(**data)
-    except ValidationError as e:
-        sys.exit(f"autodev: invalid config {path}:\n{e}")
+    except ValidationError as err:
+        sys.exit(f"autodev: invalid config {path}:\n{err}")
