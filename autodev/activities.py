@@ -13,7 +13,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
@@ -91,7 +91,7 @@ def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
                 raise ApplicationError(str(error), non_retryable=True) from error
             raise
 
-    return wrapper
+    return cast(Fn, wrapper)
 
 
 # --- comment templates ------------------------------------------------------------------------
@@ -150,6 +150,13 @@ class Activities:
         self, cfg: Config, gh: GitHub, mirror: Mirror, jobs: AgentJobs, bot: str, client: Client | None = None
     ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
+
+    @property
+    def temporal(self) -> Client:
+        """The Temporal client; only the worker's activities (poll_issues) have one."""
+        if self.client is None:
+            raise RuntimeError("no Temporal client: this activity runs only inside the worker")
+        return self.client
 
     def all(self) -> list:
         """The activities registered on the main task queue (await_agent runs on the -await queue)."""
@@ -223,7 +230,7 @@ class Activities:
         base_sha = await asyncio.to_thread(self.mirror.workspace, round_dir, start_branch, branch, self.cfg.git_url)
         issue = await self.gh.get_issue(request.issue)
         comments = await self.gh.issue_comments(request.issue)
-        logins = {(comment.get("user") or {}).get("login") for comment in comments} - {None}
+        logins = {login for comment in comments if (login := (comment.get("user") or {}).get("login"))}
         writers = {login for login in logins if await self.gh.permission(login) in WRITE_PERMISSIONS}
         comments = [comment for comment in comments if (comment.get("user") or {}).get("login") in writers]
         (round_dir / "prompt.md").write_text(
@@ -308,7 +315,7 @@ class Activities:
         reviews = await self.gh.pr_reviews(number)
         inline_comments = await self.gh.pr_review_comments(number)
         comments = await self.gh.issue_comments(number)
-        logins = {(item.get("user") or {}).get("login") for item in [*reviews, *comments]} - {None}
+        logins = {login for item in [*reviews, *comments] if (login := (item.get("user") or {}).get("login"))}
         # ponytail: one permission lookup per participant per poll; cache if the rate limit ever matters.
         permissions = {login: await self.gh.permission(login) for login in logins}
         marker_prefix = self.cfg.marker_prefix
@@ -382,7 +389,7 @@ class Activities:
                         marker,
                     )
                     continue
-                await self.client.start_workflow(
+                await self.temporal.start_workflow(
                     IssueWorkflow.execute,
                     IssueInput(number, self.cfg.agent.max_revisions, self.cfg.temporal.poll_minutes),
                     id=self.cfg.workflow_id(number),

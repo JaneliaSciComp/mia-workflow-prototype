@@ -11,7 +11,7 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,7 +23,7 @@ from .config import PROJECT_DIR, STAGES, load_config
 if TYPE_CHECKING:
     from temporalio.client import Client
 
-    from .config import Config
+    from .config import Config, Deployment
 
 OPS = {
     "up": ops.cmd_up,
@@ -37,7 +37,7 @@ OPS = {
 log = logging.getLogger("autodev")
 
 
-def _setup_logging(cfg: Config, name: str | None) -> None:
+def _setup_logging(cfg: Deployment, name: str | None) -> None:
     """Log to stderr, and also to state_dir/logs/<name>.log when `name` is given (the worker)."""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if name:
@@ -51,13 +51,13 @@ def _setup_logging(cfg: Config, name: str | None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def proxy_target(environ: dict) -> str | None:
+def proxy_target(environ: Mapping[str, str]) -> str | None:
     """The host:port of $https_proxy, if set."""
     url = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
     return urlsplit(url).netloc if url else None
 
 
-async def _client(cfg: Config) -> Client:
+async def _client(cfg: Deployment) -> Client:
     """Connect to Temporal, through the HTTPS proxy when the config says the sandbox requires it."""
     from temporalio.client import Client
     from temporalio.service import HttpConnectProxyConfig
@@ -188,6 +188,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         client, task_queue=f"{task_queue}-await", activities=[activities.await_agent], max_concurrent_activities=20
     )
     task = asyncio.current_task()
+    assert task is not None  # we are inside the worker coroutine
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     log.info(
         "worker up as %s: %s ns=%s queues %s, %s-await",

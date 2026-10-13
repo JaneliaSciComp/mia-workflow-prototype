@@ -176,6 +176,7 @@ class IssueWorkflow:
         do), so a quiet PR is one activity in the history instead of a poll/timer staircase. The history
         rolls over with continue_as_new when Temporal suggests it or the poll cap is hit."""
         state = self.state
+        assert state.pr is not None  # a round opened the PR before _watch_pr runs
         # ponytail: by_retry is False only when replaying runs started before this change; drop the old
         # branches (workflow.deprecate_patch) once those have all rolled over.
         by_retry = workflow.patched("observe-by-retry")
@@ -200,6 +201,7 @@ class IssueWorkflow:
                     state.pr, f"Approved, but merging failed: {merge.message}", f"merge-failed {snapshot.head_sha}"
                 )
             elif action == REVISE:
+                assert isinstance(detail, Feedback)  # decide() returns the Feedback to act on for REVISE
                 state.handled.append(detail.id)
                 state.revisions += 1
                 await self._act("set_stage", StageInput(state.issue, "working"))
@@ -207,6 +209,7 @@ class IssueWorkflow:
                 await self._act("set_stage", StageInput(state.issue, "review"))
                 continue
             elif action == ESCALATE:
+                assert isinstance(detail, str)  # decide() returns the reason for ESCALATE
                 if by_retry:
                     state.escalated = escalation(detail, snapshot)
                 await self._comment(state.pr, f"Needs a human: {detail}.", f"escalate {escalation(detail, snapshot)}")
@@ -218,6 +221,7 @@ class IssueWorkflow:
 
     async def _observe(self, by_retry: bool) -> PrSnapshot:
         state = self.state
+        assert state.pr is not None  # see _watch_pr
         inp = ObserveInput(state.pr, state.handled, state.revisions, state.max_revisions, state.escalated)
         if not by_retry:  # pre-change runs: same commands as before, but the "nothing to do" retries never expire
             return await self._act("observe_pr", inp, budget=None, result_type=PrSnapshot)

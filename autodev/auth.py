@@ -19,10 +19,10 @@ from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config import Deployment, GitHubAuth
 
 _HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 
@@ -38,6 +38,8 @@ def app_jwt(app_id: int, pem: bytes, now: float | None = None) -> str:
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
     payload = _b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": str(app_id)}).encode())
     key = serialization.load_pem_private_key(pem, password=None)
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise ValueError("the GitHub App private key must be an RSA key")
     signature = key.sign(f"{header}.{payload}".encode(), padding.PKCS1v15(), hashes.SHA256())
     return f"{header}.{payload}.{_b64url(signature)}"
 
@@ -83,11 +85,18 @@ class AppTokens:
             return self._token
 
 
-def token_fn(cfg: Config) -> Callable[[], str]:
+def _app_credentials(github: GitHubAuth) -> tuple[int, int, Path]:
+    """(app id, installation id, private key path); config validation guarantees them when auth is "app"."""
+    if github.app_id is None or github.installation_id is None or github.private_key_path is None:
+        raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
+    return github.app_id, github.installation_id, github.private_key_path
+
+
+def token_fn(cfg: Deployment) -> Callable[[], str]:
     """A zero-argument callable that returns the current GitHub token for this config's auth mode."""
     github = cfg.github
     if github.auth == "app":
-        return AppTokens(github.app_id, github.installation_id, github.private_key_path, github.api_url)
+        return AppTokens(*_app_credentials(github), github.api_url)
 
     def from_env_or_file() -> str:
         if token := os.environ.get(github.token_env):
@@ -99,7 +108,7 @@ def token_fn(cfg: Config) -> Callable[[], str]:
     return from_env_or_file
 
 
-async def bot_login(cfg: Config) -> str:
+async def bot_login(cfg: Deployment) -> str:
     """The login autodev's own comments, commits and PRs appear under ("<app slug>[bot]" for an app)."""
     github = cfg.github
     async with httpx.AsyncClient(base_url=github.api_url, timeout=30, headers=_HEADERS) as http:
@@ -107,13 +116,14 @@ async def bot_login(cfg: Config) -> str:
             response = await http.get("/user", headers={"Authorization": f"Bearer {token_fn(cfg)()}"})
             response.raise_for_status()
             return response.json()["login"]
-        jwt = app_jwt(github.app_id, github.private_key_path.read_bytes())
+        app_id, _, key_path = _app_credentials(github)
+        jwt = app_jwt(app_id, key_path.read_bytes())
         response = await http.get("/app", headers={"Authorization": f"Bearer {jwt}"})
         response.raise_for_status()
         return f"{response.json()['slug']}[bot]"
 
 
-async def noreply_email(cfg: Config, login: str) -> str:
+async def noreply_email(cfg: Deployment, login: str) -> str:
     """The address that links a commit to `login` on GitHub (for an app, the id of its [bot] user, not the app id)."""
     async with httpx.AsyncClient(base_url=cfg.github.api_url, timeout=30, headers=_HEADERS) as http:
         response = await http.get(f"/users/{quote(login)}")

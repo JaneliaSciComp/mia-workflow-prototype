@@ -11,7 +11,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
@@ -80,6 +80,45 @@ class AgentCfg(BaseModel):
     max_revisions: int = 3
     max_budget_usd: float | None = None  # passed to `claude -p --max-budget-usd`
     api_key_env: str | None = None  # bill the API with this env var's key instead of the broker account's login
+
+
+class GitHubAuth(Protocol):
+    """The GitHub auth fields both deployments' configs have (see auth.py)."""
+
+    @property
+    def auth(self) -> str: ...
+    @property
+    def token_env(self) -> str: ...
+    @property
+    def token_file(self) -> Path | None: ...
+    @property
+    def app_id(self) -> int | None: ...
+    @property
+    def installation_id(self) -> int | None: ...
+    @property
+    def private_key_path(self) -> Path | None: ...
+    @property
+    def api_url(self) -> str: ...
+
+
+class StatePaths(Protocol):
+    @property
+    def state_dir(self) -> Path: ...
+
+
+class Deployment(Protocol):
+    """What autodev's shared helpers (auth, the Temporal connection, logging, ops) need from a config.
+
+    Both autodev's and mia-data's Config satisfy it, so mia-data reuses those helpers with its own config."""
+
+    @property
+    def deployment(self) -> str: ...
+    @property
+    def github(self) -> GitHubAuth: ...
+    @property
+    def temporal(self) -> TemporalCfg: ...
+    @property
+    def paths(self) -> StatePaths: ...
 
 
 class Config(BaseModel):

@@ -12,8 +12,8 @@ import base64
 import collections
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import httpx
 
@@ -107,6 +107,36 @@ class GitHub:
         if response.status_code == 429 or "rate limit" in response.text.lower():
             return min(60.0 * 2**attempt, 900.0)  # GitHub: wait ≥1 min, then back off exponentially
         return None
+
+    @overload
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict | None = None,
+        ok404: Literal[False] = False,
+        write: bool | None = None,
+        attempts: int = 8,
+        headers: dict | None = None,
+        conditional: bool = False,
+    ) -> httpx.Response: ...
+
+    @overload
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict | None = None,
+        ok404: Literal[True],
+        write: bool | None = None,
+        attempts: int = 8,
+        headers: dict | None = None,
+        conditional: bool = False,
+    ) -> httpx.Response | None: ...
 
     async def request(
         self,
@@ -224,7 +254,7 @@ class GitHub:
 
     async def label_event(self, issue: int, label: str) -> tuple[str | None, str | None, str | None]:
         """(actor login, event id, created_at) of the most recent `labeled` event for `label`."""
-        found = (None, None, None)
+        found: tuple[str | None, str | None, str | None] = (None, None, None)
         async for event in self._paged(f"/repos/{self.repo}/issues/{issue}/events"):
             if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == label:
                 found = (
@@ -296,7 +326,7 @@ class GitHub:
             comment async for comment in self._paged(f"/repos/{self.repo}/pulls/{number}/comments", conditional=True)
         ]
 
-    async def check_state(self, sha: str, required: list[str] = ()) -> str:
+    async def check_state(self, sha: str, required: Sequence[str] = ()) -> str:
         """Overall CI state of a commit (success | pending | failure | none), combining check runs and statuses."""
         runs = (
             await self.request(

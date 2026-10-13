@@ -259,9 +259,10 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
         return 1  # the head's status stays as it is
     await activities.set_crop_status(head, "pending", None, "crop test running")
     try:
-        record_commit = ((await catalog.downloaded(gh_catalog)).get(record_id) or {}).get("record_commit")
+        entry = (await catalog.downloaded(gh_catalog)).get(record_id) or {}
+        record_commit = str(entry.get("record_commit") or "")
         note = ""
-        if not SHA_RE.fullmatch(str(record_commit)):
+        if not SHA_RE.fullmatch(record_commit):
             record_commit = await gh_catalog.get_ref_sha("main")
             note = (
                 f" `{record_id}` is not in the downloads state: its record was read at the catalog's main, "
@@ -319,12 +320,14 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
     return 0 if passed else 1
 
 
-def _github_clients(cfg: Config) -> list[GitHub]:
+def _github_clients(cfg: Config) -> tuple[GitHub, GitHub, GitHub]:
     """Clients for the data, snippets and catalog repos, in the order Activities takes them."""
     tokens, github_cfg = token_fn(cfg), cfg.github
-    return [
-        _gh(cfg, repo, tokens) for repo in (github_cfg.data_repo, github_cfg.snippets_repo, github_cfg.catalog_repo)
-    ]
+    return (
+        _gh(cfg, github_cfg.data_repo, tokens),
+        _gh(cfg, github_cfg.snippets_repo, tokens),
+        _gh(cfg, github_cfg.catalog_repo, tokens),
+    )
 
 
 async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
@@ -335,7 +338,7 @@ async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     try:
         activities = Activities(
-            cfg, *clients, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), await bot_login(cfg)
+            cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=await bot_login(cfg)
         )
         return await run_test_pr(activities, args.pr, Path(args.binding), args.record)
     finally:
@@ -356,7 +359,9 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     client = await _client(cfg)
     clients = _github_clients(cfg)
     bot = await bot_login(cfg)
-    activities = Activities(cfg, *clients, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot, client)
+    activities = Activities(
+        cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
+    )
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
@@ -368,6 +373,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
     )
     task = asyncio.current_task()
+    assert task is not None  # we are inside the worker coroutine
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     log.info(
         "worker up as %s: %s ns=%s queues %s, %s",
