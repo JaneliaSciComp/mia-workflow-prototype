@@ -4,4 +4,5 @@ __pycache__/
 .pytest_cache/
 .env
 autodev.yaml
+autodev-snippets.yaml
 mia_data.yaml

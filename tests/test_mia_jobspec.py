@@ -11,7 +11,7 @@ from autodev.gitops import GitError
 from autodev_helpers import GIT_ID, make_origin, run_git
 from mia_data import jobspec
 from mia_data.jobspec import (HostsNotAllowed, PinMoved, assert_pin, check_hosts_allowed, crop_job, harness_pin,
-                              match_job, match_prompt, smoke_job, snapshot, verify_job)
+                              harness_snapshot, match_job, match_prompt, smoke_job, snapshot, verify_job)
 from mia_data.models import Pins
 from mia_helpers import make_cfg
 
@@ -26,6 +26,8 @@ def _cfg(tmp_path):
     h = cfg.harness.dir
     (h / "harness").mkdir()
     (h / "harness" / "pixi.lock").write_text("lock v1\n")
+    (h / "harness" / "src" / "mia_harness").mkdir(parents=True)
+    (h / "harness" / "src" / "mia_harness" / "cli.py").write_text("def main(): return 0\n")
     run_git("init", "-q", "-b", "main", cwd=h)
     run_git("add", "-A", cwd=h)
     run_git(*GIT_ID, "commit", "-qm", "harness", cwd=h)
@@ -113,15 +115,28 @@ def test_snapshot_rejects_non_sha(tmp_path, sha):
         snapshot(make_cfg(tmp_path), sha)
 
 
-def test_assert_pin_raises_after_new_commit(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_a_new_harness_commit_does_not_touch_an_admitted_round(tmp_path):
+    cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     pins = _pins(cfg)
-    assert_pin(cfg, pins)
-    (cfg.harness.dir / "README").write_text("x\n")
+    snap = harness_snapshot(cfg, pins.harness_commit)
+    assert snap == cfg.paths.work_root / "_harness" / pins.harness_commit
+    assert (snap / "src" / "mia_harness" / "cli.py").read_text() == "def main(): return 0\n" and _readonly(snap)
+    (cfg.harness.dir / "harness" / "src" / "mia_harness" / "cli.py").write_text("def main(): return 1\n")
     run_git("add", "-A", cwd=cfg.harness.dir)
     run_git(*GIT_ID, "commit", "-qm", "moved", cwd=cfg.harness.dir)
-    with pytest.raises(PinMoved):
-        assert_pin(cfg, pins)
+    assert_pin(cfg, pins)  # HEAD moved, env didn't
+    s = smoke_job(cfg, ws, pins, "binding.yaml", tmp_path / "snap", "record.yaml")
+    assert f"PYTHONPATH={snap}/src" in s.command and str(snap) in s.ro_mounts
+    assert (snap / "src" / "mia_harness" / "cli.py").read_text() == "def main(): return 0\n"  # still the admitted one
+    assert harness_snapshot(cfg, harness_pin(cfg)[0]) != snap  # the new commit gets its own
+
+
+def test_harness_snapshot_rejects_unknown_commit_and_non_sha(tmp_path):
+    cfg = _cfg(tmp_path)
+    with pytest.raises(GitError, match="archive"):
+        harness_snapshot(cfg, "e" * 40)
+    with pytest.raises(ValueError):
+        harness_snapshot(cfg, "main")
 
 
 def test_assert_pin_raises_when_lock_changes(tmp_path):
@@ -143,7 +158,8 @@ def test_match_job(tmp_path):
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
     snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
-    assert sorted(s.ro_mounts) == sorted([str(cfg.harness.dir), snap, cache]) and snap in s.command
+    hsnap = str(cfg.paths.work_root / "_harness" / pins.harness_commit)
+    assert sorted(s.ro_mounts) == sorted([str(cfg.harness.dir), hsnap, snap, cache]) and snap in s.command
     assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)
 
 
@@ -161,7 +177,8 @@ def test_crop_job_cache_mode(tmp_path, trusted):
 def test_crop_job_mounts_the_existing_manifests_dir(tmp_path):
     cfg, ws, m = _cfg(tmp_path), _ws(tmp_path), tmp_path / "ds" / "manifest.json"
     s = crop_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s", "i1-e2", 1, m, True)
-    assert s.command.rstrip().split("\n")[1].endswith(f"--existing {m}")
+    body = next(l for l in s.command.split("\n") if l.startswith("harness crop"))
+    assert body.endswith(f"--existing {m}")
     assert str(m.parent) in s.ro_mounts and str(m) not in s.ro_mounts  # csub mounts directories only
 
 
@@ -203,7 +220,10 @@ def test_every_builder_sets_harness_env(tmp_path):
         assert str(cfg.harness.dir) in s.ro_mounts and s.workspace == str(ws)
         assert s.command.rstrip().endswith('echo "$rc" > exit_code\nexit "$rc"')
         assert s.walltime_min == cfg.limits.job_walltime_min and not set(s.ro_mounts) & set(s.rw_mounts)
-        assert f"{cfg.harness.dir}/harness/.pixi/envs/default/bin/harness" in s.command and "pixi run" not in s.command
+        snap = cfg.paths.work_root / "_harness" / pins.harness_commit
+        assert f"{cfg.harness.dir}/harness/.pixi/envs/default/bin/python -P -c" in s.command and "pixi run" not in s.command
+        assert f"PYTHONPATH={snap}/src" in s.command and str(snap) in s.ro_mounts
+        assert "> bin/harness && chmod +x bin/harness\nexport PATH=\"$PWD/bin\":\"$PATH\"\n" in s.command
 
 
 def test_every_builder_refuses_a_moved_harness(tmp_path):

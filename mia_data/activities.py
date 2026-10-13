@@ -29,7 +29,8 @@ from . import publish as pub
 from .binding import check_binding, hosts, record_urls
 from .config import HUMAN_LABELS, STAGES
 from .gallery import gallery_files, publish_gallery
-from .jobspec import (SHA_RE, HostsNotAllowed, PinMoved, check_hosts_allowed, crop_job, harness_pin, match_job,
+from .jobspec import (SHA_RE, HostsNotAllowed, PinMoved, check_hosts_allowed, crop_job, harness_pin, harness_snapshot,
+                      match_job,
                       match_prompt, smoke_job, snapshot, verify_job)
 from .models import (DatasetState, GalleryResult, JobArgs, JobDone, LabelEvent, MatchResult, Pins, PrUpdate,
                      RoundLimits, SmokeResult, VerifyResult)
@@ -224,6 +225,7 @@ class Activities:
         rec = await catalog.record(self.gh_catalog, path, entry["record_commit"])
         pins = Pins(rid, entry["record_commit"], await self.gh_snippets.get_ref_sha("main"),
                     *await asyncio.to_thread(harness_pin, self.cfg))
+        await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now (§6)
         _write(rd / "record.yaml", yaml.safe_dump(rec, sort_keys=False))
         _write(rd / "downloads.json", json.dumps(entry, indent=1))
         _write(rd / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted

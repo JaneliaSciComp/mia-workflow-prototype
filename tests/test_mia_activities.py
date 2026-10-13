@@ -27,6 +27,8 @@ def _setup(tmp_path, probe=None, csub=None):
     h = cfg.harness.dir
     (h / "harness").mkdir()
     (h / "harness" / "pixi.lock").write_text("lock v1\n")
+    (h / "harness" / "src" / "mia_harness").mkdir(parents=True)
+    (h / "harness" / "src" / "mia_harness" / "cli.py").write_text("def main(): return 0\n")
     run_git("init", "-q", "-b", "main", cwd=h)
     run_git("add", "-A", cwd=h)
     run_git(*GIT_ID, "commit", "-qm", "harness", cwd=h)
@@ -131,7 +133,7 @@ async def test_submit_refuses_moved_harness(tmp_path):
     (t.cfg.harness.dir / "harness" / "pixi.lock").write_text("lock v2\n")
     with pytest.raises(ApplicationError) as e:
         await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, pins))
-    assert e.value.non_retryable and "moved" in str(e.value) and t.csub.submitted == []
+    assert e.value.non_retryable and "changed" in str(e.value) and t.csub.submitted == []
 
 
 async def test_submit_refuses_host_missing_from_probe(tmp_path):
