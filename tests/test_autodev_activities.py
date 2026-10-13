@@ -156,7 +156,15 @@ async def test_first_round_publishes_and_opens_pr(tmp_path, gh):
     origin = make_origin(tmp_path)
     a = acts(tmp_path, gh, origin=origin)
     respx.get(f"{API}{R}/issues/7").mock(
-        return_value=httpx.Response(200, json={"number": 7, "title": "Add feature", "body": "please", "labels": []})
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "title": "Add feature",
+                "body": "<!-- x -->\nFor [data#9](https://e.x/9).\n\nMore.",
+                "labels": [],
+            },
+        )
     )
     respx.get(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(200, json=[]))
     ws = await a.prepare_round(RoundInput(7, K, 1, None, None))
@@ -172,7 +180,8 @@ async def test_first_round_publishes_and_opens_pr(tmp_path, gh):
     assert (ref.pr, ref.head_sha) == (5, head)
     assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=origin) == head
     pr = json.loads(create.calls[0].request.content)
-    assert pr["head"] == "autodev/issue-7" and pr["base"] == "main" and "Closes #7" in pr["body"]
+    assert pr["head"] == "autodev/issue-7" and pr["base"] == "main" and pr["title"] == "Add feature"
+    assert pr["body"].startswith("Closes #7: For [data#9](https://e.x/9).\n\n") and "More." not in pr["body"]
     body = json.loads(summary.calls[0].request.content)["body"]
     assert len(body) < 65536 and f"<!-- autodev: round {K}-1 -->" in body
 

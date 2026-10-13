@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from .config import Config
     from .models import Pins
 
-LABEL_KEY_RE = re.compile(r"[a-z_]+-[a-z0-9_]+-(instance|semantic|binary|points)")
+LABEL_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # = the harness's LABEL_KEY: it becomes labels/<key>.png.
+# The key is the catalog's label name as-is; the encoding is `segmentation_type`, not a suffix.
 
 
 def https(url: str) -> str:

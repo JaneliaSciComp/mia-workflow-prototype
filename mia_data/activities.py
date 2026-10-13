@@ -745,9 +745,9 @@ class Activities:
         body = "\n\n".join(
             [
                 marker,
-                f"New snippet needed for dataset `{pins.record}` ([{github_cfg.data_repo}#{issue}]"
-                f"(https://github.com/{github_cfg.data_repo}/issues/{issue})). Read "
-                f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md) first, and add the "
+                f"For [{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue}): "
+                f"dataset `{pins.record}` has no snippet that reads it.",
+                f"Read [SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md) first, and add the "
                 f"binding you test as `examples/{pins.record}.yaml`.",
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -759,9 +759,7 @@ class Activities:
                 _fenced(self._clean(yaml.safe_dump(draft.get("draft_binding"), sort_keys=False)[:16000]), "yaml"),
             ]
         )
-        title = (
-            f"New snippet for {self._clean(data_format)}/{container} ({github_cfg.data_repo.split('/')[-1]}#{issue})"
-        )
+        title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
         return (await gh.create_issue(title, body, ["snippets:go"]))["number"]
 
     @activity.defn(name="pr_state")
