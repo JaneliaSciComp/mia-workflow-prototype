@@ -1,0 +1,57 @@
+{
+ "downloaded": {
+  "bbbc034-hipsc-nuclei-3d": {
+   "at": "2026-10-08T04:53:20Z",
+   "record_commit": "061ca28620c4c1cff05493e8251cc119440428ab",
+   "scope": "sample-unit",
+   "dataset_dir": "/groups/troidl/home/troidlj/mia-agentic-search/demo-native/data/lm-human-bbbc034-hipsc-nuclei-3d",
+   "runner": {
+    "dataset_dir": "/groups/troidl/home/troidlj/mia-agentic-search/demo-native/data/lm-human-bbbc034-hipsc-nuclei-3d",
+    "crops": 1,
+    "done": [
+     "crop-001.zarr"
+    ],
+    "failed": {}
+   },
+   "crops": [
+    "crop-001.zarr"
+   ],
+   "labels": [
+    "manual_gt-nucleus-labels"
+   ],
+   "bytes_on_disk": 54862442
+  },
+  "hf-pytc-zebrafinch-j0126-ffn-em": {
+   "at": "2026-10-12T00:23:16Z",
+   "record_commit": "ab388c74e882acd369a158b94e2beae96ea56b0d",
+   "scope": "sample-unit",
+   "dataset_dir": "/groups/troidl/home/troidlj/mia-agentic-search/demo-native/data/em-taeniopygia-guttata-hf-pytc-zebrafinch-j0126-ffn",
+   "runner": {
+    "dataset_dir": "/groups/troidl/home/troidlj/mia-agentic-search/demo-native/data/em-taeniopygia-guttata-hf-pytc-zebrafinch-j0126-ffn",
+    "crops": 1,
+    "done": [
+     "crop-001.zarr"
+    ],
+    "failed": {}
+   },
+   "crops": [
+    "crop-001.zarr"
+   ],
+   "labels": [
+    "manual_gt-neurite-labels"
+   ],
+   "bytes_on_disk": 4526707
+  },
+  "synthetic-gpl": {
+   "at": "2026-10-09T00:00:00Z",
+   "record_commit": "0000000000000000000000000000000000000000",
+   "scope": "sample-unit",
+   "dataset_dir": "/data/synthetic-gpl",
+   "crops": [
+    "crop-001.zarr"
+   ],
+   "labels": [],
+   "bytes_on_disk": 1000
+  }
+ }
+}

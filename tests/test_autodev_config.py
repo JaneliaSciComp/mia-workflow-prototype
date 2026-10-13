@@ -1,9 +1,8 @@
 import pytest
 import yaml
+from autodev_helpers import make_cfg
 
 from autodev.config import PROJECT_DIR, load_config
-
-from autodev_helpers import make_cfg
 
 EXAMPLE = PROJECT_DIR / "autodev.yaml.example"
 
@@ -14,11 +13,11 @@ def test_example_loads_and_derives_names(monkeypatch):
     assert cfg.github.auth == "token"
     assert cfg.label("go") == "autodev:go"
     assert cfg.branch(12) == "autodev/issue-12"
-    assert cfg.workflow_id(12) == "autodev/krokicki/mia-workflow-prototype/issue-12"
+    assert cfg.workflow_id(12) == "autodev/JaneliaSciComp/mia-workflow-prototype/issue-12"
     assert cfg.marker("handled review-3") == "<!-- autodev: handled review-3 -->"
     assert cfg.marker_prefix == "<!-- autodev:"
-    assert cfg.git_url == "https://github.com/krokicki/mia-workflow-prototype.git"
-    assert cfg.repo_slug == "krokicki__mia-workflow-prototype"
+    assert cfg.git_url == "https://github.com/JaneliaSciComp/mia-workflow-prototype.git"
+    assert cfg.repo_slug == "JaneliaSciComp__mia-workflow-prototype"
 
 
 def test_deployment_override_isolates_a_personal_instance(monkeypatch):
@@ -41,13 +40,24 @@ def test_deployment_name_is_restricted(tmp_path):
         make_cfg(tmp_path, deployment="Auto Dev")
 
 
-@pytest.mark.parametrize("agent", [
-    {"allow_hosts": ["github.com"]}, {"allow_hosts": [" api.github.com"]}, {"allow_hosts": ["github.com "]},
-    {"extra_mounts": ["tools:ro"]}, {"extra_mounts": ["~/tools:ro"]}, {"allow_hosts": ["api.github.com"]},
-    {"allow_hosts": ["Raw.GithubUserContent.com."]}, {"extra_mounts": ["/tools"]},
-    {"extra_mounts": ["/tools:rw"]}, {"extra_mounts": ["{state}:ro"]}, {"extra_mounts": ["{state}/sub:ro"]},
-    {"extra_mounts": ["{tmp}:ro"]}, {"extra_mounts": ["{tmp}/tok:ro"]},
-])
+@pytest.mark.parametrize(
+    "agent",
+    [
+        {"allow_hosts": ["github.com"]},
+        {"allow_hosts": [" api.github.com"]},
+        {"allow_hosts": ["github.com "]},
+        {"extra_mounts": ["tools:ro"]},
+        {"extra_mounts": ["~/tools:ro"]},
+        {"allow_hosts": ["api.github.com"]},
+        {"allow_hosts": ["Raw.GithubUserContent.com."]},
+        {"extra_mounts": ["/tools"]},
+        {"extra_mounts": ["/tools:rw"]},
+        {"extra_mounts": ["{state}:ro"]},
+        {"extra_mounts": ["{state}/sub:ro"]},
+        {"extra_mounts": ["{tmp}:ro"]},
+        {"extra_mounts": ["{tmp}/tok:ro"]},
+    ],
+)
 def test_agent_constraints_rejected(tmp_path, agent):
     sub = {"state": str(tmp_path / "state"), "tmp": str(tmp_path)}
     agent = {k: [v.format(**sub) for v in vs] for k, vs in agent.items()}
@@ -64,8 +74,11 @@ def test_paths_are_canonical(tmp_path):
     for name in ("work", "state", "tools"):
         (tmp_path / f"real-{name}").mkdir()
         (tmp_path / f"link-{name}").symlink_to(tmp_path / f"real-{name}")
-    cfg = make_cfg(tmp_path, agent={"extra_mounts": [f"{tmp_path}/link-tools/../link-tools:ro"]},
-                   paths={"state_dir": str(tmp_path / "link-state"), "work_root": str(tmp_path / "link-work")})
+    cfg = make_cfg(
+        tmp_path,
+        agent={"extra_mounts": [f"{tmp_path}/link-tools/../link-tools:ro"]},
+        paths={"state_dir": str(tmp_path / "link-state"), "work_root": str(tmp_path / "link-work")},
+    )
     assert cfg.paths.work_root == (tmp_path / "real-work").resolve()
     assert cfg.paths.state_dir == (tmp_path / "real-state").resolve()
     assert cfg.agent.extra_mounts == [f"{(tmp_path / 'real-tools').resolve()}:ro"]
@@ -76,3 +89,14 @@ def test_env_override_into_an_empty_section(tmp_path, monkeypatch):
     p.write_text(f"github: {{repo: o/r}}\npaths: {{work_root: {tmp_path}}}\ntemporal:\n")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "example:7233")
     assert load_config(p).temporal.address == "example:7233"
+
+
+def test_trusted_bots_must_be_apps(tmp_path):
+    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]"]}).github.trusted_bots == ["x[bot]"]
+    with pytest.raises(ValueError, match="trusted_bots"):
+        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
+
+
+def test_max_budget_must_be_positive(tmp_path):
+    with pytest.raises(ValueError, match="max_budget_usd"):
+        make_cfg(tmp_path, agent={"max_budget_usd": 0})

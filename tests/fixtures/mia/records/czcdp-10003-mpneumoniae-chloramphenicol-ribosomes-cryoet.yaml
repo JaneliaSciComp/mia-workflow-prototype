@@ -1,0 +1,173 @@
+schema_version: '1.2'
+id: czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet
+title: Cryo-electron tomograms of chloramphenicol-treated Mycoplasma pneumoniae cells with 70S ribosome positions
+short_name: M. pneumoniae chloramphenicol ribosomes (cryo-ET)
+description: 65 cryo-electron tomograms of intact Mycoplasma pneumoniae M129 cells treated with chloramphenicol, at 6.802
+  A voxel spacing, from the Warp/M evaluation data. Each tomogram carries oriented-point annotations of chloramphenicol-bound
+  70S ribosomes (template matching, manual filtering and 3D classification), and membrane segmentations.
+landing_url: https://cryoetdataportal.czscience.com/depositions/10003
+doi: null
+repository: other
+accession: CZCDP-10003
+authors:
+- Dimitry Tegunov
+- Liang Xue
+- Christian Dienemann
+- Patrick Cramer
+- Julia Mahamid
+publications:
+- title: Visualizing translation dynamics at atomic detail inside a bacterial cell.
+  doi: 10.1038/s41586-022-05255-2
+  url: https://doi.org/10.1038/s41586-022-05255-2
+date_published: '2023-11-01'
+imaging:
+  modality:
+  - cryo-ET
+  dimensionality: 3D
+  voxel_size_nm:
+    x: 0.6802
+    y: 0.6802
+    z: 0.6802
+  channels: null
+  organism:
+  - Mycoplasmoides pneumoniae
+  sample: Native M. pneumoniae M129 cells treated with chloramphenicol for 15-20 min before plunge-freezing
+  labels_stains: []
+data:
+  formats:
+  - mrc
+  - ome-zarr
+  size_bytes: 758253297185
+  n_items: 65
+  access: open
+  download_url: https://cryoetdataportal.czscience.com/depositions/10003
+  download_method: s3
+annotations:
+  present: true
+  types:
+  - points
+  - semantic-segmentation
+  coverage: dense
+  format: oriented-point NDJSON for ribosomes (*_orientedpoint.ndjson), membrane masks as MRC/OME-Zarr and instance-segmentation
+    NDJSON
+  source: mixed
+ml:
+  tasks:
+  - detection
+  - segmentation
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: null
+license:
+  spdx: CC0-1.0
+  url: https://cryoetdataportal.czscience.com/data-submission-policy
+provenance:
+  discovered_by: harvest-websearch
+  discovered_at: '2026-10-09T21:50:00Z'
+  evidence_urls:
+  - https://files.cryoetdataportal.cziscience.com/10003/dataset_metadata.json
+  - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/100/chloramphenicol_bound_70s_ribosome-1.0.json
+  - https://cryoet-data-portal-public.s3.amazonaws.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/100/chloramphenicol_bound_70s_ribosome-1.0_orientedpoint.ndjson
+  - https://cryoetdataportal.czscience.com/data-submission-policy
+  - https://www.ebi.ac.uk/europepmc/webservices/rest/PMC9534751/fullTextXML
+  confidence: 0.8
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-09T23:10:00Z'
+notes: 'Portal dataset 10003 (related entries EMPIAR-10731 and EMPIAR-10499) has 65 run folders (TS_01 ...), matching the
+  65 Cm-treated tomograms in the paper. TS_01 was listed in full: motion frames (TIFF), gain, a 1.55 GB tomogram (mrc and
+  OME-Zarr, VoxelSpacing6.802), ribosome annotation 100 (ground_truth_status true, hybrid: pyTOM template matching, manual
+  filtering and RELION 3D classification, 353 particles in that tomogram), membrane annotation 101 (TARDIS, automated, deposition
+  10301) and a membrain-seg prediction (102, deposition 10303, automated). Membrane masks are therefore automated and only
+  the ribosome picks are curated. Total size is not stated. The paper (Xue et al. 2022, full text read) analyses 65 Cm-treated
+  tomograms and processed them in Warp and M; the Warp/M paper (10.1038/s41592-020-01054-7) was not read. License is the portal
+  policy (CC0). enricher: size from the full S3 listing (was null).'
+technical:
+  method: header
+  inspected_at: '2026-10-09T23:10:00Z'
+  inspected_urls:
+  - https://cryoet-data-portal-public.s3.amazonaws.com/
+  - https://graphql.cryoetdataportal.czscience.com/graphql
+  - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Tomograms/100/TS_01.mrc
+  - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/101/membrane-1.0_segmentationmask.mrc
+  - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/100/chloramphenicol_bound_70s_ribosome-1.0_orientedpoint.ndjson
+  bytes_downloaded: 635766
+  size_source: file-listing
+  layout:
+    tree: "10003/  (CZ cryoET portal, 65 runs TS_01 ...)\n  TS_<nn>/\n    Frames/, TiltSeries/, Alignments/\n    Reconstructions/VoxelSpacing6.802/\n\
+      \      Tomograms/100/TS_<nn>.mrc (1.55 GB), TS_<nn>.zarr, tomogram_metadata.json\n      Annotations/100/chloramphenicol_bound_70s_ribosome-1.0_orientedpoint.ndjson\
+      \   (dep. 10003, curated)\n      Annotations/101/membrane-1.0_segmentationmask.{mrc,zarr}, membrane-1.0_instancesegmentation.ndjson\
+      \   (TARDIS, dep. 10301)\n      Annotations/102/membrain_seg_prediction-1.0_segmentationmask.{mrc,zarr}   (dep. 10303)\n\
+      \      Images/, NeuroglancerPrecompute/"
+    n_files: 37378
+    listing_complete: true
+  sample:
+    urls:
+    - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Tomograms/100/TS_01.mrc
+    - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/101/membrane-1.0_segmentationmask.mrc
+    - https://files.cryoetdataportal.cziscience.com/10003/TS_01/Reconstructions/VoxelSpacing6.802/Annotations/100/chloramphenicol_bound_70s_ribosome-1.0_orientedpoint.ndjson
+    size_bytes: 1937777526
+    description: 'Run TS_01: tomogram, TARDIS membrane mask and the 352 ribosome oriented points.'
+  arrays:
+  - role: raw
+    path_pattern: TS_*/Reconstructions/VoxelSpacing6.802/Tomograms/100/TS_*.mrc
+    format: mrc
+    axes: zyx
+    shape:
+    - 450
+    - 928
+    - 928
+    shape_varies: false
+    dtype: float32
+    compression: none
+    lossy: false
+    chunks: null
+    value_range: null
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: 'Portal API: all 65 tomograms 928 x 928 x 450 at 6.802 A, processing "raw". Also as OME-Zarr (TS_<nn>.zarr).'
+  - role: label
+    path_pattern: TS_*/Reconstructions/VoxelSpacing6.802/Annotations/101/membrane-1.0_segmentationmask.mrc
+    format: mrc
+    axes: zyx
+    shape:
+    - 450
+    - 928
+    - 928
+    shape_varies: false
+    dtype: int8
+    compression: none
+    lossy: false
+    chunks: null
+    value_range: null
+    encoding: binary
+    classes:
+    - id: 1
+      name: membrane
+    alignment: same-grid
+    alignment_notes: Automated TARDIS membrane mask (deposition 10301), same shape and voxel size as the tomogram; header
+      min/max 0/1.
+  - role: label
+    path_pattern: TS_*/Reconstructions/VoxelSpacing6.802/Annotations/100/*_orientedpoint.ndjson
+    format: json
+    axes: null
+    shape: null
+    shape_varies: true
+    dtype: unknown
+    compression: none
+    lossy: false
+    chunks: null
+    value_range: null
+    encoding: points-table
+    classes:
+    - id: null
+      name: chloramphenicol-bound 70S ribosome
+    alignment: same-grid
+    alignment_notes: 'One JSON line per particle: location x, y, z in voxels of the 6.802 A tomogram (e.g. 557.8, 792.1, 165.4)
+      and a 3x3 xyz_rotation_matrix; 352 lines in TS_01.'
+  notes: 'MRC headers (256 KB each): tomogram float32 450 x 928 x 928 zyx, 6.802 A, header min/max -0.336/0.336; membrane
+    mask int8 (MRC mode 0) same shape, min/max 0/1. Portal GraphQL: 65 tomograms (all 6.802 A, 928x928x450, raw); 195 annotations:
+    65 cytosolic ribosome (ground truth true, hybrid, dep. 10003), 65 + 65 membrane (automated, dep. 10301 / 10303). Full
+    S3 listing of 10003/: 37,378 objects, 758,253,297,185 B (incl. frames, tilt series, OME-Zarr copies and masks).'

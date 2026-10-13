@@ -1,0 +1,135 @@
+schema_version: '1.2'
+id: bbbc034-hipsc-nuclei-3d
+title: BBBC034 - 3D confocal-type stack of clustered hiPSC nuclei with manually segmented ground truth
+short_name: hiPSC colony 3D nuclei segmentation (fluorescence)
+description: Allen Institute for Cell Science 3D images of a clustered monolayer of human induced pluripotent
+  stem cells (4 channels - CellMask plasma membrane, GFP-edited, DNA, brightfield; 1024x1024x52). One
+  volume comes with a manually annotated 3D nucleus segmentation (ground_truth_segmented.tif). Colony
+  edge and centre stacks (membrane, EGFP beta-actin, Hoechst) are included without ground truth.
+landing_url: https://bbbc.broadinstitute.org/BBBC034
+doi: null
+repository: other
+accession: BBBC034
+authors:
+- AICS Microscopy & Image Analysis Team, Allen Institute for Cell Science
+publications: []
+date_published: null
+imaging:
+  modality:
+  - fluorescence-other
+  dimensionality: 3D
+  voxel_size_nm:
+    x: 65
+    y: 65
+    z: 290
+  channels: 4
+  organism:
+  - Homo sapiens
+  sample: Clustered monolayer of human induced pluripotent stem cells (hiPSC), colony edge and centre
+  labels_stains:
+  - CellMask Deep Red (plasma membrane)
+  - GFP (edited channel)
+  - DNA (Hoechst)
+data:
+  formats:
+  - tiff
+  size_bytes: 572881441
+  n_items: 1
+  access: open
+  download_url: https://data.broadinstitute.org/bbbc/BBBC034/BBBC034_v1_dataset.zip
+  download_method: http
+annotations:
+  present: true
+  types:
+  - instance-segmentation
+  coverage: dense
+  format: ground_truth_segmented.tif (3D label image); BBBC034DatasetGroundTruth.csv listed on the page
+  source: manual
+ml:
+  tasks:
+  - segmentation
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: null
+license:
+  spdx: CC-BY-4.0
+  url: https://creativecommons.org/licenses/by/4.0/
+provenance:
+  discovered_by: harvest-websearch
+  discovered_at: '2026-10-01T16:13:56Z'
+  evidence_urls:
+  - https://bbbc.broadinstitute.org/BBBC034
+  confidence: 0.75
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-01T17:41:41Z'
+notes: 'Page states image size 66.56 x 66.56 x 15.08 microns for 1024 x 1024 x 52 pixels; voxel size (65,
+  65, 290 nm) is derived from that. Image dataset zip is 572.2 MB (10 tif files, listed with peek_archive);
+  ground truth zip contains a single 109 MB tif (ground_truth_segmented.tif). Only one annotated volume
+  exists - the edge and centre colony stacks have no ground truth. The page links no paper (says results
+  are to be submitted), so no publication is listed. The label encoding (instance IDs vs binary) was not
+  inspected. The exact modality (widefield vs spinning disk) is not stated on the page - the Zeiss AxioObserver
+  with ORCA-Flash 4.0 is named, so fluorescence-other is used. The ground-truth CSV is shown on the page
+  but the zip listed only the tif. enricher: size from complete listing of both zips; DNA channel and
+  GT sampled.'
+technical:
+  method: sample
+  size_source: file-listing
+  layout:
+    tree: "BBBC034_v1_dataset.zip   10 .tif, 947 MB uncompressed\n  AICS_12_134_C=0.tif  CellMask Deep\
+      \ Red membrane\n  AICS_12_134_C=1.tif  GFP-edited channel\n  AICS_12_134_C=2.tif  DNA\n  AICS-12_134_C=3.tif\
+      \  brightfield\n  colony_center_C={1_DeepRed,3_EGFP,5_Hoechst}.tif   (no ground truth)\n  edge_C={1_DeepRed,3_EGFP,5_Hoechst}.tif\
+      \            (no ground truth)\nBBBC034_v1_DatasetGroundTruth.zip\n  ground_truth_segmented.tif\
+      \   109 MB uncompressed\n2 files, 572,881,441 B\n"
+    n_files: 2
+    listing_complete: true
+  sample:
+    urls:
+    - https://data.broadinstitute.org/bbbc/BBBC034/BBBC034_v1_dataset.zip::AICS_12_134_C=2.tif
+    - https://data.broadinstitute.org/bbbc/BBBC034/BBBC034_v1_DatasetGroundTruth.zip::ground_truth_segmented.tif
+    size_bytes: 45103030
+    description: DNA channel of the annotated stack and its ground truth (zip members, compressed sizes).
+  arrays:
+  - role: raw
+    path_pattern: BBBC034_v1_dataset.zip::AICS_12_134_C=<c>.tif
+    format: tiff
+    axes: zyx
+    shape:
+    - 52
+    - 1024
+    - 1024
+    shape_varies: false
+    dtype: uint16
+    compression: unknown
+    value_range:
+    - 15
+    - 1229
+    normalization: none
+    alignment: not-applicable
+    alignment_notes: One file per channel (page lists C=0 membrane, C=1 GFP, C=2 DNA, C=3 brightfield).
+  - role: label
+    path_pattern: BBBC034_v1_DatasetGroundTruth.zip::ground_truth_segmented.tif
+    format: tiff
+    axes: zyx
+    shape:
+    - 52
+    - 1024
+    - 1024
+    shape_varies: false
+    dtype: uint16
+    compression: unknown
+    value_range:
+    - 0
+    - 65535
+    encoding: unknown
+    classes: null
+    alignment: same-grid
+    alignment_notes: Ground truth 52x1024x1024 matches AICS_12_134_C=2.tif; the colony_center and edge
+      stacks have no ground truth.
+  notes: 'Listing complete (both zip central directories). Zip members are deflated, so headers were read
+    via sample.py. DNA channel C=2: ZYX 52x1024x1024 uint16, [15, 1229], p50 109, p99 148 (12-bit range,
+    no clipping; normalization none inferred). GT: uint16 52x1024x1024, 27 distinct values from 0 to 65535,
+    74.5 % zero; values spread over the uint16 range, so instance-ID vs other encoding is not clear (unknown).
+    Other channel files not sampled.'

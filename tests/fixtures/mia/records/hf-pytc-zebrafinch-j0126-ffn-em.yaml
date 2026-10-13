@@ -1,0 +1,148 @@
+schema_version: '1.2'
+id: hf-pytc-zebrafinch-j0126-ffn-em
+title: Zebra finch j0126 SBEM - dense neuron instance labels and skeletons from the flood-filling network paper
+short_name: Zebra finch j0126 neuron segmentation (SBF-SEM)
+description: Processed ground truth for the zebra finch brain serial block-face EM volume j0126 used in the flood-filling
+  network (FFN) paper. 33 densely labeled 150-voxel subvolumes (raw image plus neuron instance labels, with padded variants),
+  manually traced skeletons for 12 validation and 50 test neurons, 465 proofread nucleus instances at 80 nm and a tissue/border
+  exclusion mask for the full volume.
+landing_url: https://huggingface.co/datasets/pytc/zebrafinch-j0126
+doi: null
+repository: HuggingFace
+accession: null
+authors: []
+publications:
+- title: High-precision automated reconstruction of neurons with flood-filling networks
+  doi: 10.1038/s41592-018-0049-4
+  url: https://www.biorxiv.org/content/10.1101/200675v1.full
+date_published: null
+imaging:
+  modality:
+  - SBF-SEM
+  dimensionality: 3D
+  voxel_size_nm:
+    x: 9
+    y: 9
+    z: 20
+  channels: null
+  organism:
+  - Taeniopygia guttata
+  sample: brain tissue of a male zebra finch (volume j0126), about 96 x 98 x 114 um (10624 x 10880 x 5700 voxels)
+  labels_stains: []
+data:
+  formats:
+  - hdf5
+  size_bytes: 2158176390
+  n_items: 33
+  access: open
+  download_url: https://huggingface.co/datasets/pytc/zebrafinch-j0126/tree/main
+  download_method: http
+annotations:
+  present: true
+  types:
+  - instance-segmentation
+  - skeleton
+  coverage: sparse
+  format: HDF5 label volumes (seg_gt) and skeleton HDF5 files; nucleus instances as HDF5 at 80 nm; exclusion mask as zarr
+    in a tar
+  source: manual
+ml:
+  tasks:
+  - segmentation
+  splits_provided: true
+  benchmark: null
+  baseline_code_url: https://github.com/PytorchConnectomics/pytorch_connectomics/tree/master/tutorials/neuron_j0126
+license:
+  spdx: MIT
+  url: https://huggingface.co/datasets/pytc/zebrafinch-j0126
+provenance:
+  discovered_by: harvest-websearch
+  discovered_at: '2026-10-11T00:19:01Z'
+  evidence_urls:
+  - https://huggingface.co/datasets/pytc/zebrafinch-j0126
+  - https://huggingface.co/datasets/pytc/zebrafinch-j0126/tree/main
+  - https://huggingface.co/datasets/pytc/zebrafinch-j0126/raw/main/README.md
+  - https://huggingface.co/datasets/pytc/zebrafinch-j0126/resolve/main/j0126-train-33vol.zip
+  - https://www.biorxiv.org/content/10.1101/200675v1.full
+  - https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=DOI%3A%2210.1038%2Fs41592-018-0049-4%22&format=json&resultType=core&pageSize=3
+  - https://huggingface.co/api/datasets/pytc/zebrafinch-j0126/tree/main?recursive=true
+  confidence: 0.82
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-12T00:40:00Z'
+notes: 'HF repo (7 files, 2,158,176,390 B): j0126-train-33vol.zip (33 dense GT subvolumes: im_raw, seg_gt, padded variants,
+  skeleton volumes), valid_12_skeletons.h5, test_50_skeletons.h5, ffn_node_lut_test_50.h5, j0126-nucleus-instances-80nm.h5,
+  j0126-tissue-border-keep-mask.tar (zarr mask at 9x9x20 nm). The full raw image and FFN segmentation stream from a GCS precomputed
+  bucket named in the README. Voxel size 9x9x20 nm from the dataset card and the paper. License MIT is the HF card tag; the
+  paper states no data licence. Organism from the paper. enricher: size from complete HF file listing (was 2.16 GB stated);
+  annotations verified by sampling seg_gt; download_url set to the repo file tree (no single archive holds the whole dataset).'
+technical:
+  method: sample
+  size_source: file-listing
+  layout:
+    tree: "./  7 files, 2.2 GB\n  README.md\n  j0126-train-33vol.zip (394.8 MB)\n    im_raw/          33 .h5 (121.3 MB)  im_z<z0>-<z1>_y<y0>-<y1>_x<x0>-<x1>.h5\n\
+      \    seg_gt/          33 .h5 (17.5 MB)   gt_z..._y..._x....h5\n    im_raw_4-32-32/  33 .h5 (244.0 MB)  padded raw\n\
+      \    seg_gt_4-32-32/  66 .h5 (28.6 MB)   padded labels + *_skeleton.h5\n  valid_12_skeletons.h5 (2.1 MB)\n  test_50_skeletons.h5\
+      \ (20.1 MB)\n  ffn_node_lut_test_50.h5 (0.3 MB)\n  j0126-nucleus-instances-80nm.h5 (47.0 MB)\n  j0126-tissue-border-keep-mask.tar\
+      \ (1.69 GB)"
+    n_files: 7
+    listing_complete: true
+  sample:
+    urls:
+    - https://huggingface.co/datasets/pytc/zebrafinch-j0126/resolve/main/j0126-train-33vol.zip::im_raw/im_z3438-3588_y2775-2925_x3476-3626.h5
+    - https://huggingface.co/datasets/pytc/zebrafinch-j0126/resolve/main/j0126-train-33vol.zip::seg_gt/gt_z3438-3588_y2775-2925_x3476-3626.h5
+    size_bytes: 3588936
+    description: 'one dense GT subvolume: raw 150^3 uint8 + instance labels 150^3 uint64 (HDF5 dataset main)'
+  arrays:
+  - role: raw
+    path_pattern: j0126-train-33vol.zip/im_raw/im_*.h5 (main)
+    format: hdf5
+    axes: zyx
+    shape:
+    - 150
+    - 150
+    - 150
+    shape_varies: true
+    dtype: uint8
+    compression: gzip
+    value_range:
+    - 1
+    - 255
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: 32 cubes are 150^3, one is 128x256x256 (README). Axis order zyx from the README (padding stated as [4,32,32]
+      in zyx; file names give z, y, x ranges in the source volume, 9x9x20 nm xyz).
+  - role: label
+    path_pattern: j0126-train-33vol.zip/seg_gt/gt_*.h5 (main)
+    format: hdf5
+    axes: zyx
+    shape:
+    - 150
+    - 150
+    - 150
+    shape_varies: true
+    dtype: uint64
+    compression: gzip
+    value_range:
+    - 0
+    - 609
+    normalization: none
+    encoding: instance-ids
+    classes:
+    - id: 0
+      name: background
+    - id: null
+      name: neuron (one id per segment)
+    alignment: same-grid
+    alignment_notes: 'Pairing: im_raw/im_<coords>.h5 <-> seg_gt/gt_<coords>.h5 (same coordinate stem). Sampled pair has identical
+      shapes. Padded variants (im_raw_4-32-32, seg_gt_4-32-32) add [4,32,32] voxels per side in zyx; padded labels are int32
+      with -1 = ignore, *_skeleton.h5 holds skeleton voxels carrying segment ids (README).'
+  notes: 'Listing: HF API tree + zip central directory, 7 files / 165 zip members, 2,158,176,390 B (complete). Probed: im_raw
+    (150^3 uint8 gzip, chunks 19x38x38), seg_gt (150^3 uint64 gzip), padded raw/label/skeleton (158x214x214, uint8/int32/int32),
+    nucleus h5 (main, 1425x1365x1333 uint16 gzip), valid_12_skeletons.h5 (per-neuron <i>/vertices [N,3] and <i>/edges int64
+    graphs). Sampled one pair (3.9 MB incl. padded label + skeleton): raw 1-255 (mean 150), label 0-609 with 35 ids (30% background);
+    value ranges from one sample. No HDF5 attributes (no stored resolution); voxel size from the card and paper. Not described
+    as arrays: padded variants, skeleton graphs, nucleus instances at 80 nm (README: upsample [4,8,8] zyx to mip 0; full raw
+    volume not in the repo) and the tissue mask tar.'

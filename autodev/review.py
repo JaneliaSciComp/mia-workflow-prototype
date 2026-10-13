@@ -1,4 +1,10 @@
-"""Pure readers of GitHub PR data: who approved which commit, what change requests are pending, how CI looks."""
+"""Reading a PR's reviews and comments: who approved which commit, what change requests are pending, and
+how CI looks.
+
+These are pure functions over the dicts GitHub returns, so the rules (who counts as a reviewer, which
+approval counts for which commit) are in one place and easy to test. `marker_prefix` identifies the bot's
+own comments; `bot` is its login.
+"""
 
 from __future__ import annotations
 
@@ -12,79 +18,133 @@ REVISE_RE = re.compile(r"^/revise\b(.*)", re.M | re.S)
 _FAILED = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
-def _login(x: dict) -> str | None:
-    return (x.get("user") or {}).get("login")
+def _login(item: dict) -> str | None:
+    """The author login of a review or comment dict."""
+    return (item.get("user") or {}).get("login")
 
 
-def _human(login: str | None, perms: dict[str, str], bot: str, allow_self: bool) -> bool:
-    """A person with write access. `allow_self`: under a personal token you are also the bot."""
-    return bool(login) and perms.get(login) in WRITE_PERMISSIONS and (allow_self or login != bot)
+def _is_human_writer(login: str | None, permissions: dict[str, str], bot: str, allow_self: bool) -> bool:
+    """A person with write access, and not the bot itself unless `allow_self` (under a personal token the
+    reviewer and the bot are the same account)."""
+    return bool(login) and permissions.get(login) in WRITE_PERMISSIONS and (allow_self or login != bot)
 
 
-def _ours(body: str | None, marker_prefix: str) -> bool:
+def _is_ours(body: str | None, marker_prefix: str) -> bool:
     return marker_prefix in (body or "")
 
 
 def latest_round_at(comments: list[dict], marker_prefix: str, bot: str) -> str | None:
     """When the current head was published: the time of the bot's latest round-summary comment."""
-    return max((c.get("created_at") or "" for c in comments
-                if _login(c) == bot and f"{marker_prefix} round " in (c.get("body") or "")), default=None)
+    return max(
+        (
+            comment.get("created_at") or ""
+            for comment in comments
+            if _login(comment) == bot and f"{marker_prefix} round " in (comment.get("body") or "")
+        ),
+        default=None,
+    )
 
 
-def approved(head_sha: str, reviews: list[dict], comments: list[dict], perms: dict[str, str], bot: str,
-             allow_self: bool, marker_prefix: str, since: str | None) -> bool:
-    """`since`: `/approve` comments count only if posted after it (a short prefix of an older head must not
-    approve a later head the agent grinds to match). GitHub's ISO-8601 UTC timestamps compare as strings."""
+def approved(
+    head_sha: str,
+    reviews: list[dict],
+    comments: list[dict],
+    permissions: dict[str, str],
+    bot: str,
+    allow_self: bool,
+    marker_prefix: str,
+    since: str | None,
+) -> bool:
+    """Whether a human with write access approved exactly `head_sha`, by review or by `/approve <sha>` comment.
+
+    `/approve` comments count only if posted after `since`: a short prefix of an older head must not approve
+    a later head the agent happens to produce. GitHub's ISO-8601 UTC timestamps compare correctly as strings."""
     latest: dict[str, dict] = {}
-    for r in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
-        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and _login(r):
-            latest[_login(r)] = r
-    if any(r["state"] == "APPROVED" and r.get("commit_id") == head_sha and _human(login, perms, bot, allow_self)
-           for login, r in latest.items()):
+    for review in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and _login(review):
+            latest[_login(review)] = review
+    if any(
+        review["state"] == "APPROVED"
+        and review.get("commit_id") == head_sha
+        and _is_human_writer(login, permissions, bot, allow_self)
+        for login, review in latest.items()
+    ):
         return True
-    for c in comments:
-        if _ours(c.get("body"), marker_prefix) or (since and (c.get("created_at") or "") <= since):
+    for comment in comments:
+        if _is_ours(comment.get("body"), marker_prefix) or (since and (comment.get("created_at") or "") <= since):
             continue
-        m = APPROVE_RE.search(c.get("body") or "")
-        if m and head_sha.startswith(m.group(1)) and _human(_login(c), perms, bot, allow_self):
+        match = APPROVE_RE.search(comment.get("body") or "")
+        if (
+            match
+            and head_sha.startswith(match.group(1))
+            and _is_human_writer(_login(comment), permissions, bot, allow_self)
+        ):
             return True
     return False
 
 
-def feedback(reviews: list[dict], review_comments: list[dict], comments: list[dict], perms: dict[str, str],
-             bot: str, allow_self: bool, marker_prefix: str) -> list[Feedback]:
-    """Change requests from people with write access, oldest first."""
-    items: list[tuple[str, Feedback]] = []
-    for r in reviews:
-        if r.get("state") != "CHANGES_REQUESTED" or not _human(_login(r), perms, bot, allow_self):
+def feedback(
+    reviews: list[dict],
+    review_comments: list[dict],
+    comments: list[dict],
+    permissions: dict[str, str],
+    bot: str,
+    allow_self: bool,
+    marker_prefix: str,
+) -> list[Feedback]:
+    """Change requests from people with write access, oldest first.
+
+    A "changes requested" review becomes one Feedback with its inline comments attached; a `/revise` comment
+    becomes one Feedback with the rest of the comment as its text."""
+    items: list[tuple[str, Feedback]] = []  # (timestamp, feedback) for sorting
+    for review in reviews:
+        if review.get("state") != "CHANGES_REQUESTED" or not _is_human_writer(
+            _login(review), permissions, bot, allow_self
+        ):
             continue
-        inline = [f"- `{c.get('path')}` line {c.get('line') or c.get('original_line')}: {c.get('body')}"
-                  for c in review_comments if c.get("pull_request_review_id") == r["id"]]
-        text = "\n".join(filter(None, [r.get("body") or "", *inline])) or "(changes requested, no details)"
-        items.append((r.get("submitted_at") or "", Feedback(f"review-{r['id']}", text)))
-    for c in comments:
-        if _ours(c.get("body"), marker_prefix):
+        inline = [
+            f"- `{comment.get('path')}` line {comment.get('line') or comment.get('original_line')}: "
+            f"{comment.get('body')}"
+            for comment in review_comments
+            if comment.get("pull_request_review_id") == review["id"]
+        ]
+        text = "\n".join(filter(None, [review.get("body") or "", *inline])) or "(changes requested, no details)"
+        items.append((review.get("submitted_at") or "", Feedback(f"review-{review['id']}", text)))
+    for comment in comments:
+        if _is_ours(comment.get("body"), marker_prefix):
             continue
-        m = REVISE_RE.search(c.get("body") or "")
-        if m and _human(_login(c), perms, bot, allow_self):
-            items.append((c.get("created_at") or "", Feedback(f"comment-{c['id']}", m.group(1).strip() or "(no details)")))
-    return [f for _, f in sorted(items, key=lambda t: t[0])]
+        match = REVISE_RE.search(comment.get("body") or "")
+        if match and _is_human_writer(_login(comment), permissions, bot, allow_self):
+            items.append(
+                (
+                    comment.get("created_at") or "",
+                    Feedback(f"comment-{comment['id']}", match.group(1).strip() or "(no details)"),
+                )
+            )
+    return [item for _, item in sorted(items, key=lambda pair: pair[0])]
 
 
 def handled_ids(comments: list[dict], marker_prefix: str, bot: str) -> set[str]:
     """Feedback ids that a round already addressed: only the bot's own `<prefix> handled <id> -->` markers count."""
     handled_re = re.compile(re.escape(marker_prefix) + r" handled (\S+) -->")
-    out: set[str] = set()
-    for c in comments:
-        if _login(c) == bot:
-            out.update(handled_re.findall(c.get("body") or ""))
-    return out
+    handled: set[str] = set()
+    for comment in comments:
+        if _login(comment) == bot:
+            handled.update(handled_re.findall(comment.get("body") or ""))
+    return handled
 
 
-def combine_checks(check_runs: list[dict], statuses: list[dict]) -> str:
-    states = ["pending" if r.get("status") != "completed" else
-              "failure" if r.get("conclusion") in _FAILED else "success" for r in check_runs]
-    states += [{"success": "success", "pending": "pending"}.get(s.get("state"), "failure") for s in statuses]
-    if not states:
+def combine_checks(check_runs: list[dict], statuses: list[dict], required: list[str] = ()) -> str:
+    """Fold check runs and commit statuses into one state: failure beats pending beats success.
+
+    "none" means nothing reported and nothing is required; a missing required check counts as pending."""
+    states = [
+        "pending" if run.get("status") != "completed" else "failure" if run.get("conclusion") in _FAILED else "success"
+        for run in check_runs
+    ]
+    states += [{"success": "success", "pending": "pending"}.get(status.get("state"), "failure") for status in statuses]
+    seen = {run.get("name") for run in check_runs} | {status.get("context") for status in statuses}
+    if not states and not required:
         return "none"
-    return next((s for s in ("failure", "pending") if s in states), "success")
+    worst = next((state for state in ("failure", "pending") if state in states), "success")
+    return "pending" if worst == "success" and not seen.issuperset(required) else worst
