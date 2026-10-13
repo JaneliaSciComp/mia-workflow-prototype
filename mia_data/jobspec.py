@@ -3,9 +3,14 @@ every job needs: a read-only snapshot of mia-snippets at a commit, and the harne
 
 The record and bindings live under `paths.state_dir`, which is never mounted into a job: the caller copies
 them into the job's workspace first, and the builders take their names relative to it (`record.yaml`,
-`binding.yaml`). The snapshot, the harness checkout, the dataset cache and any extra input are mounted
-read-only; only the workspace (and the dataset cache, for jobs that run reviewed code) is writable. Every
-builder refuses (PinMoved) when the harness checkout is no longer the round's admitted pin.
+`binding.yaml`). The snippet snapshot, the harness snapshot, the harness environment, the dataset cache and
+any extra input are mounted read-only; only the workspace (and the dataset cache, for jobs that run reviewed
+code) is writable.
+
+A round carries its own harness: its source is a snapshot of `harness/src` at the admitted commit, taken from
+the `harness.dir` checkout, and its environment is that checkout's pixi env, pinned by the sha256 of
+`pixi.lock`. Commits in `harness.dir` therefore never touch an in-flight round; only a changed `pixi.lock`
+does, and every builder then refuses (PinMoved).
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ quote = shlex.quote
 
 
 class PinMoved(RuntimeError):
-    """The harness checkout moved since the round was admitted. Not retryable: the round goes to needs-human."""
+    """The harness environment changed since the round was admitted. Not retryable: the round goes to needs-human."""
 
 
 class HostsNotAllowed(RuntimeError):
@@ -129,22 +134,62 @@ def snapshot(cfg: Config, sha: str, tokens: Callable[[], str | None] = lambda: N
         return dest
 
 
+def _env_digest(cfg: Config) -> str:
+    return hashlib.sha256((cfg.harness.dir / "harness" / "pixi.lock").read_bytes()).hexdigest()
+
+
 def harness_pin(cfg: Config) -> tuple[str, str]:
     """(commit, env digest) of the `harness.dir` checkout: HEAD and the sha256 of harness/pixi.lock."""
-    harness_dir = cfg.harness.dir
-    return (
-        git("rev-parse", "HEAD", cwd=harness_dir),
-        hashlib.sha256((harness_dir / "harness" / "pixi.lock").read_bytes()).hexdigest(),
-    )
+    return git("rev-parse", "HEAD", cwd=cfg.harness.dir), _env_digest(cfg)
+
+
+def _harness_snapshot_dir(cfg: Config, commit: str) -> Path:
+    return cfg.paths.work_root / "_harness" / commit
+
+
+def harness_snapshot(cfg: Config, commit: str) -> Path:
+    """`harness/src` of the `harness.dir` checkout at `commit`, extracted once and read-only, at
+    `work_root/_harness/<commit>/src`. Taken at admission, so later commits in the checkout don't reach the round."""
+    if not SHA_RE.fullmatch(commit):
+        raise ValueError(f"not a full commit SHA: {commit!r}")
+    dest = _harness_snapshot_dir(cfg, commit)
+    if dest.exists():
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest.with_name(f".{commit}.lock"), "w") as lock:  # one extract per commit at a time
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if dest.exists():
+            return dest
+        tmp = dest.with_name(f".{commit}.tmp")
+        if tmp.exists():  # left by a crash; read-only, like a finished one
+            subprocess.run(["chmod", "-R", "u+w", str(tmp)], check=True)
+            shutil.rmtree(tmp)
+        tmp.mkdir()
+        archive = subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(cfg.harness.dir), "archive", commit, "harness/src"],
+            capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        if archive.returncode:
+            raise GitError(
+                f"git archive {commit} harness/src in {cfg.harness.dir}: "
+                f"{archive.stderr.decode(errors='replace').strip()[-2000:]}"
+            )
+        subprocess.run(["tar", "-x", "--strip-components=1", "-C", str(tmp)], input=archive.stdout, check=True)
+        subprocess.run(["chmod", "-R", "a-w", str(tmp)], check=True)
+        os.rename(tmp, dest)
+        return dest
 
 
 def assert_pin(cfg: Config, pins: Pins) -> None:
-    """Raise PinMoved unless the harness checkout is still exactly what the round was admitted with."""
-    current = harness_pin(cfg)
-    if current != (pins.harness_commit, pins.env_digest):
+    """Raise PinMoved unless the harness environment is still the one the round was admitted with.
+
+    Only the `pixi.lock` digest is compared: the harness commit is served by its snapshot, so HEAD may move."""
+    current = _env_digest(cfg)
+    if current != pins.env_digest:
         raise PinMoved(
-            f"harness checkout {cfg.harness.dir} moved since admission: commit {pins.harness_commit[:12]} "
-            f"-> {current[0][:12]}, pixi.lock {pins.env_digest[:12]} -> {current[1][:12]}"
+            f"harness environment in {cfg.harness.dir} changed since admission: pixi.lock "
+            f"{pins.env_digest[:12]} -> {current[:12]}"
         )
 
 
@@ -161,14 +206,21 @@ def match_prompt(pins: Pins) -> str:
     )
 
 
-def harness_bin(cfg: Config) -> Path:
-    """The harness environment's entry point. Run directly: `pixi run` wants the install lock on the prefix, and
+def harness_env(cfg: Config) -> Path:
+    """The harness environment's python. Run directly: `pixi run` wants the install lock on the prefix, and
     `harness.dir` is mounted read-only."""
-    return cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "harness"
+    return cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "python"
 
 
-def _harness(cfg: Config) -> str:
-    return quote(str(harness_bin(cfg)))
+def _harness(cfg: Config, pins: Pins) -> str:
+    """The `harness` command for a round: the pinned environment's python running the snapshot's source.
+
+    PYTHONPATH precedes the env's editable install of the checkout's own source; -P keeps the job's cwd off
+    sys.path."""
+    src = _harness_snapshot_dir(cfg, pins.harness_commit) / "src"
+    return f"env PYTHONPATH={quote(str(src))} {quote(str(harness_env(cfg)))} -P -c " + quote(
+        "import sys; from mia_harness.cli import main; sys.exit(main())"
+    )
 
 
 def _binding(workspace: Path, rel: str) -> tuple[str, list[str]]:
@@ -200,7 +252,8 @@ def _spec(
 
     `record` enables the per-dataset download cache (read-write when `writable`); `ro_inputs` are extra
     read-only mounts (None entries are skipped)."""
-    assert_pin(cfg, pins)  # the admitted harness, or no job
+    assert_pin(cfg, pins)  # the admitted environment, or no job
+    harness_src = harness_snapshot(cfg, pins.harness_commit)  # the admitted source (made at admission; idempotent)
     env = {
         "MIA_HARNESS_JOB_BYTES": str(int(cfg.limits.job_bytes)),
         "MIA_HARNESS_COMMIT": pins.harness_commit,
@@ -209,7 +262,7 @@ def _spec(
         "MIA_HARNESS_CACHE_DIR": "",
         "MIA_HARNESS_CACHE_WRITABLE": "0",
     }
-    ro_mounts = [str(cfg.harness.dir), *(str(path) for path in ro_inputs if path)]
+    ro_mounts = [str(cfg.harness.dir), str(harness_src), *(str(path) for path in ro_inputs if path)]
     rw_mounts: list[str] = []
     if record is not None:  # the dataset cache
         if not (isinstance(record, str) and ID_RE.fullmatch(record)):
@@ -218,15 +271,16 @@ def _spec(
         cache.mkdir(parents=True, exist_ok=True)  # a read-only mount must exist
         (rw_mounts if writable else ro_mounts).append(str(cache))
         env.update(MIA_HARNESS_CACHE_DIR=str(cache), MIA_HARNESS_CACHE_WRITABLE="1" if writable else "0")
-    path = (
-        f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
-        if cfg.agent.path_prepend
-        else ""
+    # every job calls `harness`: a wrapper in the workspace, first on PATH, runs the round's pinned harness
+    path_entries = ":".join([*(quote(entry) for entry in cfg.agent.path_prepend), '"$PATH"'])
+    prelude = (
+        f"mkdir -p bin && printf '#!/bin/sh\\nexec %s \"$@\"\\n' {quote(_harness(cfg, pins))} > bin/harness && "
+        f'chmod +x bin/harness\nexport PATH="$PWD/bin":{path_entries}\n'
     )
     # ponytail: plain jobs take JobSpec's 1 cpu / 4000 MB; add limits.job_cpus / job_mem_mb if crops need more.
     return JobSpec(
         name=f"{cfg.deployment}-{kind}",
-        command=f'set -u\n{path}{body}\nrc=$?\necho "$rc" > exit_code\nexit "$rc"\n',
+        command=f'set -u\n{prelude}{body}\nrc=$?\necho "$rc" > exit_code\nexit "$rc"\n',
         workspace=str(workspace),
         walltime_min=cfg.limits.job_walltime_min,
         allow_hosts=allow_hosts,
@@ -246,9 +300,8 @@ def match_job(cfg: Config, workspace: Path, pins: Pins, record_path: str = "reco
     record = yaml.safe_load(Path(workspace, record_path).read_text()) or {}
     snapshot_dir = _snapshot_dir(cfg, pins.snippets_commit)
     body = (
-        f"ln -sfn {quote(str(snapshot_dir))} snapshot && mkdir -p bin && \\\n"
-        f"printf '#!/bin/sh\\nexec %s \"$@\"\\n' {quote(_harness(cfg))} > bin/harness && chmod +x bin/harness && \\\n"
-        f'PATH="$PWD/bin:$PATH" claude -p "$(cat prompt.md)" --model {quote(cfg.agent.model)} '
+        f"ln -sfn {quote(str(snapshot_dir))} snapshot && \\\n"
+        f'claude -p "$(cat prompt.md)" --model {quote(cfg.agent.model)} '
         f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
         f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err'
     )
@@ -271,7 +324,7 @@ def smoke_job(cfg: Config, workspace: Path, pins: Pins, binding_path: str, snaps
     """The worker's own smoke of a binding, so the agent's claim is checked. Reviewed code: cache read-write."""
     record, urls = _binding(workspace, binding_path)
     body = (
-        f"{_harness(cfg)} smoke {quote(binding_path)} --snippets {quote(str(snapshot))} "
+        f"harness smoke {quote(binding_path)} --snippets {quote(str(snapshot))} "
         f"--record {quote(record_path)} --out smoke.json"
     )
     return _spec(cfg, "smoke", workspace, pins, body, hosts(urls, cfg), [snapshot], record=record, writable=True)
@@ -297,7 +350,7 @@ def crop_job(
     read-only and keeps a private cache. `existing` is a published manifest.json to avoid duplicating."""
     record, urls = _binding(workspace, binding_path)
     body = (
-        f"{_harness(cfg)} crop {quote(binding_path)} --snippets {quote(str(snapshot))} --record {quote(record_path)} "
+        f"harness crop {quote(binding_path)} --snippets {quote(str(snapshot))} --record {quote(record_path)} "
         f"--n {int(n_crops)} --seed {quote(seed)} --round {quote(round_id)} --batch {int(batch)} --out crops"
         + (f" --existing {quote(str(existing))}" if existing else "")
     )
@@ -319,10 +372,10 @@ def verify_job(
 ) -> JobSpec:
     """`harness verify` then `harness preview` on a crop job's output, mounted read-only. Loads no snippet
     code: no network, no dataset cache."""
-    harness, crops = _harness(cfg), quote(str(crops_dir))
+    crops = quote(str(crops_dir))
     body = (
-        f"{harness} verify {crops} --binding {quote(binding_path)}"
+        f"harness verify {crops} --binding {quote(binding_path)}"
         + (f" --existing {quote(str(existing))}" if existing else "")
-        + f" --out verify.json; v=$?\n{harness} preview {crops} --out preview && (exit $v)"
+        + f" --out verify.json; v=$?\nharness preview {crops} --out preview && (exit $v)"
     )  # overlays even if a crop fails
     return _spec(cfg, "verify", workspace, pins, body, [], [crops_dir, _parent(existing)])

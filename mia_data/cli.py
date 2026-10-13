@@ -68,7 +68,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     from autodev.jobs import csub_client
 
     from .binding import missing_hosts
-    from .jobspec import HARNESS_ENV, harness_bin, harness_pin
+    from .jobspec import HARNESS_ENV, harness_env, harness_pin
 
     rows: list[tuple[str, bool, str]] = []
 
@@ -156,9 +156,9 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
 
     async def pin():
         commit, digest = harness_pin(cfg)
-        if not (binary := harness_bin(cfg)).is_file() or not os.access(binary, os.X_OK):
+        if not (python := harness_env(cfg)).is_file() or not os.access(python, os.X_OK):
             raise RuntimeError(
-                f"{binary} is missing or not executable: run `cd harness && pixi install` in harness.dir"
+                f"{python} is missing or not executable: run `cd harness && pixi install` in harness.dir"
             )
         return f"{commit[:12]} env {digest[:12]}"
 

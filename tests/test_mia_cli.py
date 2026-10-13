@@ -89,7 +89,7 @@ def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",), qu
 
 
 def _harness_bin(cfg, mode=0o755):
-    b = cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "harness"
+    b = cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "python"
     b.parent.mkdir(parents=True)
     b.write_text("#!/bin/sh\n")
     b.chmod(mode)

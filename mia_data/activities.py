@@ -42,6 +42,7 @@ from .jobspec import (
     check_hosts_allowed,
     crop_job,
     harness_pin,
+    harness_snapshot,
     match_job,
     match_prompt,
     smoke_job,
@@ -340,6 +341,7 @@ class Activities:
             await self.gh_snippets.get_ref_sha("main"),
             *await asyncio.to_thread(harness_pin, self.cfg),
         )
+        await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now
         write_atomic(round_dir / "record.yaml", yaml.safe_dump(record, sort_keys=False))
         write_atomic(round_dir / "downloads.json", json.dumps(entry, indent=1))
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted

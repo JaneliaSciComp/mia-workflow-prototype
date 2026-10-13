@@ -318,11 +318,19 @@ The harness is the executable half of the spec. It is a pip-installable package 
 environment. Humans own it. Agents use it and never modify it.
 
 - **Pinning.** `harness.dir` is a configured checkout of `mia-snippets` with `pixi install` done in `harness/`.
-  Jobs run `<harness.dir>/harness/.pixi/envs/default/bin/harness` directly, not `pixi run`, which wants the
-  install lock on a prefix that jobs mount read-only. A round
-  records that checkout's `git rev-parse HEAD` and the sha256 of `harness/pixi.lock` when it is admitted. A
-  job is refused, sending the round to `needs-human`, if the checkout has moved since. `ponytail:` one
-  environment per harness commit, if harness updates ever need to overlap in-flight rounds.
+  A round records that checkout's `git rev-parse HEAD` and the sha256 of `harness/pixi.lock` when it is
+  admitted, and **carries its own harness from then on**:
+  - **Source:** admission extracts `harness/src` at the admitted commit to `work_root/_harness/<commit>/src`
+    (read-only, once per commit, like a snippet snapshot). Every job runs that copy, so commits in
+    `harness.dir` never reach an in-flight round; a new round picks up the new HEAD.
+  - **Environment:** the checkout's `harness/.pixi/envs/default`, pinned by the `pixi.lock` digest. A job is
+    refused, sending the round to `needs-human`, only if `pixi.lock` changed since admission. Environment
+    changes are rare and human (a new allowlist dependency), so they wait for in-flight rounds.
+    `ponytail:` one environment per lock digest, if that wait ever hurts.
+  - Jobs call a `bin/harness` wrapper the job spec writes into the workspace:
+    `PYTHONPATH=<snapshot>/src <env>/bin/python -P -c 'from mia_harness.cli import main; …'`, not `pixi run`,
+    which wants the install lock on a prefix that jobs mount read-only. `PYTHONPATH` precedes the environment's
+    editable install of the checkout's own source.
 - **Harness and snippets are pinned separately.** A snippet snapshot (§7.2) contains only `snippets/`,
   `WITHDRAWN.yaml` and `SPEC.md` from its SHA, never `harness/`. The harness never imports anything from a
   snapshot except `snippets/<name>/snippet.py`, through its loader. So a snapshot whose own `harness/`
