@@ -10,7 +10,6 @@ from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import Activities, neutralize
-from autodev.decide import WAIT, decide
 from autodev.github import GitHub
 from autodev.gitops import GitError, Mirror
 from autodev.models import FailureInput, Feedback, ObserveInput, PublishInput, RoundInput, StageInput
@@ -122,11 +121,10 @@ async def _observe_required(tmp_path, gh, runs, statuses):
 
 @respx.mock
 async def test_required_check_missing_means_pending(tmp_path, gh):
-    snap = await _observe_required(
-        tmp_path, gh, [{"name": "check", "status": "completed", "conclusion": "success"}], []
-    )
-    assert snap.approved and snap.checks == "pending"
-    assert decide(snap, [], 0, 3)[0] == WAIT
+    """Approved but waiting on a check is nothing to act on: the activity fails so its retry becomes the next poll."""
+    with pytest.raises(ApplicationError, match="nothing to do") as info:
+        await _observe_required(tmp_path, gh, [{"name": "check", "status": "completed", "conclusion": "success"}], [])
+    assert not info.value.non_retryable
 
 
 @respx.mock
@@ -270,7 +268,12 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
         )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
-    assert (await acts(tmp_path, gh).observe_pr(ObserveInput(5))).approved is want
+    observe = acts(tmp_path, gh).observe_pr(ObserveInput(5))
+    if want:
+        assert (await observe).approved
+    else:
+        with pytest.raises(ApplicationError, match="nothing to do"):
+            await observe
 
 
 async def _prepared(tmp_path, gh, issue=7):
@@ -462,8 +465,8 @@ async def test_observe_unchanged_pr_sends_etags_and_reuses_cache(tmp_path, gh):
         for path, body in bodies.items()
     }
     a = acts(tmp_path, gh)
-    first = await a.observe_pr(ObserveInput(5))
-    assert await a.observe_pr(ObserveInput(5)) == first
+    first = await a._snapshot(5)
+    assert await a._snapshot(5) == first
     for path, route in routes.items():
         assert route.call_count == 2 and "if-none-match" not in route.calls[0].request.headers
         assert route.calls[1].request.headers["if-none-match"] == f'"{path}"'

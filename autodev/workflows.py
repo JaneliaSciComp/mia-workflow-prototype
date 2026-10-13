@@ -15,7 +15,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
-    from .decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, decide
+    from .decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, WAIT, decide, escalation
     from .models import (
         KEY_RE,
         AwaitInput,
@@ -78,7 +78,7 @@ class IssueWorkflow:
         name: str,
         arg: Any,
         seconds: int = 60,
-        budget: timedelta = timedelta(hours=6),
+        budget: timedelta | None = timedelta(hours=6),
         result_type: type | None = None,
     ) -> Any:
         """Run an activity with a per-attempt timeout and an overall retry budget.
@@ -170,14 +170,19 @@ class IssueWorkflow:
         return result
 
     async def _watch_pr(self) -> str:
-        """Poll the PR until it is merged or closed, running revision rounds and escalations as needed.
+        """Watch the PR until it is merged or closed, running revision rounds and escalations as needed.
 
-        Rolls the history over with continue_as_new when Temporal suggests it or the poll cap is hit."""
+        The wait between polls is observe_pr's retry interval (the activity fails while there is nothing to
+        do), so a quiet PR is one activity in the history instead of a poll/timer staircase. The history
+        rolls over with continue_as_new when Temporal suggests it or the poll cap is hit."""
         state = self.state
+        # ponytail: by_retry is False only when replaying runs started before this change; drop the old
+        # branches (workflow.deprecate_patch) once those have all rolled over.
+        by_retry = workflow.patched("observe-by-retry")
         for _ in range(MAX_POLLS_PER_EXECUTION):
             self.phase = "REVIEW"
-            snapshot = await self._act("observe_pr", ObserveInput(state.pr), result_type=PrSnapshot)
-            action, detail = decide(snapshot, state.handled, state.revisions, state.max_revisions)
+            snapshot = await self._observe(by_retry)
+            action, detail = decide(snapshot, state.handled, state.revisions, state.max_revisions, state.escalated)
             if action == DONE:
                 await self._act("set_stage", StageInput(state.issue, "done"))
                 return "merged"
@@ -202,11 +207,28 @@ class IssueWorkflow:
                 await self._act("set_stage", StageInput(state.issue, "review"))
                 continue
             elif action == ESCALATE:
-                await self._comment(state.pr, f"Needs a human: {detail}.", f"escalate {detail} {snapshot.head_sha}")
-            await workflow.sleep(timedelta(minutes=state.poll_minutes))
+                if by_retry:
+                    state.escalated = escalation(detail, snapshot)
+                await self._comment(state.pr, f"Needs a human: {detail}.", f"escalate {escalation(detail, snapshot)}")
+            if action in (MERGE, WAIT) or not by_retry:  # a failed merge (or an idle snapshot): look again later
+                await workflow.sleep(timedelta(minutes=state.poll_minutes))
             if workflow.info().is_continue_as_new_suggested():
                 break
         workflow.continue_as_new(state)
+
+    async def _observe(self, by_retry: bool) -> PrSnapshot:
+        state = self.state
+        inp = ObserveInput(state.pr, state.handled, state.revisions, state.max_revisions, state.escalated)
+        if not by_retry:  # pre-change runs: same commands as before, but the "nothing to do" retries never expire
+            return await self._act("observe_pr", inp, budget=None, result_type=PrSnapshot)
+        poll = timedelta(minutes=state.poll_minutes)
+        return await workflow.execute_activity(
+            "observe_pr",
+            inp,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(initial_interval=poll, backoff_coefficient=1.0),  # retries forever
+            result_type=PrSnapshot,
+        )
 
 
 @workflow.defn

@@ -50,6 +50,7 @@ class IssueInput:
     pr: int | None = None
     revisions: int = 0
     handled: list[str] = field(default_factory=list)  # feedback ids already addressed by a round
+    escalated: str | None = None  # decide.escalation() of the escalation already raised with a human
 
 
 @dataclass
@@ -128,7 +129,14 @@ class PrRef:
 
 @dataclass
 class ObserveInput:
+    """What to observe, plus the workflow's decision context: the activity fails (retryably) while the
+    snapshot would decide WAIT, so one activity with a fixed-interval retry policy is the poll loop."""
+
     pr: int
+    handled: list[str] = field(default_factory=list)
+    revisions: int = 0
+    max_revisions: int = 3
+    escalated: str | None = None
 
 
 @dataclass

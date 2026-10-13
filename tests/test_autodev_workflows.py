@@ -14,6 +14,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from autodev import workflows
+from autodev.decide import WAIT, decide
 from autodev.models import (
     AwaitInput,
     CommentInput,
@@ -107,7 +108,10 @@ class Mocks:
             if self.observe_failures:
                 self.observe_failures -= 1
                 raise ApplicationError("github 502")
-            return self.snaps.pop(0) if len(self.snaps) > 1 else self.snaps[0]
+            s = self.snaps.pop(0) if len(self.snaps) > 1 else self.snaps[0]
+            if decide(s, a.handled, a.revisions, a.max_revisions, a.escalated)[0] == WAIT:  # as the real one does
+                raise ApplicationError("nothing to do yet")
+            return s
 
         @activity.defn(name="merge_pr")
         async def merge(a: MergeInput) -> MergeResult:
@@ -212,6 +216,15 @@ async def test_revision_limit_escalates_but_approval_still_merges(env):
     assert any("revision limit" in c.body for c in m.of("comment"))
 
 
+async def test_escalation_is_raised_once_then_waits(env):
+    f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
+    stuck = snap(feedback=[f1, f2])
+    m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(feedback=[f1, f2], approved=True)])
+    assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
+    assert m.names().count("observe") == 5
+    assert sum("revision limit" in c.body for c in m.of("comment")) == 1
+
+
 async def test_closed_pr_stops(env):
     m = Mocks([snap(state="closed")])
     assert await run(env, m) == "closed"
@@ -225,7 +238,7 @@ async def test_merge_failure_comments_then_external_merge_finishes(env):
 
 
 async def test_continue_as_new_keeps_handled_feedback(env, monkeypatch):
-    monkeypatch.setattr(workflows, "MAX_POLLS_PER_EXECUTION", 2)
+    monkeypatch.setattr(workflows, "MAX_POLLS_PER_EXECUTION", 1)
     fb = Feedback("review-1", "x")
     m = Mocks([snap(feedback=[fb])] + [snap(sha="h2", feedback=[fb])] * 3 + [snap(sha="h2", approved=True)])
     assert await run(env, m, runner=UnsandboxedWorkflowRunner()) == "merged"

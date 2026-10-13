@@ -21,6 +21,7 @@ from temporalio.exceptions import ApplicationError
 
 from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
+from .decide import WAIT, decide
 from .github import GitHubError
 from .gitops import RejectedBundleError
 from .models import (
@@ -290,14 +291,23 @@ class Activities:
     @activity.defn(name="observe_pr")
     @permanent_errors
     async def observe_pr(self, request: ObserveInput) -> PrSnapshot:
-        """Read the PR's state, approvals, pending change requests and CI status into one snapshot."""
-        pr = await self.gh.get_pr(request.pr)
+        """Read the PR's state, approvals, pending change requests and CI status into one snapshot.
+
+        Raises a retryable error while there is nothing for the workflow to act on, so Temporal's retry
+        policy (not a workflow timer) spaces the polls and the history stays flat."""
+        snapshot = await self._snapshot(request.pr)
+        if decide(snapshot, request.handled, request.revisions, request.max_revisions, request.escalated)[0] == WAIT:
+            raise ApplicationError(f"PR #{request.pr}: nothing to do yet")
+        return snapshot
+
+    async def _snapshot(self, number: int) -> PrSnapshot:
+        pr = await self.gh.get_pr(number)
         head_sha = pr["head"]["sha"]
         if pr.get("merged") or pr["state"] != "open":
-            return PrSnapshot(request.pr, "merged" if pr.get("merged") else pr["state"], head_sha, False, "none")
-        reviews = await self.gh.pr_reviews(request.pr)
-        inline_comments = await self.gh.pr_review_comments(request.pr)
-        comments = await self.gh.issue_comments(request.pr)
+            return PrSnapshot(number, "merged" if pr.get("merged") else pr["state"], head_sha, False, "none")
+        reviews = await self.gh.pr_reviews(number)
+        inline_comments = await self.gh.pr_review_comments(number)
+        comments = await self.gh.issue_comments(number)
         logins = {(item.get("user") or {}).get("login") for item in [*reviews, *comments]} - {None}
         # ponytail: one permission lookup per participant per poll; cache if the rate limit ever matters.
         permissions = {login: await self.gh.permission(login) for login in logins}
@@ -322,7 +332,7 @@ class Activities:
             latest_round_at(comments, marker_prefix, self.bot),
         )
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
-        return PrSnapshot(request.pr, "open", head_sha, is_approved, checks, pending)
+        return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
 
     @activity.defn(name="merge_pr")
     @permanent_errors
