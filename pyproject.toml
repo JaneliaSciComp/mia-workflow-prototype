@@ -63,6 +63,7 @@ md = "mia-data"
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["notes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
