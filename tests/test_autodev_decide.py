@@ -1,4 +1,4 @@
-from autodev.decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, WAIT, decide
+from autodev.decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, WAIT, decide, escalation
 from autodev.models import Feedback, PrSnapshot
 
 F1, F2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
@@ -35,3 +35,11 @@ def test_approved_but_pending_waits_and_failing_escalates():
 def test_revision_limit_escalates_unless_approved():
     assert decide(snap(feedback=[F1]), [], 3, 3) == (ESCALATE, "revision limit (3) reached")
     assert decide(snap(approved=True, feedback=[F1]), [], 3, 3) == (MERGE, None)
+
+
+def test_raised_escalation_waits_until_the_head_changes():
+    reason = "revision limit (3) reached"
+    raised = escalation(reason, snap())
+    assert decide(snap(feedback=[F1]), [], 3, 3, raised) == (WAIT, None)
+    assert decide(snap(approved=True, checks="failure"), [], 3, 3, raised)[0] == ESCALATE  # a different reason
+    assert decide(PrSnapshot(5, "open", "h2", False, "none", [F1]), [], 3, 3, raised) == (ESCALATE, reason)
