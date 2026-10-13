@@ -36,9 +36,19 @@ if TYPE_CHECKING:
 log = logging.getLogger("mia_data")
 
 # the catalog's data hosts the broker policy must allow
-DATA_HOSTS = ["zenodo.org", "ftp.ebi.ac.uk", "www.ebi.ac.uk", "data.broadinstitute.org",
-              "files.cryoetdataportal.cziscience.com", "huggingface.co", "*.huggingface.co", "ndownloader.figshare.com",
-              "figshare.com", "allencell.s3.amazonaws.com", "s3.amazonaws.com"]
+DATA_HOSTS = [
+    "zenodo.org",
+    "ftp.ebi.ac.uk",
+    "www.ebi.ac.uk",
+    "data.broadinstitute.org",
+    "files.cryoetdataportal.cziscience.com",
+    "huggingface.co",
+    "*.huggingface.co",
+    "ndownloader.figshare.com",
+    "figshare.com",
+    "allencell.s3.amazonaws.com",
+    "s3.amazonaws.com",
+]
 
 
 def _lsf_queues() -> set[str] | None:
@@ -76,6 +86,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             finally:
                 await gh.aclose()
             return f"{info['full_name']} as {await bot_login(cfg)}"
+
         return check
 
     async def temporal():
@@ -89,29 +100,49 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         """Everything in the broker policy that would stop mia-data's jobs: hosts, the agent, env vars, mounts, queues."""
         probe = await asyncio.to_thread(csub_client(cfg.deployment).probe)
         network = cfg.network
-        want = [*network.package_hosts, *network.redirect_hosts,
-                *(target for targets in network.redirect_hosts.values() for target in targets), *DATA_HOSTS]
+        want = [
+            *network.package_hosts,
+            *network.redirect_hosts,
+            *(target for targets in network.redirect_hosts.values() for target in targets),
+            *DATA_HOSTS,
+        ]
         bad = [f"host not allowed: {host}" for host in missing_hosts(want, list(probe.allowed_hosts))]
         if "claude" not in probe.agents:
-            bad.append('agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
-                       '"claude.ai", "platform.claude.com"])')
+            bad.append(
+                'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
+                '"claude.ai", "platform.claude.com"])'
+            )
         if missing := [var for var in HARNESS_ENV if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
-            bad.append(f"env not allowed: {', '.join(missing)} (broker.toml [broker]: add \"MIA_HARNESS_*\" to env_allow)")
+            bad.append(
+                f'env not allowed: {", ".join(missing)} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
+            )
         mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.paths.storage_root]  # every job mounts under these
-        if missing := [str(directory) for directory in mounted
-                       if not any(directory.is_relative_to(root) for root in probe.allowed_roots)]:
-            bad.append(f"outside allowed_roots: {', '.join(missing)} (broker.toml [broker]: add "
-                       f"{', '.join(json.dumps(directory) for directory in missing)} to allowed_roots)")
+        if missing := [
+            str(directory)
+            for directory in mounted
+            if not any(directory.is_relative_to(root) for root in probe.allowed_roots)
+        ]:
+            bad.append(
+                f"outside allowed_roots: {', '.join(missing)} (broker.toml [broker]: add "
+                f"{', '.join(json.dumps(directory) for directory in missing)} to allowed_roots)"
+            )
         home = Path.home().resolve()
-        if inside := [str(directory) for directory in mounted
-                      if directory.is_relative_to(home) or home.is_relative_to(directory)]:
-            bad.append(f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
-                       "(move it out of $HOME)")
+        if inside := [
+            str(directory) for directory in mounted if directory.is_relative_to(home) or home.is_relative_to(directory)
+        ]:
+            bad.append(
+                f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
+                "(move it out of $HOME)"
+            )
         # a policy queue table named after a queue LSF does not have fails every submit with "No such queue"
         if (lsf_queues := await asyncio.to_thread(_lsf_queues)) is not None:
-            if missing := [name for name, queue in probe.queues.items() if not queue.get("gpu") and name not in lsf_queues]:
-                bad.append(f"not an LSF queue: {', '.join(missing)} (broker.toml: name the CPU [queues.<name>] tables and "
-                           f"[limits] cpu_short_queue/cpu_default_queue after real queues from `bqueues`, e.g. short, local)")
+            if missing := [
+                name for name, queue in probe.queues.items() if not queue.get("gpu") and name not in lsf_queues
+            ]:
+                bad.append(
+                    f"not an LSF queue: {', '.join(missing)} (broker.toml: name the CPU [queues.<name>] tables and "
+                    f"[limits] cpu_short_queue/cpu_default_queue after real queues from `bqueues`, e.g. short, local)"
+                )
         if bad:
             raise RuntimeError("; ".join(bad))
         return f"broker user {probe.user}, {len(want)} hosts ok"
@@ -126,7 +157,9 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     async def pin():
         commit, digest = harness_pin(cfg)
         if not (binary := harness_bin(cfg)).is_file() or not os.access(binary, os.X_OK):
-            raise RuntimeError(f"{binary} is missing or not executable: run `cd harness && pixi install` in harness.dir")
+            raise RuntimeError(
+                f"{binary} is missing or not executable: run `cd harness && pixi install` in harness.dir"
+            )
         return f"{commit[:12]} env {digest[:12]}"
 
     for kind in ("data", "snippets", "catalog"):
@@ -207,15 +240,21 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
     round_id = f"i0-e{int(pr)}-{head[:7]}"
     round_dir = activities._round_dir(round_id)
     binding = yaml.safe_load(binding_file.read_text())
-    arrays = [array for key in ("raw", "labels") if isinstance(binding, dict) and isinstance(binding.get(key), list)
-              for array in binding[key]]
+    arrays = [
+        array
+        for key in ("raw", "labels")
+        if isinstance(binding, dict) and isinstance(binding.get(key), list)
+        for array in binding[key]
+    ]
     for array in arrays:
         if isinstance(array, dict) and isinstance(array.get("urls"), list):  # check_binding's s3:// -> https rewrite
             array["urls"] = [https(url) if isinstance(url, str) else url for url in array["urls"]]
     if isinstance(binding, dict):
         binding["snippets_commit"] = head  # the head under test, whatever the file says
     text = yaml.safe_dump(binding, sort_keys=False)
-    if (round_dir / "binding.yaml").is_file() and (round_dir / "binding.yaml").read_text() != text:  # its jobs would be reused
+    if (round_dir / "binding.yaml").is_file() and (
+        round_dir / "binding.yaml"
+    ).read_text() != text:  # its jobs would be reused
         print(f"{head} was already tested with another binding ({round_dir}); push a new head to test this one")
         return 1  # the head's status stays as it is
     await activities.set_crop_status(head, "pending", None, "crop test running")
@@ -224,8 +263,10 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
         note = ""
         if not SHA_RE.fullmatch(str(record_commit)):
             record_commit = await gh_catalog.get_ref_sha("main")
-            note = (f" `{record_id}` is not in the downloads state: its record was read at the catalog's main, "
-                    f"`{record_commit}`.")
+            note = (
+                f" `{record_id}` is not in the downloads state: its record was read at the catalog's main, "
+                f"`{record_commit}`."
+            )
         if (path := (await catalog.record_paths(gh_catalog)).get(record_id)) is None:
             raise ValueError(f"{record_id}: no record on the catalog's main")
         record = await catalog.record(gh_catalog, path, record_commit)
@@ -237,17 +278,32 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
         write_atomic(round_dir / "record.yaml", yaml.safe_dump(record, sort_keys=False))
         write_atomic(round_dir / "binding.yaml", text)
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))
-        verify, gallery, jobs = await run_crop_test(activities, issue=0, round_id=round_id, pins=pins, sha=head,
-                                                    trusted=False, binding_path=str(round_dir / "binding.yaml"),
-                                                    seed=f"test-pr-{pr}-{head}")
+        verify, gallery, jobs = await run_crop_test(
+            activities,
+            issue=0,
+            round_id=round_id,
+            pins=pins,
+            sha=head,
+            trusted=False,
+            binding_path=str(round_dir / "binding.yaml"),
+            seed=f"test-pr-{pr}-{head}",
+        )
         passed, failed_jobs = judge(verify, jobs)
         summary = f"{verify.ok_count} of {verify.n} crops verified"
-        body = "\n".join([f"Crop test of `{head}` with `{record_id}`: **{'passed' if passed else 'failed'}**, {summary}; "
-                          f"the crop job fetched {verify.bytes_fetched} bytes.{note}",
-                          *(f"- {line}" for line in failed_jobs + verify.errors), "", gallery.table if gallery else ""])
+        body = "\n".join(
+            [
+                f"Crop test of `{head}` with `{record_id}`: **{'passed' if passed else 'failed'}**, {summary}; "
+                f"the crop job fetched {verify.bytes_fetched} bytes.{note}",
+                *(f"- {line}" for line in failed_jobs + verify.errors),
+                "",
+                gallery.table if gallery else "",
+            ]
+        )
         marker = cfg.marker(f"test-pr {head}")
         body = f"{activities._clean(body)}\n\n{marker}"
-        if posted := await activities._bot_comment(gh_snippets, pr, marker):  # a rerun: the comment shows the latest result
+        if posted := await activities._bot_comment(
+            gh_snippets, pr, marker
+        ):  # a rerun: the comment shows the latest result
             if posted.get("body") != body:
                 await gh_snippets.edit_comment(posted["id"], body)
         else:
@@ -266,7 +322,9 @@ async def run_test_pr(activities: Activities, pr: int, binding_file: Path, recor
 def _github_clients(cfg: Config) -> list[GitHub]:
     """Clients for the data, snippets and catalog repos, in the order Activities takes them."""
     tokens, github_cfg = token_fn(cfg), cfg.github
-    return [_gh(cfg, repo, tokens) for repo in (github_cfg.data_repo, github_cfg.snippets_repo, github_cfg.catalog_repo)]
+    return [
+        _gh(cfg, repo, tokens) for repo in (github_cfg.data_repo, github_cfg.snippets_repo, github_cfg.catalog_repo)
+    ]
 
 
 async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
@@ -276,8 +334,9 @@ async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
 
     clients = _github_clients(cfg)
     try:
-        activities = Activities(cfg, *clients, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"),
-                                await bot_login(cfg))
+        activities = Activities(
+            cfg, *clients, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), await bot_login(cfg)
+        )
         return await run_test_pr(activities, args.pr, Path(args.binding), args.record)
     finally:
         for gh in clients:
@@ -298,14 +357,26 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     bot = await bot_login(cfg)
     activities = Activities(cfg, *clients, CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot, client)
-    main_worker = Worker(client, task_queue=cfg.task_queue, workflows=[MiaDataDataset, MiaDataPoll],
-                         activities=activities.all(), max_concurrent_activities=8)
-    await_worker = Worker(client, task_queue=cfg.await_queue, activities=[activities.await_job],
-                          max_concurrent_activities=20)
+    main_worker = Worker(
+        client,
+        task_queue=cfg.task_queue,
+        workflows=[MiaDataDataset, MiaDataPoll],
+        activities=activities.all(),
+        max_concurrent_activities=8,
+    )
+    await_worker = Worker(
+        client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
+    )
     task = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-    log.info("worker up as %s: %s ns=%s queues %s, %s", bot, cfg.temporal.address, cfg.temporal.namespace,
-             cfg.task_queue, cfg.await_queue)
+    log.info(
+        "worker up as %s: %s ns=%s queues %s, %s",
+        bot,
+        cfg.temporal.address,
+        cfg.temporal.namespace,
+        cfg.task_queue,
+        cfg.await_queue,
+    )
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
@@ -337,7 +408,8 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     schedule = Schedule(
         action=ScheduleActionStartWorkflow(MiaDataPoll.run, id=f"{cfg.deployment}-poll-run", task_queue=cfg.task_queue),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
-        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
     try:
         await client.create_schedule(schedule_id, schedule)
         print(f"created schedule {schedule_id}")
@@ -353,8 +425,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="verify GitHub, Temporal, csub policy, directories and the harness pin")
     sub.add_parser("crops-by-snippet", help="list crops made with a snippet").add_argument("name")
-    sub.add_parser("reindex", help="rebuild manifest.json with current WITHDRAWN marks").add_argument("dataset", nargs="?")
-    sub.add_parser("seed", help="create one issue per downloaded dataset").add_argument("--dry-run", action="store_true")
+    sub.add_parser("reindex", help="rebuild manifest.json with current WITHDRAWN marks").add_argument(
+        "dataset", nargs="?"
+    )
+    sub.add_parser("seed", help="create one issue per downloaded dataset").add_argument(
+        "--dry-run", action="store_true"
+    )
     sub.add_parser("init-labels", help="create the stage, human and extra labels on the data repo")
     test_pr = sub.add_parser("test-pr", help="run the test crops on a snippets PR head and post mia-data/crops")
     test_pr.add_argument("pr", type=int)
@@ -374,12 +450,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if args.cmd in OPS:
-        args.config_path = Path(args.config or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml").resolve()
+        args.config_path = Path(
+            args.config or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml"
+        ).resolve()
         args.up_script, args.config_env = PROJECT_DIR / "scripts" / "mia-data-up.sh", "MIA_DATA_CONFIG"
         return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
-    commands = {"check": cmd_check, "crops-by-snippet": cmd_crops_by_snippet, "reindex": cmd_reindex, "seed": cmd_seed,
-                "init-labels": cmd_init_labels, "worker": cmd_worker, "test-pr": cmd_test_pr, "schedule": cmd_schedule}
+    commands = {
+        "check": cmd_check,
+        "crops-by-snippet": cmd_crops_by_snippet,
+        "reindex": cmd_reindex,
+        "seed": cmd_seed,
+        "init-labels": cmd_init_labels,
+        "worker": cmd_worker,
+        "test-pr": cmd_test_pr,
+        "schedule": cmd_schedule,
+    }
     return asyncio.run(commands[args.cmd](cfg, args))
 
 

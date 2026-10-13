@@ -20,8 +20,9 @@ def _storage(cfg, withdrawn=None):
             d = cfg.paths.storage_root / ds / cid
             d.mkdir(parents=True)
             (d / "crop.json").write_text(json.dumps({"crop_id": cid, "snippets": [{"name": snip, "commit": "1"}]}))
-        (cfg.paths.storage_root / ds / "manifest.json").write_text(json.dumps({"crops": [
-            {"crop_id": c, "snippets": [{"name": n}], "withdrawn": False} for c, n in crops]}))
+        (cfg.paths.storage_root / ds / "manifest.json").write_text(
+            json.dumps({"crops": [{"crop_id": c, "snippets": [{"name": n}], "withdrawn": False} for c, n in crops]})
+        )
 
 
 def test_crops_by_snippet(monkeypatch, tmp_path, capsys):
@@ -71,8 +72,14 @@ def _fake_env(monkeypatch, hosts, env_allow=("MIA_HARNESS_*",), roots=("/",), qu
     async def login(cfg):
         return "bot"
 
-    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, user="u", env_allow=list(env_allow),
-                            allowed_roots=list(roots), queues=queues or {"short": {}, "local": {}})
+    probe = SimpleNamespace(
+        agents=["claude"],
+        allowed_hosts=hosts,
+        user="u",
+        env_allow=list(env_allow),
+        allowed_roots=list(roots),
+        queues=queues or {"short": {}, "local": {}},
+    )
     monkeypatch.setattr(cli, "_lsf_queues", lambda: {"short", "local", "gpu_a100"})
     monkeypatch.setattr(cli, "GitHub", _GH)
     monkeypatch.setattr(cli, "_client", client)
@@ -103,8 +110,11 @@ def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys)
 
 
 def test_check_flags_unallowed_data_host(monkeypatch, tmp_path, capsys):
-    _fake_env(monkeypatch, [h for h in DATA_HOSTS if h != "zenodo.org"] + ["pypi.org", "files.pythonhosted.org",
-                                                                          "conda.anaconda.org", "repo.prefix.dev"])
+    _fake_env(
+        monkeypatch,
+        [h for h in DATA_HOSTS if h != "zenodo.org"]
+        + ["pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.prefix.dev"],
+    )
     monkeypatch.setattr(_GH, "request", lambda self, m, p: _ok(self))
     for d in ("state", "work", "storage"):
         (tmp_path / d).mkdir()
@@ -145,17 +155,24 @@ def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
 
 
 def test_check_flags_policy_queue_lsf_does_not_have(monkeypatch, tmp_path, capsys):
-    _fake_env(monkeypatch, ["*"], queues={"short": {}, "long": {}, "gpu": {"gpu": True}})  # gpu tables are not LSF names
+    _fake_env(
+        monkeypatch, ["*"], queues={"short": {}, "long": {}, "gpu": {"gpu": True}}
+    )  # gpu tables are not LSF names
     cfg = make_cfg(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
     row = next(line for line in capsys.readouterr().out.split("\n") if "csub broker" in line)
-    assert row.startswith("BAD") and "not an LSF queue: long" in row and "gpu" not in row.split("not an LSF queue:")[1].split("(")[0]
+    assert (
+        row.startswith("BAD")
+        and "not an LSF queue: long" in row
+        and "gpu" not in row.split("not an LSF queue:")[1].split("(")[0]
+    )
 
 
 def test_help_lists_devops_commands(capsys):
     import pytest
+
     with pytest.raises(SystemExit) as e:
         main(["--help"])
     assert e.value.code == 0
@@ -168,11 +185,13 @@ def test_devops_commands_drive_the_mia_session(monkeypatch, tmp_path, capsys):
     import subprocess
 
     from autodev import ops
+
     calls = []
 
     def run(argv, **kw):
         calls.append((argv, kw))
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
     monkeypatch.setattr(ops.subprocess, "run", run)
     cfg = make_cfg(tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda _: cfg)

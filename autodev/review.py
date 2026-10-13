@@ -35,12 +35,26 @@ def _is_ours(body: str | None, marker_prefix: str) -> bool:
 
 def latest_round_at(comments: list[dict], marker_prefix: str, bot: str) -> str | None:
     """When the current head was published: the time of the bot's latest round-summary comment."""
-    return max((comment.get("created_at") or "" for comment in comments
-                if _login(comment) == bot and f"{marker_prefix} round " in (comment.get("body") or "")), default=None)
+    return max(
+        (
+            comment.get("created_at") or ""
+            for comment in comments
+            if _login(comment) == bot and f"{marker_prefix} round " in (comment.get("body") or "")
+        ),
+        default=None,
+    )
 
 
-def approved(head_sha: str, reviews: list[dict], comments: list[dict], permissions: dict[str, str], bot: str,
-             allow_self: bool, marker_prefix: str, since: str | None) -> bool:
+def approved(
+    head_sha: str,
+    reviews: list[dict],
+    comments: list[dict],
+    permissions: dict[str, str],
+    bot: str,
+    allow_self: bool,
+    marker_prefix: str,
+    since: str | None,
+) -> bool:
     """Whether a human with write access approved exactly `head_sha`, by review or by `/approve <sha>` comment.
 
     `/approve` comments count only if posted after `since`: a short prefix of an older head must not approve
@@ -49,33 +63,51 @@ def approved(head_sha: str, reviews: list[dict], comments: list[dict], permissio
     for review in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
         if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and _login(review):
             latest[_login(review)] = review
-    if any(review["state"] == "APPROVED" and review.get("commit_id") == head_sha
-           and _is_human_writer(login, permissions, bot, allow_self) for login, review in latest.items()):
+    if any(
+        review["state"] == "APPROVED"
+        and review.get("commit_id") == head_sha
+        and _is_human_writer(login, permissions, bot, allow_self)
+        for login, review in latest.items()
+    ):
         return True
     for comment in comments:
         if _is_ours(comment.get("body"), marker_prefix) or (since and (comment.get("created_at") or "") <= since):
             continue
         match = APPROVE_RE.search(comment.get("body") or "")
-        if match and head_sha.startswith(match.group(1)) and _is_human_writer(_login(comment), permissions, bot,
-                                                                              allow_self):
+        if (
+            match
+            and head_sha.startswith(match.group(1))
+            and _is_human_writer(_login(comment), permissions, bot, allow_self)
+        ):
             return True
     return False
 
 
-def feedback(reviews: list[dict], review_comments: list[dict], comments: list[dict], permissions: dict[str, str],
-             bot: str, allow_self: bool, marker_prefix: str) -> list[Feedback]:
+def feedback(
+    reviews: list[dict],
+    review_comments: list[dict],
+    comments: list[dict],
+    permissions: dict[str, str],
+    bot: str,
+    allow_self: bool,
+    marker_prefix: str,
+) -> list[Feedback]:
     """Change requests from people with write access, oldest first.
 
     A "changes requested" review becomes one Feedback with its inline comments attached; a `/revise` comment
     becomes one Feedback with the rest of the comment as its text."""
     items: list[tuple[str, Feedback]] = []  # (timestamp, feedback) for sorting
     for review in reviews:
-        if review.get("state") != "CHANGES_REQUESTED" or not _is_human_writer(_login(review), permissions, bot,
-                                                                                allow_self):
+        if review.get("state") != "CHANGES_REQUESTED" or not _is_human_writer(
+            _login(review), permissions, bot, allow_self
+        ):
             continue
-        inline = [f"- `{comment.get('path')}` line {comment.get('line') or comment.get('original_line')}: "
-                  f"{comment.get('body')}"
-                  for comment in review_comments if comment.get("pull_request_review_id") == review["id"]]
+        inline = [
+            f"- `{comment.get('path')}` line {comment.get('line') or comment.get('original_line')}: "
+            f"{comment.get('body')}"
+            for comment in review_comments
+            if comment.get("pull_request_review_id") == review["id"]
+        ]
         text = "\n".join(filter(None, [review.get("body") or "", *inline])) or "(changes requested, no details)"
         items.append((review.get("submitted_at") or "", Feedback(f"review-{review['id']}", text)))
     for comment in comments:
@@ -83,8 +115,12 @@ def feedback(reviews: list[dict], review_comments: list[dict], comments: list[di
             continue
         match = REVISE_RE.search(comment.get("body") or "")
         if match and _is_human_writer(_login(comment), permissions, bot, allow_self):
-            items.append((comment.get("created_at") or "",
-                          Feedback(f"comment-{comment['id']}", match.group(1).strip() or "(no details)")))
+            items.append(
+                (
+                    comment.get("created_at") or "",
+                    Feedback(f"comment-{comment['id']}", match.group(1).strip() or "(no details)"),
+                )
+            )
     return [item for _, item in sorted(items, key=lambda pair: pair[0])]
 
 
@@ -102,8 +138,10 @@ def combine_checks(check_runs: list[dict], statuses: list[dict], required: list[
     """Fold check runs and commit statuses into one state: failure beats pending beats success.
 
     "none" means nothing reported and nothing is required; a missing required check counts as pending."""
-    states = ["pending" if run.get("status") != "completed" else
-              "failure" if run.get("conclusion") in _FAILED else "success" for run in check_runs]
+    states = [
+        "pending" if run.get("status") != "completed" else "failure" if run.get("conclusion") in _FAILED else "success"
+        for run in check_runs
+    ]
     states += [{"success": "success", "pending": "pending"}.get(status.get("state"), "failure") for status in statuses]
     seen = {run.get("name") for run in check_runs} | {status.get("context") for status in statuses}
     if not states and not required:

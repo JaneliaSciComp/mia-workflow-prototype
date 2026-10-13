@@ -13,8 +13,7 @@ W = {"alice": "write", "bob": "read", "bot": "write", "admin": "admin"}
 
 
 def rv(id, login, state, commit=HEAD, body="", at="2026-10-10T01:00:00Z"):
-    return {"id": id, "user": {"login": login}, "state": state, "commit_id": commit, "body": body,
-            "submitted_at": at}
+    return {"id": id, "user": {"login": login}, "state": state, "commit_id": commit, "body": body, "submitted_at": at}
 
 
 def cm(id, login, body, at="2026-10-10T02:00:00Z"):
@@ -60,41 +59,54 @@ def test_approve_comment_must_follow_latest_round():
 
 
 def test_latest_round_at_is_the_bots_latest_round_marker():
-    comments = [cm(1, "bot", f"r1 {MP} round k-1 -->", at="2026-10-10T01:00:00Z"),
-                cm(2, "bot", f"r2 {MP} round k-2 -->", at="2026-10-10T03:00:00Z"),
-                cm(3, "mallory", f"{MP} round k-3 -->", at="2026-10-10T04:00:00Z"),
-                cm(4, "bot", f"{MP} started k-3 -->", at="2026-10-10T05:00:00Z")]
+    comments = [
+        cm(1, "bot", f"r1 {MP} round k-1 -->", at="2026-10-10T01:00:00Z"),
+        cm(2, "bot", f"r2 {MP} round k-2 -->", at="2026-10-10T03:00:00Z"),
+        cm(3, "mallory", f"{MP} round k-3 -->", at="2026-10-10T04:00:00Z"),
+        cm(4, "bot", f"{MP} started k-3 -->", at="2026-10-10T05:00:00Z"),
+    ]
     assert latest_round_at(comments, MP, "bot") == "2026-10-10T03:00:00Z"
     assert latest_round_at([], MP, "bot") is None
 
 
 def test_feedback_from_reviews_and_revise_comments_oldest_first():
-    reviews = [rv(3, "alice", "CHANGES_REQUESTED", body="rename foo", at="2026-10-10T01:00:00Z"),
-               rv(4, "bob", "CHANGES_REQUESTED", body="ignored: reader")]
-    inline = [{"pull_request_review_id": 3, "path": "a.py", "line": 4, "body": "here"},
-              {"pull_request_review_id": 99, "path": "b.py", "line": 1, "body": "other review"}]
-    comments = [cm(10, "admin", "/revise also update docs", at="2026-10-10T00:30:00Z"),
-                cm(11, "alice", "looks good"), cm(12, "bot", f"/revise {MP} x -->")]
+    reviews = [
+        rv(3, "alice", "CHANGES_REQUESTED", body="rename foo", at="2026-10-10T01:00:00Z"),
+        rv(4, "bob", "CHANGES_REQUESTED", body="ignored: reader"),
+    ]
+    inline = [
+        {"pull_request_review_id": 3, "path": "a.py", "line": 4, "body": "here"},
+        {"pull_request_review_id": 99, "path": "b.py", "line": 1, "body": "other review"},
+    ]
+    comments = [
+        cm(10, "admin", "/revise also update docs", at="2026-10-10T00:30:00Z"),
+        cm(11, "alice", "looks good"),
+        cm(12, "bot", f"/revise {MP} x -->"),
+    ]
     fb = feedback(reviews, inline, comments, W, "bot", False, MP)
-    assert fb == [Feedback("comment-10", "also update docs"),
-                  Feedback("review-3", "rename foo\n- `a.py` line 4: here")]
+    assert fb == [Feedback("comment-10", "also update docs"), Feedback("review-3", "rename foo\n- `a.py` line 4: here")]
 
 
 def test_handled_ids_come_from_our_markers():
-    comments = [cm(1, "bot", "done\n<!-- autodev: round k-2 -->\n<!-- autodev: handled review-3 -->"),
-                cm(2, "alice", "<!-- autodev: handled review-9 -->"),  # a person pasting our marker does not count
-                cm(3, "bot", "see <!-- autodev: round k-1 --> and handled review-7 -->")]  # not anchored to the prefix
+    comments = [
+        cm(1, "bot", "done\n<!-- autodev: round k-2 -->\n<!-- autodev: handled review-3 -->"),
+        cm(2, "alice", "<!-- autodev: handled review-9 -->"),  # a person pasting our marker does not count
+        cm(3, "bot", "see <!-- autodev: round k-1 --> and handled review-7 -->"),
+    ]  # not anchored to the prefix
     assert handled_ids(comments, MP, "bot") == {"review-3"}
 
 
-@pytest.mark.parametrize("runs,statuses,want", [
-    ([], [], "none"),
-    ([{"status": "completed", "conclusion": "success"}], [{"state": "success"}], "success"),
-    ([{"status": "in_progress", "conclusion": None}], [], "pending"),
-    ([{"status": "completed", "conclusion": "skipped"}], [{"state": "pending"}], "pending"),
-    ([{"status": "completed", "conclusion": "failure"}], [{"state": "pending"}], "failure"),
-    ([], [{"state": "error"}], "failure"),
-])
+@pytest.mark.parametrize(
+    "runs,statuses,want",
+    [
+        ([], [], "none"),
+        ([{"status": "completed", "conclusion": "success"}], [{"state": "success"}], "success"),
+        ([{"status": "in_progress", "conclusion": None}], [], "pending"),
+        ([{"status": "completed", "conclusion": "skipped"}], [{"state": "pending"}], "pending"),
+        ([{"status": "completed", "conclusion": "failure"}], [{"state": "pending"}], "failure"),
+        ([], [{"state": "error"}], "failure"),
+    ],
+)
 def test_combine_checks(runs, statuses, want):
     assert combine_checks(runs, statuses) == want
 
@@ -103,17 +115,23 @@ def test_combine_checks(runs, statuses, want):
 def gh():
     async def no_sleep(_):
         pass
+
     return GitHub("o/r", lambda: "tok", writes_per_second=1000, sleep=no_sleep)
 
 
 @respx.mock
 async def test_label_actor_is_latest_labeler(gh):
-    respx.get(f"{API}{R}/issues/1/events").mock(return_value=httpx.Response(200, json=[
-        {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "a"}},
-        {"event": "unlabeled", "label": {"name": "autodev:go"}, "actor": {"login": "a"}},
-        {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "b"}},
-        {"event": "labeled", "label": {"name": "other"}, "actor": {"login": "c"}},
-    ]))
+    respx.get(f"{API}{R}/issues/1/events").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "a"}},
+                {"event": "unlabeled", "label": {"name": "autodev:go"}, "actor": {"login": "a"}},
+                {"event": "labeled", "label": {"name": "autodev:go"}, "actor": {"login": "b"}},
+                {"event": "labeled", "label": {"name": "other"}, "actor": {"login": "c"}},
+            ],
+        )
+    )
     assert await gh.label_actor(1, "autodev:go") == "b"
 
 
@@ -138,7 +156,8 @@ async def test_merge_refusal_is_reported_not_raised(gh):
 
 @respx.mock
 async def test_check_state_reads_both_apis(gh):
-    respx.get(f"{API}{R}/commits/{HEAD}/check-runs").mock(return_value=httpx.Response(200, json={
-        "check_runs": [{"status": "completed", "conclusion": "success"}]}))
+    respx.get(f"{API}{R}/commits/{HEAD}/check-runs").mock(
+        return_value=httpx.Response(200, json={"check_runs": [{"status": "completed", "conclusion": "success"}]})
+    )
     respx.get(f"{API}{R}/commits/{HEAD}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
     assert await gh.check_state(HEAD) == "success"

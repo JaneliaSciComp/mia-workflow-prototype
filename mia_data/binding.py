@@ -38,9 +38,11 @@ def record_urls(record: dict) -> list[str]:
     """Every URL a catalog record names: download URLs, sample URLs and array path patterns."""
     data, technical = record.get("data") or {}, record.get("technical") or {}
     download = data.get("download_url") or []
-    return [*([download] if isinstance(download, str) else download),
-            *((technical.get("sample") or {}).get("urls") or []),
-            *(array["path_pattern"] for array in technical.get("arrays") or [] if array.get("path_pattern"))]
+    return [
+        *([download] if isinstance(download, str) else download),
+        *((technical.get("sample") or {}).get("urls") or []),
+        *(array["path_pattern"] for array in technical.get("arrays") or [] if array.get("path_pattern")),
+    ]
 
 
 def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins: Pins) -> list[str]:
@@ -51,9 +53,11 @@ def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins:
     field is not trusted (see seed)."""
     if not isinstance(binding, dict):
         return ["binding is not a mapping"]
-    errors = [f"{key} {binding.get(key)!r} is not {want!r}"
-              for key, want in (("record", pins.record), ("record_commit", pins.record_commit))
-              if binding.get(key) != want]
+    errors = [
+        f"{key} {binding.get(key)!r} is not {want!r}"
+        for key, want in (("record", pins.record), ("record_commit", pins.record_commit))
+        if binding.get(key) != want
+    ]
     raw, labels = binding.get("raw"), binding.get("labels") or []
     if not (isinstance(raw, list) and raw and isinstance(labels, list)):
         return errors + ["raw must be a non-empty list and labels a list"]
@@ -85,9 +89,11 @@ def hosts(urls: list[str], cfg: Config) -> list[str]:
     """Exact hosts a job may reach: the URLs' hosts, their configured redirect targets, and the package hosts."""
     url_hosts = {host for url in urls if (host := _host(url))}
     redirects = {host.lower(): targets for host, targets in cfg.network.redirect_hosts.items()}
-    allowed = sorted(url_hosts
-                     | {target.lower() for host in url_hosts for target in redirects.get(host, [])}
-                     | {host.lower() for host in cfg.network.package_hosts})
+    allowed = sorted(
+        url_hosts
+        | {target.lower() for host in url_hosts for target in redirects.get(host, [])}
+        | {host.lower() for host in cfg.network.package_hosts}
+    )
     if bad := [host for host in allowed if is_github_host(host)]:
         raise ValueError(f"GitHub hosts {bad} must never be granted to a job")
     return allowed
@@ -95,5 +101,6 @@ def hosts(urls: list[str], cfg: Config) -> list[str]:
 
 def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]:
     """Hosts no `csub probe` allowed_hosts pattern matches (csub/broker/resolve.py: check_hosts)."""
-    return [host for host in hosts if not any(host == pattern or fnmatch.fnmatchcase(host, pattern)
-                                              for pattern in patterns)]
+    return [
+        host for host in hosts if not any(host == pattern or fnmatch.fnmatchcase(host, pattern) for pattern in patterns)
+    ]

@@ -35,15 +35,19 @@ def _git_env(token: str | None) -> dict[str, str]:
     if token:
         credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         # Via env only: never in argv (visible in ps) or a config file (left on disk).
-        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraHeader",
-                   GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {credential}")
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.extraHeader",
+            GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {credential}",
+        )
     return env
 
 
 def git(*args: str, cwd: Path | None = None, token: str | None = None) -> str:
     """Run one git command (hooks disabled) and return its stdout, raising GitError on failure."""
-    proc = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, env=_git_env(token),
-                          capture_output=True, text=True)
+    proc = subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, env=_git_env(token), capture_output=True, text=True
+    )
     if proc.returncode:
         raise GitError(f"git {' '.join(args)}: {proc.stderr.strip()[-2000:]}")
     return proc.stdout.strip()
@@ -53,8 +57,13 @@ class Mirror:
     """A bare clone of the remote at `path`, kept in sync, from which workspaces are cloned and to which
     agent bundles are imported before being pushed. `author` is the (name, email) agent commits are made as."""
 
-    def __init__(self, path: Path, url: str, tokens: Callable[[], str | None] = lambda: None,
-                 author: tuple[str, str] = ("autodev", "autodev@localhost")):
+    def __init__(
+        self,
+        path: Path,
+        url: str,
+        tokens: Callable[[], str | None] = lambda: None,
+        author: tuple[str, str] = ("autodev", "autodev@localhost"),
+    ):
         self.path, self.url, self.tokens, self.author = Path(path), url, tokens, author
 
     def sync(self) -> None:
@@ -79,8 +88,9 @@ class Mirror:
         git("config", "user.email", self.author[1], cwd=repo)
         return git("rev-parse", "HEAD", cwd=repo)
 
-    def publish(self, bundle: Path, base_sha: str, branch: str, ref: str, protected: list[str],
-                force: bool) -> str | None:
+    def publish(
+        self, bundle: Path, base_sha: str, branch: str, ref: str, protected: list[str], force: bool
+    ) -> str | None:
         """Import the agent's bundle and push it to `branch`. Returns the new head, or None if no commits.
 
         The commits must descend from `base_sha` and must not touch `protected` paths; `force` allows a
@@ -117,13 +127,22 @@ class Mirror:
             # Plumbing, NUL-separated, no rename detection: names are never quoted and both sides of a rename show.
             diff = git("diff-tree", "-r", "-z", "--no-renames", "--name-only", base_sha, new_sha, cwd=self.path)
             changed = [path for path in diff.split("\0") if path]
-            if bad := [path for path in changed
-                       if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in protected)]:
+            if bad := [
+                path
+                for path in changed
+                if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in protected)
+            ]:
                 raise ProtectedPathError(f"agent changed protected paths: {', '.join(bad[:10])!r}")
         except GitError:
             git("update-ref", "-d", ref, cwd=self.path)
             raise
-        git("push", "-q", "origin", f"{'+' if force else ''}{new_sha}:refs/heads/{branch}", cwd=self.path,
-            token=self.tokens())
+        git(
+            "push",
+            "-q",
+            "origin",
+            f"{'+' if force else ''}{new_sha}:refs/heads/{branch}",
+            cwd=self.path,
+            token=self.tokens(),
+        )
         git("update-ref", f"refs/heads/{branch}", new_sha, cwd=self.path)
         return new_sha

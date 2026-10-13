@@ -21,7 +21,10 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
 
-_ENV_OVERRIDES = {"TEMPORAL_ADDRESS": ("temporal", "address"), "MIA_DATA_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy")}
+_ENV_OVERRIDES = {
+    "TEMPORAL_ADDRESS": ("temporal", "address"),
+    "MIA_DATA_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),
+}
 
 # stage -> (label color, description); labels are `data:<stage>`
 STAGES = {
@@ -64,6 +67,7 @@ class GitHubCfg(BaseModel):
 class PathsCfg(BaseModel):
     """`work_root` and `storage_root` take a path, or `{path, url}` where `url` is where a browser (Fileglancer)
     shows that folder; issue comments then link the folders they mention."""
+
     state_dir: Path = Path("~/.local/state/mia-data")
     work_root: Path
     work_root_url: str | None = None
@@ -122,6 +126,7 @@ class NetworkCfg(BaseModel):
 
 class Config(BaseModel):
     """The whole mia_data.yaml, validated, plus the derived names (labels, markers, queues) built from it."""
+
     deployment: str = "mia-data"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
@@ -159,8 +164,10 @@ class Config(BaseModel):
             raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")
         for name in ("allow_hosts", "extra_mounts", "api_key_env"):  # autodev's; mia-data's jobs never read them
             if getattr(self.agent, name):
-                raise ValueError(f"agent.{name} is not used by mia-data (job hosts come from the binding and network.*, "
-                                 "mounts from the job builders); remove it")
+                raise ValueError(
+                    f"agent.{name} is not used by mia-data (job hosts come from the binding and network.*, "
+                    "mounts from the job builders); remove it"
+                )
         if not self.crops.licences:
             raise ValueError("crops.licences must not be empty")
         network = self.network

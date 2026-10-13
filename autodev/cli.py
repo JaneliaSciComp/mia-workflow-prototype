@@ -25,8 +25,14 @@ if TYPE_CHECKING:
 
     from .config import Config
 
-OPS = {"up": ops.cmd_up, "down": ops.cmd_down, "restart": ops.cmd_restart, "ps": ops.cmd_ps,
-       "attach": ops.cmd_attach, "logs": ops.cmd_logs}
+OPS = {
+    "up": ops.cmd_up,
+    "down": ops.cmd_down,
+    "restart": ops.cmd_restart,
+    "ps": ops.cmd_ps,
+    "attach": ops.cmd_attach,
+    "logs": ops.cmd_logs,
+}
 
 log = logging.getLogger("autodev")
 
@@ -59,20 +65,28 @@ async def _client(cfg: Config) -> Client:
     proxy = None
     if cfg.temporal.via_https_proxy:  # inside agentic-sandbox the only way out is the allowlist proxy
         if not (target := proxy_target(os.environ)):
-            sys.exit("autodev: temporal.via_https_proxy is set but $https_proxy is not (run under sandbox-run.sh --allow)")
+            sys.exit(
+                "autodev: temporal.via_https_proxy is set but $https_proxy is not (run under sandbox-run.sh --allow)"
+            )
         proxy = HttpConnectProxyConfig(target_host=target)
-    return await asyncio.wait_for(Client.connect(cfg.temporal.address, namespace=cfg.temporal.namespace,
-                                                 http_connect_proxy_config=proxy), 10)
+    return await asyncio.wait_for(
+        Client.connect(cfg.temporal.address, namespace=cfg.temporal.namespace, http_connect_proxy_config=proxy), 10
+    )
 
 
 def _csub_problems(cfg: Config, probe: Any) -> list[str]:
     """Ways the csub broker policy (from `csub probe`) would stop agent jobs from running."""
     need = set(cfg.agent.allow_hosts)  # Anthropic hosts come from the policy's [agents] claude entry
     work_root = cfg.paths.work_root.resolve()
-    return [*([] if "claude" in probe.agents else ['agent "claude" not in the policy [agents] table']),
-            *(f"host not allowed: {host}" for host in sorted(need - set(probe.allowed_hosts))),
-            *([] if any(work_root.is_relative_to(Path(root).resolve()) for root in probe.allowed_roots)
-              else [f"work_root {work_root} not under allowed_roots {probe.allowed_roots}"])]
+    return [
+        *([] if "claude" in probe.agents else ['agent "claude" not in the policy [agents] table']),
+        *(f"host not allowed: {host}" for host in sorted(need - set(probe.allowed_hosts))),
+        *(
+            []
+            if any(work_root.is_relative_to(Path(root).resolve()) for root in probe.allowed_roots)
+            else [f"work_root {work_root} not under allowed_roots {probe.allowed_roots}"]
+        ),
+    ]
 
 
 async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
@@ -155,18 +169,34 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     gh = GitHub.for_autodev(cfg, tokens)
     bot = await bot_login(cfg)
     # Agent commits are authored as the account that pushes them and opens the PR.
-    mirror = Mirror(cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git", cfg.git_url, tokens,
-                    author=(bot, await noreply_email(cfg, bot)))
+    mirror = Mirror(
+        cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git",
+        cfg.git_url,
+        tokens,
+        author=(bot, await noreply_email(cfg, bot)),
+    )
     activities = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
     task_queue = cfg.task_queue
-    main_worker = Worker(client, task_queue=task_queue, workflows=[IssueWorkflow, PollWorkflow],
-                         activities=activities.all(), max_concurrent_activities=8)
-    await_worker = Worker(client, task_queue=f"{task_queue}-await", activities=[activities.await_agent],
-                          max_concurrent_activities=20)
+    main_worker = Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[IssueWorkflow, PollWorkflow],
+        activities=activities.all(),
+        max_concurrent_activities=8,
+    )
+    await_worker = Worker(
+        client, task_queue=f"{task_queue}-await", activities=[activities.await_agent], max_concurrent_activities=20
+    )
     task = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-    log.info("worker up as %s: %s ns=%s queues %s, %s-await", bot, cfg.temporal.address, cfg.temporal.namespace,
-             task_queue, task_queue)
+    log.info(
+        "worker up as %s: %s ns=%s queues %s, %s-await",
+        bot,
+        cfg.temporal.address,
+        cfg.temporal.namespace,
+        task_queue,
+        task_queue,
+    )
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
@@ -195,10 +225,12 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     client = await _client(cfg)
     schedule_id = f"{cfg.deployment}-poll"
     schedule = Schedule(
-        action=ScheduleActionStartWorkflow(PollWorkflow.execute, id=f"{cfg.deployment}-poll-run",
-                                           task_queue=cfg.task_queue),
+        action=ScheduleActionStartWorkflow(
+            PollWorkflow.execute, id=f"{cfg.deployment}-poll-run", task_queue=cfg.task_queue
+        ),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
-        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
     try:
         await client.create_schedule(schedule_id, schedule)
         print(f"created schedule {schedule_id}")
@@ -225,12 +257,15 @@ def main(argv: list[str] | None = None) -> int:
     logs = sub.add_parser("logs", help="tail a log (default: worker)")
     logs.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
     logs.add_argument("-n", "--lines", type=int, default=50)
-    logs.add_argument("-f", "--follow", action="store_true",
-                      help="keep following the log (default: print the last lines and exit)")
+    logs.add_argument(
+        "-f", "--follow", action="store_true", help="keep following the log (default: print the last lines and exit)"
+    )
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if args.cmd in OPS:
-        args.config_path = Path(args.config or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml").resolve()
+        args.config_path = Path(
+            args.config or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml"
+        ).resolve()
         return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     cmd = {"check": cmd_check, "init-labels": cmd_init_labels, "worker": cmd_worker, "schedule": cmd_schedule}[args.cmd]

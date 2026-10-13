@@ -20,8 +20,10 @@ ISSUE = {"number": 7, "title": "Add feature", "body": "Please add feature.txt"}
 
 def test_prompt_has_issue_and_human_discussion_only(tmp_path):
     cfg = make_cfg(tmp_path)
-    comments = [{"user": {"login": "alice"}, "body": "use lowercase"},
-                {"user": {"login": "bot"}, "body": "Started <!-- autodev: started k-1 -->"}]
+    comments = [
+        {"user": {"login": "alice"}, "body": "use lowercase"},
+        {"user": {"login": "bot"}, "body": "Started <!-- autodev: started k-1 -->"},
+    ]
     p = render_prompt(cfg, ISSUE, comments, "autodev/issue-7", "abc", None, None)
     assert "#7 in o/r" in p and "Add feature" in p and "Please add feature.txt" in p
     assert "use lowercase" in p and "Started" not in p and "Requested changes" not in p
@@ -34,8 +36,10 @@ def test_job_script_runs_claude_and_bundles(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "claude"
-    fake.write_text('#!/bin/sh\necho x > feature.txt\ngit add feature.txt\ngit commit -qm "add feature"\n'
-                    'echo \'{"type":"result","result":"Added feature.txt","total_cost_usd":0.12}\'\n')
+    fake.write_text(
+        '#!/bin/sh\necho x > feature.txt\ngit add feature.txt\ngit commit -qm "add feature"\n'
+        'echo \'{"type":"result","result":"Added feature.txt","total_cost_usd":0.12}\'\n'
+    )
     fake.chmod(0o755)
     cfg = make_cfg(tmp_path, agent={"path_prepend": [str(bin_dir)], "model": "it's-quoted"})
     m = Mirror(tmp_path / "mirror.git", str(make_origin(tmp_path)))
@@ -88,8 +92,15 @@ class FakeCsub:
         if ids is None:
             return self.existing
         st = self.states.pop(0) if len(self.states) > 1 else self.states[0]
-        return [SimpleNamespace(job_id=ids[0], state=st, exit_code=0 if st == "DONE" else None, name=None,
-                                terminal=st in ("DONE", "EXIT", "UNKNOWN"))]
+        return [
+            SimpleNamespace(
+                job_id=ids[0],
+                state=st,
+                exit_code=0 if st == "DONE" else None,
+                name=None,
+                terminal=st in ("DONE", "EXIT", "UNKNOWN"),
+            )
+        ]
 
 
 def _jobs(tmp_path, fake, **agent):
@@ -147,8 +158,9 @@ async def test_wait_heartbeats_until_terminal(tmp_path):
 
 async def test_unknown_state_uses_exit_code_file(tmp_path):
     (tmp_path / "exit_code").write_text("0\n")
-    out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait("777", Workspace(str(tmp_path), "a", "b"),
-                                                                    lambda s: None)
+    out = await _jobs(tmp_path, FakeCsub(states=["UNKNOWN"])).wait(
+        "777", Workspace(str(tmp_path), "a", "b"), lambda s: None
+    )
     assert (out.state, out.exit_code) == ("DONE", 0)
 
 
@@ -222,8 +234,12 @@ async def test_submit_reuses_job_when_work_root_is_symlinked(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="x", cwd=str(real.resolve() / "r1"), state="RUN"),
-                              SimpleNamespace(job_id="556", name="y", state="RUN")])
+    fake = FakeCsub(
+        existing=[
+            SimpleNamespace(job_id="555", name="x", cwd=str(real.resolve() / "r1"), state="RUN"),
+            SimpleNamespace(job_id="556", name="y", state="RUN"),
+        ]
+    )
     cfg = make_cfg(tmp_path, paths={"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "link")})
     j = AgentJobs(cfg, client_factory=lambda: fake)
     ws = Workspace(str(j.cfg.paths.work_root / "r1"), "abc", "b")
@@ -232,13 +248,16 @@ async def test_submit_reuses_job_when_work_root_is_symlinked(tmp_path):
     assert ref.job_id == "555" and fake.submitted == []
 
 
-@pytest.mark.parametrize("err,permanent", [
-    (CsubError("policy_violation", "mount not under allowed_roots"), True),
-    (CsubError("invalid_request", "bad spec"), True),
-    (ProtocolError("response: not valid JSON"), True),
-    (TransportError("cannot reach broker socket"), False),
-    (CsubError("lsf_error", "bsub timed out"), False),
-])
+@pytest.mark.parametrize(
+    "err,permanent",
+    [
+        (CsubError("policy_violation", "mount not under allowed_roots"), True),
+        (CsubError("invalid_request", "bad spec"), True),
+        (ProtocolError("response: not valid JSON"), True),
+        (TransportError("cannot reach broker socket"), False),
+        (CsubError("lsf_error", "bsub timed out"), False),
+    ],
+)
 async def test_submit_rejection_is_permanent_transport_error_is_not(tmp_path, err, permanent):
     j = _jobs(tmp_path, FakeCsub(error=err))
     a = Activities(j.cfg, None, None, j, "bot")
@@ -254,7 +273,9 @@ async def test_submit_rejection_is_permanent_transport_error_is_not(tmp_path, er
 async def test_submit_refuses_a_key_that_is_not_8_hex(tmp_path, key):
     j = _jobs(tmp_path, FakeCsub())
     with pytest.raises(ApplicationError) as e:
-        await Activities(j.cfg, None, None, j, "bot").submit_agent(SubmitInput(7, key, 1, Workspace(str(tmp_path), "a", "b")))
+        await Activities(j.cfg, None, None, j, "bot").submit_agent(
+            SubmitInput(7, key, 1, Workspace(str(tmp_path), "a", "b"))
+        )
     assert e.value.non_retryable and not (tmp_path / "state" / "jobs").exists()
 
 

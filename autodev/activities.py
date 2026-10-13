@@ -64,7 +64,6 @@ PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside
 SECRET_RE = re.compile(r"sk-ant-[\w-]+|gh[pousr]_\w+|github_pat_\w+|eyJ[\w-]+\.[\w-]+\.[\w-]+")
 
 
-
 def neutralize(text: str, token: str | None = None) -> str:
     """Make agent-written text safe to post on GitHub.
 
@@ -79,6 +78,7 @@ def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: turn GitHub 4xx errors and bad keys into non-retryable failures.
 
     Retrying a request that cannot succeed would only burn the workflow's retry budget."""
+
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
@@ -89,10 +89,12 @@ def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
             if error.status in PERMANENT_HTTP:
                 raise ApplicationError(str(error), non_retryable=True) from error
             raise
+
     return wrapper
 
 
 # --- comment templates ------------------------------------------------------------------------
+
 
 def render_pr_body(cfg: Config, issue: int) -> str:
     return f"""Closes #{issue}
@@ -109,8 +111,9 @@ summary is the first comment.
 {cfg.marker("pr")}"""
 
 
-def render_summary(cfg: Config, round_number: int, branch: str, head_sha: str | None, summary: str,
-                   cost: float | None) -> str:
+def render_summary(
+    cfg: Config, round_number: int, branch: str, head_sha: str | None, summary: str, cost: float | None
+) -> str:
     """The comment posted after each round: what was pushed, what it cost, and the agent's own summary."""
     what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else "made no commits"
     cost_text = f" · ${cost:.2f}" if cost is not None else ""
@@ -135,29 +138,43 @@ class Activities:
 
     `bot` is the GitHub login autodev posts as; it decides which existing comments count as ours."""
 
-    def __init__(self, cfg: Config, gh: GitHub, mirror: Mirror, jobs: AgentJobs, bot: str,
-                 client: Client | None = None):
+    def __init__(
+        self, cfg: Config, gh: GitHub, mirror: Mirror, jobs: AgentJobs, bot: str, client: Client | None = None
+    ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
 
     def all(self) -> list:
         """The activities registered on the main task queue (await_agent runs on the -await queue)."""
-        return [self.set_stage, self.comment, self.find_pr, self.prepare_round, self.submit_agent,
-                self.publish_round, self.observe_pr, self.merge_pr, self.report_failure, self.poll_issues]
+        return [
+            self.set_stage,
+            self.comment,
+            self.find_pr,
+            self.prepare_round,
+            self.submit_agent,
+            self.publish_round,
+            self.observe_pr,
+            self.merge_pr,
+            self.report_failure,
+            self.poll_issues,
+        ]
 
     async def _comment_once(self, number: int, body: str, marker: str) -> None:
         """Post the comment unless the bot already posted one carrying this marker.
 
         Only the bot's own comments count: an outsider pasting our marker must not be able to suppress us."""
-        if not any((comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or "")
-                   for comment in await self.gh.issue_comments(number)):
+        if not any(
+            (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or "")
+            for comment in await self.gh.issue_comments(number)
+        ):
             await self.gh.comment(number, body)
 
     def _clean(self, text: str) -> str:
         return neutralize(text, self.gh.tokens())
 
     def _round_dir(self, issue: int, key: str, round_number: int) -> Path:
-        return (self.cfg.paths.work_root / self.cfg.repo_slug / f"issue-{issue}" / check_key(key)
-                / f"round-{round_number}")
+        return (
+            self.cfg.paths.work_root / self.cfg.repo_slug / f"issue-{issue}" / check_key(key) / f"round-{round_number}"
+        )
 
     @activity.defn(name="set_stage")
     @permanent_errors
@@ -202,7 +219,8 @@ class Activities:
         writers = {login for login in logins if await self.gh.permission(login) in WRITE_PERMISSIONS}
         comments = [comment for comment in comments if (comment.get("user") or {}).get("login") in writers]
         (round_dir / "prompt.md").write_text(
-            render_prompt(self.cfg, issue, comments, branch, base_sha, request.pr, request.feedback))
+            render_prompt(self.cfg, issue, comments, branch, base_sha, request.pr, request.feedback)
+        )
         return Workspace(str(round_dir), base_sha, branch)
 
     @activity.defn(name="submit_agent")
@@ -229,10 +247,14 @@ class Activities:
         summary, cost = read_result(workspace_dir)
         try:
             head_sha = await asyncio.to_thread(
-                self.mirror.publish, workspace_dir / "result.bundle", request.workspace.base_sha,
-                request.workspace.branch, f"refs/autodev/issue-{request.issue}/{request.key}-r{request.round}",
+                self.mirror.publish,
+                workspace_dir / "result.bundle",
+                request.workspace.base_sha,
+                request.workspace.branch,
+                f"refs/autodev/issue-{request.issue}/{request.key}-r{request.round}",
                 self.cfg.github.protected_paths,
-                request.pr is None)  # round 1 owns the branch and may force-push; revisions must fast-forward
+                request.pr is None,
+            )  # round 1 owns the branch and may force-push; revisions must fast-forward
         except RejectedBundleError as error:  # permanent; other GitErrors (push, locks) may be transient
             raise ApplicationError(str(error), non_retryable=True) from error
         pr_number = request.pr
@@ -242,9 +264,12 @@ class Activities:
                 pr_number = existing["number"]
             else:
                 issue = await self.gh.get_issue(request.issue)
-                created = await self.gh.create_pr(f"{issue['title']} (#{request.issue})",
-                                                  render_pr_body(self.cfg, request.issue),
-                                                  request.workspace.branch, self.cfg.github.base_branch)
+                created = await self.gh.create_pr(
+                    f"{issue['title']} (#{request.issue})",
+                    render_pr_body(self.cfg, request.issue),
+                    request.workspace.branch,
+                    self.cfg.github.base_branch,
+                )
                 pr_number = created["number"]
         markers = [f"round {request.key}-{request.round}"]
         if request.feedback_id:
@@ -269,12 +294,25 @@ class Activities:
         # ponytail: one permission lookup per participant per poll; cache if the rate limit ever matters.
         permissions = {login: await self.gh.permission(login) for login in logins}
         marker_prefix = self.cfg.marker_prefix
-        allow_self = self.cfg.github.auth == "token"  # under a personal token the reviewer and the bot are the same user
+        allow_self = (
+            self.cfg.github.auth == "token"
+        )  # under a personal token the reviewer and the bot are the same user
         handled = handled_ids(comments, marker_prefix, self.bot)
-        pending = [item for item in feedback(reviews, inline_comments, comments, permissions, self.bot, allow_self,
-                                             marker_prefix) if item.id not in handled]
-        is_approved = approved(head_sha, reviews, comments, permissions, self.bot, allow_self, marker_prefix,
-                               latest_round_at(comments, marker_prefix, self.bot))
+        pending = [
+            item
+            for item in feedback(reviews, inline_comments, comments, permissions, self.bot, allow_self, marker_prefix)
+            if item.id not in handled
+        ]
+        is_approved = approved(
+            head_sha,
+            reviews,
+            comments,
+            permissions,
+            self.bot,
+            allow_self,
+            marker_prefix,
+            latest_round_at(comments, marker_prefix, self.bot),
+        )
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(request.pr, "open", head_sha, is_approved, checks, pending)
 
@@ -312,19 +350,27 @@ class Activities:
             number = issue["number"]
             try:
                 actor = await self.gh.label_actor(number, go_label)
-                if not actor or (actor not in self.cfg.github.trusted_bots
-                                 and await self.gh.permission(actor) not in WRITE_PERMISSIONS):
+                if not actor or (
+                    actor not in self.cfg.github.trusted_bots
+                    and await self.gh.permission(actor) not in WRITE_PERMISSIONS
+                ):
                     await self.gh.remove_label(number, go_label)
                     who = actor or "unknown"
                     marker = self.cfg.marker(f"ignored-label {who}")
-                    await self._comment_once(number, f"Ignoring `{go_label}`: it was added by `{who}`, who does not "
-                                                     f"have write access to this repository.\n\n{marker}", marker)
+                    await self._comment_once(
+                        number,
+                        f"Ignoring `{go_label}`: it was added by `{who}`, who does not "
+                        f"have write access to this repository.\n\n{marker}",
+                        marker,
+                    )
                     continue
                 await self.client.start_workflow(
                     IssueWorkflow.execute,
                     IssueInput(number, self.cfg.agent.max_revisions, self.cfg.temporal.poll_minutes),
-                    id=self.cfg.workflow_id(number), task_queue=self.cfg.task_queue,
-                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+                    id=self.cfg.workflow_id(number),
+                    task_queue=self.cfg.task_queue,
+                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                )
                 started.append(number)
             except Exception:  # one bad issue must not skip the rest; the next poll retries it
                 log.exception("poll: issue #%s failed", number)

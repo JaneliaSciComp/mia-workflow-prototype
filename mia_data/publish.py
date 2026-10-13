@@ -36,8 +36,11 @@ def check_crop_id(crop_id: Any) -> str:
 
 def _hashes(directory: Path) -> dict[str, str]:
     """relative path -> sha256 of every file under `directory`."""
-    return {path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in directory.rglob("*") if path.is_file()}
+    return {
+        path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
 
 
 def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
@@ -45,8 +48,9 @@ def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
         raise Conflict(f"{crop_id} is already published with different checksums")
 
 
-def publish(dataset_dir: Path, src_dir: Path, verified: list[dict], withdrawn: dict[str, str], *,
-            tmp_max_age_s: float) -> dict:
+def publish(
+    dataset_dir: Path, src_dir: Path, verified: list[dict], withdrawn: dict[str, str], *, tmp_max_age_s: float
+) -> dict:
     """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`.
 
     `verified` is [{"crop_id", "files": {rel: sha256}}] from read_verify; only those files are copied, and
@@ -54,8 +58,11 @@ def publish(dataset_dir: Path, src_dir: Path, verified: list[dict], withdrawn: d
     are cleaned up. Returns {"published": [ids], "already": [ids], "total": count in the dataset}."""
     for crop in verified:
         check_crop_id(crop["crop_id"])
-        if bad := [rel for rel in crop["files"]
-                   if not rel or PurePosixPath(rel).is_absolute() or ".." in PurePosixPath(rel).parts]:
+        if bad := [
+            rel
+            for rel in crop["files"]
+            if not rel or PurePosixPath(rel).is_absolute() or ".." in PurePosixPath(rel).parts
+        ]:
             raise ValueError(f"{crop['crop_id']}: bad file paths {bad}")
         if not {"crop.json", "raw.png"} <= set(crop["files"]):
             raise ValueError(f"{crop['crop_id']}: crop.json and raw.png must be verified")
@@ -111,10 +118,18 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
         if not (crop_dir / "crop.json").is_file():
             continue
         crop_json = json.loads((crop_dir / "crop.json").read_text())
-        withdrawn_snippet = next((snippet["name"] for snippet in crop_json.get("snippets") or []
-                                  if snippet.get("name") in withdrawn), None)
-        crops.append({**crop_json, "crop_id": crop_dir.name, "files": _hashes(crop_dir),
-                      "withdrawn": withdrawn_snippet is not None, "withdrawn_reason": withdrawn.get(withdrawn_snippet)})
+        withdrawn_snippet = next(
+            (snippet["name"] for snippet in crop_json.get("snippets") or [] if snippet.get("name") in withdrawn), None
+        )
+        crops.append(
+            {
+                **crop_json,
+                "crop_id": crop_dir.name,
+                "files": _hashes(crop_dir),
+                "withdrawn": withdrawn_snippet is not None,
+                "withdrawn_reason": withdrawn.get(withdrawn_snippet),
+            }
+        )
     tmp = dataset_dir / f".tmp-manifest-{uuid.uuid4().hex}.json"  # per writer: a zombie attempt can't interleave
     tmp.write_text(json.dumps({"crops": crops, "count": len(crops)}, indent=1))
     os.replace(tmp, dataset_dir / "manifest.json")

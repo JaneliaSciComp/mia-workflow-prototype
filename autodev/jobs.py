@@ -27,21 +27,21 @@ JOB_KEY_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
 @dataclass
 class JobSpec:
     """Everything csub needs to run one job."""
-    name: str                      # csub job name (no username in it)
-    command: str                   # shell script; runs with cwd = workspace
-    workspace: str                 # rw mount + cwd; unique per job (the cwd-lookup key)
+
+    name: str  # csub job name (no username in it)
+    command: str  # shell script; runs with cwd = workspace
+    workspace: str  # rw mount + cwd; unique per job (the cwd-lookup key)
     walltime_min: int
     cpus: int = 1
     mem_mb: int = 4000
     allow_hosts: list[str] = field(default_factory=list)
-    ro_mounts: list[str] = field(default_factory=list)   # absolute paths
-    rw_mounts: list[str] = field(default_factory=list)   # absolute paths, besides the workspace
+    ro_mounts: list[str] = field(default_factory=list)  # absolute paths
+    rw_mounts: list[str] = field(default_factory=list)  # absolute paths, besides the workspace
     agent: str | None = None  # csub launcher agent mode, e.g. "claude"; gated by the policy [agents] table
     env: dict[str, str] = field(default_factory=dict)
 
 
-def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = False,
-                   binary: bool = False) -> str | bytes | None:
+def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = False, binary: bool = False) -> str | bytes | None:
     """Read a file a sandboxed job could have tampered with. Returns None for anything suspicious.
 
     No symlinks, no FIFOs, nothing outside `job_dir`, and at most `limit` bytes (the last `limit` with
@@ -80,8 +80,14 @@ def csub_client(session: str) -> csub.Client:
 class CsubJobs:
     """Submit-once job runner. Job ids are remembered as `<key>.id` files in `id_dir`."""
 
-    def __init__(self, session: str, id_dir: Path, client_factory: Callable[[], Any] | None = None,
-                 sleep: Callable[[float], Any] = asyncio.sleep, poll_s: float = 60.0):
+    def __init__(
+        self,
+        session: str,
+        id_dir: Path,
+        client_factory: Callable[[], Any] | None = None,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        poll_s: float = 60.0,
+    ):
         self.session, self.id_dir = session, Path(id_dir)
         self._factory = client_factory or (lambda: csub_client(session))
         self._client = None
@@ -107,17 +113,31 @@ class CsubJobs:
             return id_file.read_text().strip()
         spec = spec() if callable(spec) else spec
         workspace = os.path.realpath(spec.workspace)
-        running = [status for status in await asyncio.to_thread(self.client.status)
-                   if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace]
+        running = [
+            status
+            for status in await asyncio.to_thread(self.client.status)
+            if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace
+        ]
         if running:  # same workspace (unique per job): submitted, then the worker died before writing the id file
             job_id = running[0].job_id
         else:
-            request = {"command": spec.command, "shell": True, "cwd": spec.workspace, "name": spec.name,
-                       "cpus": spec.cpus, "mem_mb": spec.mem_mb, "walltime_min": spec.walltime_min,
-                       "allow_hosts": list(spec.allow_hosts), "agent": spec.agent, "session": self.session,
-                       "mounts": [{"path": spec.workspace, "mode": "rw"},
-                                  *({"path": mount, "mode": "rw"} for mount in spec.rw_mounts),
-                                  *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts)]}
+            request = {
+                "command": spec.command,
+                "shell": True,
+                "cwd": spec.workspace,
+                "name": spec.name,
+                "cpus": spec.cpus,
+                "mem_mb": spec.mem_mb,
+                "walltime_min": spec.walltime_min,
+                "allow_hosts": list(spec.allow_hosts),
+                "agent": spec.agent,
+                "session": self.session,
+                "mounts": [
+                    {"path": spec.workspace, "mode": "rw"},
+                    *({"path": mount, "mode": "rw"} for mount in spec.rw_mounts),
+                    *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts),
+                ],
+            }
             if spec.env:
                 request["env"] = dict(spec.env)
             job_id = (await asyncio.to_thread(self.client.submit, request)).job_id

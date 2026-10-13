@@ -15,10 +15,17 @@ from mia_data.activities import Activities
 from mia_data.models import DatasetState, JobArgs, job_key
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
-RECORD = {"data": {"download_url": "https://data.example.org/a.zip", "formats": ["tiff"]},
-          "imaging": {"modality": ["confocal"], "organism": ["Homo sapiens"]}}
-BINDING = {"record": "rec-1", "record_commit": REC_SHA, "snippets_commit": SNIP_SHA, "reasons": ["r"],
-           "raw": [{"snippet": "tiff-zip-member", "urls": ["https://data.example.org/a.zip::m.tif"], "params": {}}]}
+RECORD = {
+    "data": {"download_url": "https://data.example.org/a.zip", "formats": ["tiff"]},
+    "imaging": {"modality": ["confocal"], "organism": ["Homo sapiens"]},
+}
+BINDING = {
+    "record": "rec-1",
+    "record_commit": REC_SHA,
+    "snippets_commit": SNIP_SHA,
+    "reasons": ["r"],
+    "raw": [{"snippet": "tiff-zip-member", "urls": ["https://data.example.org/a.zip::m.tif"], "params": {}}],
+}
 ROUND = "i1-e99"
 
 
@@ -34,9 +41,16 @@ def _setup(tmp_path, probe=None, csub=None):
     dl.mkdir()
     (dl / "conversion.json").write_text('{"axes": "zyx"}')
     downloads = {"downloaded": {"rec-1": {"at": "2026-10-01", "record_commit": REC_SHA, "dataset_dir": str(dl)}}}
-    cat = FakeGH("o/catalog", files={("state/downloads.json", "state"): json.dumps(downloads).encode(),
-                                     ("datasets/rec-1.yaml", REC_SHA): yaml.safe_dump(RECORD).encode()})
-    data = FakeGH("o/data", issues={1: {"number": 1, "body": "<!-- mia-data:record=rec-1 -->\n\n- Record: x", "labels": []}})
+    cat = FakeGH(
+        "o/catalog",
+        files={
+            ("state/downloads.json", "state"): json.dumps(downloads).encode(),
+            ("datasets/rec-1.yaml", REC_SHA): yaml.safe_dump(RECORD).encode(),
+        },
+    )
+    data = FakeGH(
+        "o/data", issues={1: {"number": 1, "body": "<!-- mia-data:record=rec-1 -->\n\n- Record: x", "labels": []}}
+    )
     snip = FakeGH("o/snippets", refs={"main": SNIP_SHA})
     snap = cfg.paths.work_root / "_snapshots" / SNIP_SHA  # as snapshot() leaves it
     for name in ("tiff-zip-member", "old-tiff"):
@@ -46,8 +60,9 @@ def _setup(tmp_path, probe=None, csub=None):
     (snap / "SPEC.md").write_text("spec\n")
     csub = csub or FakeCsub()
     jobs = CsubJobs("mia-data", cfg.paths.state_dir / "jobs", client_factory=lambda: csub)
-    a = Activities(cfg, data, snip, cat, jobs, bot="bot",
-                   probe=probe or (lambda: ["*.example.org", *cfg.network.package_hosts]))
+    a = Activities(
+        cfg, data, snip, cat, jobs, bot="bot", probe=probe or (lambda: ["*.example.org", *cfg.network.package_hosts])
+    )
     return SimpleNamespace(a=a, cfg=cfg, data=data, snip=snip, cat=cat, csub=csub)
 
 
@@ -114,7 +129,9 @@ async def test_read_match_foreign_host_needs_human(tmp_path):
 async def test_prepare_match_malformed_snippet_yaml_is_permanent(tmp_path):
     t = _setup(tmp_path)
     pins = await t.a.admit(1, "99")
-    (t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "tiff-zip-member" / "snippet.yaml").write_text("a: [\n")
+    (t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "tiff-zip-member" / "snippet.yaml").write_text(
+        "a: [\n"
+    )
     with pytest.raises(ApplicationError) as e:
         await t.a.prepare_match(1, ROUND, pins, 1)
     assert e.value.non_retryable and e.value.type in ("ParserError", "ScannerError")
@@ -135,8 +152,10 @@ async def test_submit_refuses_moved_harness(tmp_path):
 
 
 async def test_submit_refuses_host_missing_from_probe(tmp_path):
-    t = _setup(tmp_path, probe=lambda: ["*.pypi.org", "pypi.org", "files.pythonhosted.org", "conda.anaconda.org",
-                                        "repo.prefix.dev"])
+    t = _setup(
+        tmp_path,
+        probe=lambda: ["*.pypi.org", "pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.prefix.dev"],
+    )
     with pytest.raises(ApplicationError) as e:
         await _submit_match(t)
     assert e.value.non_retryable and "data.example.org" in str(e.value) and t.csub.submitted == []
@@ -175,7 +194,9 @@ async def test_comment_can_carry_the_binding(tmp_path):
     b.write_text("record: rec-1\n")
     await t.a.comment(1, "Test crops: **passed**", "test r 1", "data", str(b), "cd" * 32)
     body = t.data.comments[1][0]["body"]
-    assert body.startswith("Test crops: **passed**\n\n**Binding** (sha256 `" + "cd" * 32 + "`):\n```yaml\nrecord: rec-1\n```")
+    assert body.startswith(
+        "Test crops: **passed**\n\n**Binding** (sha256 `" + "cd" * 32 + "`):\n```yaml\nrecord: rec-1\n```"
+    )
 
 
 async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
@@ -202,6 +223,7 @@ def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/
 
     async def dir_sha(path, ref):
         return "tree1" if (path, ref) == ("snippets/new-snip", SNIP_SHA) else None
+
     t.snip.pr_files, t.snip.dir_sha = pr_files, dir_sha
 
 
@@ -219,12 +241,15 @@ async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
     assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("b, files, why", [
-    ({**NEW, "record": "rec-2"}, None, "rec-2"),
-    ({**NEW, "raw": [{**NEW["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}, None, "evil.example.com"),
-    (BINDING, None, "new-snip"),  # the example doesn't use the PR's snippet
-    (NEW, ["snippets/new-snip/a.py", "snippets/other/b.py"], "exactly one"),
-])
+@pytest.mark.parametrize(
+    "b, files, why",
+    [
+        ({**NEW, "record": "rec-2"}, None, "rec-2"),
+        ({**NEW, "raw": [{**NEW["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}, None, "evil.example.com"),
+        (BINDING, None, "new-snip"),  # the example doesn't use the PR's snippet
+        (NEW, ["snippets/new-snip/a.py", "snippets/other/b.py"], "exactly one"),
+    ],
+)
 async def test_adopt_pr_binding_rejects(tmp_path, b, files, why):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")
@@ -243,8 +268,12 @@ async def test_comment_returns_its_url_once(tmp_path):
 def _crop(root, cid, n):
     d = root / "crops" / cid
     d.mkdir(parents=True)
-    files = {"raw.png": b"raw" + cid.encode(), "crop.json": json.dumps(
-        {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}}).encode()}
+    files = {
+        "raw.png": b"raw" + cid.encode(),
+        "crop.json": json.dumps(
+            {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}}
+        ).encode(),
+    }
     for rel, b in files.items():
         (d / rel).write_bytes(b)
     return {"crop_id": cid, "files": {r: hashlib.sha256(b).hexdigest() for r, b in files.items()}}
@@ -265,8 +294,9 @@ async def test_publish_gallery_verified_only(tmp_path):
     t.data.files[f"{pre}/c1/raw.png"] = b"already there"
     g = await t.a.publish_gallery(1, ROUND, SNIP_SHA, str(cw), str(vw), verified)
     assert g.prefix == pre
-    assert sorted(t.data.puts) == [f"{pre}/{r}" for r in
-                                   ("binding.yaml", "c1/overlay.png", "c2/overlay.png", "c2/raw.png", "verify.json")]
+    assert sorted(t.data.puts) == [
+        f"{pre}/{r}" for r in ("binding.yaml", "c1/overlay.png", "c2/overlay.png", "c2/raw.png", "verify.json")
+    ]
     rows = [ln for ln in g.table.splitlines() if ln.startswith("| ![raw]")]
     assert len(rows) == 2 and all(ln.count("?raw=true") == 2 for ln in rows) and "c3" not in g.table
     assert "c2 · z=1 c=0 · (10, 5)" in rows[1]

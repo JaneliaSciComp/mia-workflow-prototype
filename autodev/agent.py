@@ -41,21 +41,39 @@ directory on branch `{branch}` at commit {base_sha}.
 """
 
 
-def render_prompt(cfg: Config, issue: dict, comments: list[dict], branch: str, base_sha: str, pr: int | None,
-                  feedback: str | None) -> str:
+def render_prompt(
+    cfg: Config, issue: dict, comments: list[dict], branch: str, base_sha: str, pr: int | None, feedback: str | None
+) -> str:
     """Fill the prompt template with the issue, the human discussion on it, and any reviewer feedback.
 
     `issue` and `comments` are GitHub API dicts; the bot's own comments (carrying our marker) are left out."""
     human = [comment for comment in comments if cfg.marker_prefix not in (comment.get("body") or "")]
-    discussion = ("\n# Discussion on the issue\n\n" + "\n\n".join(
-        f"**{(comment.get('user') or {}).get('login')}**: {comment.get('body')}" for comment in human) + "\n"
-        if human else "")
-    revision = (f"\n# Requested changes\n\nPull request #{pr} has your earlier work on this branch. "
-                f"A reviewer asked for:\n\n{feedback}\n") if feedback else ""
-    return PROMPT.format(number=issue["number"], repo=cfg.github.repo, branch=branch, base_sha=base_sha,
-                         title=issue.get("title") or "", body=issue.get("body") or "(no description)",
-                         discussion=discussion, revision=revision,
-                         protected=", ".join(cfg.github.protected_paths) or "(nothing)")
+    discussion = (
+        "\n# Discussion on the issue\n\n"
+        + "\n\n".join(f"**{(comment.get('user') or {}).get('login')}**: {comment.get('body')}" for comment in human)
+        + "\n"
+        if human
+        else ""
+    )
+    revision = (
+        (
+            f"\n# Requested changes\n\nPull request #{pr} has your earlier work on this branch. "
+            f"A reviewer asked for:\n\n{feedback}\n"
+        )
+        if feedback
+        else ""
+    )
+    return PROMPT.format(
+        number=issue["number"],
+        repo=cfg.github.repo,
+        branch=branch,
+        base_sha=base_sha,
+        title=issue.get("title") or "",
+        body=issue.get("body") or "(no description)",
+        discussion=discussion,
+        revision=revision,
+        protected=", ".join(cfg.github.protected_paths) or "(nothing)",
+    )
 
 
 def job_script(cfg: Config, base_sha: str) -> str:
@@ -64,8 +82,11 @@ def job_script(cfg: Config, base_sha: str) -> str:
     It runs Claude Code on the prompt, bundles whatever was committed since `base_sha`, and records the
     exit code for the worker to read."""
     quote = shlex.quote
-    path = (f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
-            if cfg.agent.path_prepend else "")
+    path = (
+        f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
+        if cfg.agent.path_prepend
+        else ""
+    )
     budget = f" --max-budget-usd {cfg.agent.max_budget_usd}" if cfg.agent.max_budget_usd is not None else ""
     return f"""set -u
 {path}cd repo || exit 1
@@ -108,11 +129,17 @@ def csub_client(cfg: Config) -> Any:
 class AgentJobs:
     """Submits and waits on agent jobs for one deployment, keyed by (issue, key, round)."""
 
-    def __init__(self, cfg: Config, client_factory: Callable[[], Any] | None = None,
-                 sleep: Callable[[float], Any] = asyncio.sleep, poll_s: float = 60.0):
+    def __init__(
+        self,
+        cfg: Config,
+        client_factory: Callable[[], Any] | None = None,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        poll_s: float = 60.0,
+    ):
         self.cfg = cfg
-        self.jobs = jobs.CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs",
-                                  client_factory or (lambda: csub_client(cfg)), sleep, poll_s)
+        self.jobs = jobs.CsubJobs(
+            cfg.deployment, cfg.paths.state_dir / "jobs", client_factory or (lambda: csub_client(cfg)), sleep, poll_s
+        )
 
     async def submit(self, issue: int, key: str, round_number: int, workspace: Workspace) -> JobRef:
         """Submit once per (issue, key, round); a retry returns the same job."""
@@ -122,11 +149,16 @@ class AgentJobs:
         def build_spec() -> jobs.JobSpec:  # built lazily: the API key env var is read only when no id file exists
             return jobs.JobSpec(
                 name=f"autodev-{issue}-r{round_number}",  # csub rejects names containing the username; session = deployment
-                command=job_script(self.cfg, workspace.base_sha), workspace=workspace.dir,
-                walltime_min=agent_cfg.walltime_min, cpus=agent_cfg.cpus, mem_mb=agent_cfg.mem_mb,
-                allow_hosts=list(agent_cfg.allow_hosts), agent="claude",
+                command=job_script(self.cfg, workspace.base_sha),
+                workspace=workspace.dir,
+                walltime_min=agent_cfg.walltime_min,
+                cpus=agent_cfg.cpus,
+                mem_mb=agent_cfg.mem_mb,
+                allow_hosts=list(agent_cfg.allow_hosts),
+                agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
-                env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {})
+                env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
+            )
 
         return JobRef(await self.jobs.submit(job_key, build_spec), agent_cfg.walltime_min)
 

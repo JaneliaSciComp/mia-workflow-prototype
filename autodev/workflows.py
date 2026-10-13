@@ -73,15 +73,26 @@ class IssueWorkflow:
         state = self.state
         return Status(state.issue, self.phase, state.round, state.pr, self.job_id, self.last_error)
 
-    async def _act(self, name: str, arg: Any, seconds: int = 60, budget: timedelta = timedelta(hours=6),
-                   result_type: type | None = None) -> Any:
+    async def _act(
+        self,
+        name: str,
+        arg: Any,
+        seconds: int = 60,
+        budget: timedelta = timedelta(hours=6),
+        result_type: type | None = None,
+    ) -> Any:
         """Run an activity with a per-attempt timeout and an overall retry budget.
 
         Transient failures retry until the budget runs out; activities raise a non-retryable
         ApplicationError for failures that a retry cannot fix."""
         return await workflow.execute_activity(
-            name, arg, start_to_close_timeout=timedelta(seconds=seconds), schedule_to_close_timeout=budget,
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL), result_type=result_type)
+            name,
+            arg,
+            start_to_close_timeout=timedelta(seconds=seconds),
+            schedule_to_close_timeout=budget,
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            result_type=result_type,
+        )
 
     async def _comment(self, number: int, body: str, marker: str) -> None:
         await self._act("comment", CommentInput(number, body, marker))
@@ -104,9 +115,11 @@ class IssueWorkflow:
             return await self._watch_pr()
         except (ActivityError, RoundFailed) as error:
             self.phase, self.last_error = "FAILED", error_message(error)
-            await self._act("report_failure",
-                            FailureInput(state.issue, state.key, state.round, self.last_error, self.workspace),
-                            budget=timedelta(hours=24))
+            await self._act(
+                "report_failure",
+                FailureInput(state.issue, state.key, state.round, self.last_error, self.workspace),
+                budget=timedelta(hours=24),
+            )
             return "failed"
 
     async def _run_round(self, feedback: Feedback | None) -> PrRef:
@@ -119,19 +132,29 @@ class IssueWorkflow:
         self.workspace = workspace = await self._act(
             "prepare_round",
             RoundInput(state.issue, state.key, state.round, state.pr, feedback.text if feedback else None),
-            seconds=600, result_type=Workspace)
-        job = await self._act("submit_agent", SubmitInput(state.issue, state.key, state.round, workspace),
-                              result_type=JobRef)
+            seconds=600,
+            result_type=Workspace,
+        )
+        job = await self._act(
+            "submit_agent", SubmitInput(state.issue, state.key, state.round, workspace), result_type=JobRef
+        )
         self.phase, self.job_id = "RUNNING", job.job_id
-        await self._comment(state.pr or state.issue, f"Round {state.round} started: agent job `{job.job_id}`.",
-                            f"started {state.key}-{state.round}")
+        await self._comment(
+            state.pr or state.issue,
+            f"Round {state.round} started: agent job `{job.job_id}`.",
+            f"started {state.key}-{state.round}",
+        )
         # Waiting on the job runs on its own task queue so long waits don't starve the short activities.
         outcome = await workflow.execute_activity(
-            "await_agent", AwaitInput(job.job_id, workspace), result_type=JobOutcome,
+            "await_agent",
+            AwaitInput(job.job_id, workspace),
+            result_type=JobOutcome,
             task_queue=workflow.info().task_queue + "-await",
             start_to_close_timeout=timedelta(minutes=job.walltime_min) + QUEUE_SLACK,
             schedule_to_close_timeout=timedelta(minutes=job.walltime_min) + timedelta(hours=24),
-            heartbeat_timeout=timedelta(minutes=3), retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL))
+            heartbeat_timeout=timedelta(minutes=3),
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+        )
         workflow.logger.info(ROUND_DONE_LOG, state.issue, state.round, outcome.job_id, outcome.state)
         if outcome.state != "DONE" or outcome.exit_code not in (0, None):
             raise RoundFailed(f"agent job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code})")
@@ -139,7 +162,9 @@ class IssueWorkflow:
         result = await self._act(
             "publish_round",
             PublishInput(state.issue, state.key, state.round, workspace, state.pr, feedback.id if feedback else None),
-            seconds=300, result_type=PrRef)
+            seconds=300,
+            result_type=PrRef,
+        )
         if result.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
             self.workspace = None
         return result
@@ -160,13 +185,15 @@ class IssueWorkflow:
                 await self._act("set_stage", StageInput(state.issue, None))
                 return "closed"
             if action == MERGE:
-                merge = await self._act("merge_pr", MergeInput(state.issue, state.pr, snapshot.head_sha),
-                                        result_type=MergeResult)
+                merge = await self._act(
+                    "merge_pr", MergeInput(state.issue, state.pr, snapshot.head_sha), result_type=MergeResult
+                )
                 if merge.merged:
                     await self._act("set_stage", StageInput(state.issue, "done"))
                     return "merged"
-                await self._comment(state.pr, f"Approved, but merging failed: {merge.message}",
-                                    f"merge-failed {snapshot.head_sha}")
+                await self._comment(
+                    state.pr, f"Approved, but merging failed: {merge.message}", f"merge-failed {snapshot.head_sha}"
+                )
             elif action == REVISE:
                 state.handled.append(detail.id)
                 state.revisions += 1
@@ -189,5 +216,8 @@ class PollWorkflow:
     @workflow.run
     async def execute(self) -> list[int]:
         return await workflow.execute_activity(
-            "poll_issues", start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=RetryPolicy(maximum_attempts=1), result_type=list[int])
+            "poll_issues",
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+            result_type=list[int],
+        )

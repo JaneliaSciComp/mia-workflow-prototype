@@ -13,13 +13,17 @@ K = "c0ffee01"  # a workflow key: 8 hex chars, like run_id[:8]
 
 
 def make_cfg(tmp_path: Path, github: dict | None = None, agent: dict | None = None, **top) -> Config:
-    return Config(**{
-        "deployment": "autodev",
-        "github": {"repo": "o/r", **(github or {})},
-        "paths": top.pop("paths", None) or {"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "work")},
-        "agent": agent or {},
-        **top,
-    })
+    return Config(
+        **{
+            "deployment": "autodev",
+            "github": {"repo": "o/r", **(github or {})},
+            "paths": top.pop("paths", None)
+            or {"state_dir": str(tmp_path / "state"), "work_root": str(tmp_path / "work")},
+            "agent": agent or {},
+            **top,
+        }
+    )
+
 
 GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t"]
 

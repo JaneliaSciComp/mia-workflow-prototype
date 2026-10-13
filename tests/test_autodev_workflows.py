@@ -48,8 +48,19 @@ def snap(state="open", sha="h1", approved=False, checks="none", feedback=()):
 
 
 class Mocks:
-    def __init__(self, snaps, existing_pr=None, job_state="DONE", exit_code=0, publish_pr=5, await_failures=0,
-                 merge_ok=True, observe_failures=0, report_failures=0, observe_fatal=False):
+    def __init__(
+        self,
+        snaps,
+        existing_pr=None,
+        job_state="DONE",
+        exit_code=0,
+        publish_pr=5,
+        await_failures=0,
+        merge_ok=True,
+        observe_failures=0,
+        report_failures=0,
+        observe_fatal=False,
+    ):
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
         self.calls: list[tuple[str, object]] = []
@@ -137,8 +148,9 @@ async def start(env, m, inp=None, runner=None):
     main = Worker(env.client, task_queue=tq, workflows=[IssueWorkflow], activities=m.acts(), **kw)
     waits = Worker(env.client, task_queue=tq + "-await", activities=m.await_act())
     async with main, waits:
-        h = await env.client.start_workflow(IssueWorkflow.execute, inp or IssueInput(7), id=f"wf-{uuid.uuid4()}",
-                                            task_queue=tq)
+        h = await env.client.start_workflow(
+            IssueWorkflow.execute, inp or IssueInput(7), id=f"wf-{uuid.uuid4()}", task_queue=tq
+        )
         return await h.result(), h
 
 
@@ -246,8 +258,12 @@ async def test_replay_recorded_history(env):
     AUTODEV_RECORD_HISTORY=1 pixi run pytest tests/test_autodev_workflows.py -k recorded_history"""
     if os.environ.get("AUTODEV_RECORD_HISTORY"):
         fb = Feedback("review-1", "rename foo")
-        _, h = await start(env, Mocks([snap(feedback=[fb]), snap(sha="h2", feedback=[fb]),
-                                       snap(sha="h2", approved=True, checks="success")]))
+        _, h = await start(
+            env,
+            Mocks(
+                [snap(feedback=[fb]), snap(sha="h2", feedback=[fb]), snap(sha="h2", approved=True, checks="success")]
+            ),
+        )
         HISTORY.parent.mkdir(exist_ok=True)
         HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("autodev-recorded", HISTORY.read_text())

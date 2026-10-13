@@ -27,13 +27,17 @@ from mia_data.jobspec import (
 from mia_data.models import Pins
 
 RECORD = {"data": {"download_url": "https://data.example.org/a.zip"}}
-BINDING = {"record": "rec-1", "record_commit": "c" * 40,
-           "raw": [{"snippet": "tiff-zip-member", "urls": ["https://data.example.org/a.zip::m.tif"], "params": {}}]}
+BINDING = {
+    "record": "rec-1",
+    "record_commit": "c" * 40,
+    "raw": [{"snippet": "tiff-zip-member", "urls": ["https://data.example.org/a.zip::m.tif"], "params": {}}],
+}
 
 
 def _cfg(tmp_path):
-    cfg = make_cfg(tmp_path, limits={"job_bytes": 1e6},
-                   network={"redirect_hosts": {"data.example.org": ["cdn.example.net"]}})
+    cfg = make_cfg(
+        tmp_path, limits={"job_bytes": 1e6}, network={"redirect_hosts": {"data.example.org": ["cdn.example.net"]}}
+    )
     h = cfg.harness.dir
     (h / "harness").mkdir()
     (h / "harness" / "pixi.lock").write_text("lock v1\n")
@@ -77,11 +81,15 @@ def test_snapshot_extracts_once_read_only(tmp_path, monkeypatch):
     sha = run_git("rev-parse", "HEAD", cwd=src)
     archives = []
     real = subprocess.run
-    monkeypatch.setattr(jobspec.subprocess, "run", lambda a, **k: (archives.append(a) if "archive" in a else None, real(a, **k))[1])
+    monkeypatch.setattr(
+        jobspec.subprocess, "run", lambda a, **k: (archives.append(a) if "archive" in a else None, real(a, **k))[1]
+    )
     d = snapshot(cfg, sha)
     assert snapshot(cfg, sha) == d == cfg.paths.work_root / "_snapshots" / sha and len(archives) == 1
     assert sorted(p.name for p in d.iterdir()) == ["SPEC.md", "WITHDRAWN.yaml", "snippets"]
-    assert all(_readonly(p) for p in [d, d / "SPEC.md", d / "snippets" / "npy", d / "snippets" / "npy" / "snippet.yaml"])
+    assert all(
+        _readonly(p) for p in [d, d / "SPEC.md", d / "snippets" / "npy", d / "snippets" / "npy" / "snippet.yaml"]
+    )
     assert (cfg.paths.state_dir / "mirror" / "mia-snippets.git" / "HEAD").exists()
     # a commit pushed after the mirror was made is fetched on demand
     (src / "snippets" / "npy" / "README.md").write_text("new\n")
@@ -102,6 +110,7 @@ def test_snapshot_concurrent_calls_extract_once(tmp_path, monkeypatch):
             archives.append(a)
             time.sleep(0.2)  # widen the race
         return real(a, **k)
+
     monkeypatch.setattr(jobspec.subprocess, "run", run)
     with ThreadPoolExecutor(2) as ex:
         a, b = ex.map(lambda _: snapshot(cfg, sha), range(2))
@@ -161,7 +170,9 @@ def test_match_job(tmp_path):
 @pytest.mark.parametrize("trusted", [False, True])
 def test_crop_job_cache_mode(tmp_path, trusted):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    s = crop_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s-t", "i1-e2", 0, None, trusted)
+    s = crop_job(
+        cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s-t", "i1-e2", 0, None, trusted
+    )
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert (cache in s.rw_mounts, cache in s.ro_mounts) == (trusted, not trusted)
     assert s.env["MIA_HARNESS_CACHE_WRITABLE"] == ("1" if trusted else "0") and Path(cache).is_dir()
@@ -198,10 +209,14 @@ def test_check_hosts_allowed(tmp_path):
 
 def _builders(cfg, ws, pins, tmp_path):
     snap = tmp_path / "snap"
-    return [lambda: match_job(cfg, ws, pins, "record.yaml"),
-            lambda: smoke_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml"),
-            lambda: crop_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True),
-            lambda: verify_job(cfg, ws, pins, tmp_path / "crops", "binding.yaml", None)]
+    return [
+        lambda: match_job(cfg, ws, pins, "record.yaml"),
+        lambda: smoke_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml"),
+        lambda: crop_job(
+            cfg, ws, pins, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True
+        ),
+        lambda: verify_job(cfg, ws, pins, tmp_path / "crops", "binding.yaml", None),
+    ]
 
 
 def test_every_builder_sets_harness_env(tmp_path):

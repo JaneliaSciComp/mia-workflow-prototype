@@ -46,9 +46,21 @@ class AppTokens:
     """A callable that returns a valid installation token, minting a new one when the current one is within
     5 minutes of expiry. Thread-safe, since git runs in worker threads."""
 
-    def __init__(self, app_id: int, installation_id: int, key_path: Path, api_url: str = "https://api.github.com",
-                 clock: Callable[[], float] = time.time, http: httpx.Client | None = None):
-        self._app_id, self._installation_id, self._key_path, self._api_url = app_id, installation_id, Path(key_path), api_url
+    def __init__(
+        self,
+        app_id: int,
+        installation_id: int,
+        key_path: Path,
+        api_url: str = "https://api.github.com",
+        clock: Callable[[], float] = time.time,
+        http: httpx.Client | None = None,
+    ):
+        self._app_id, self._installation_id, self._key_path, self._api_url = (
+            app_id,
+            installation_id,
+            Path(key_path),
+            api_url,
+        )
         self._clock = clock
         self._http = http or httpx.Client(timeout=30)
         self._token: str | None = None
@@ -60,8 +72,10 @@ class AppTokens:
             if self._token is None or self._clock() > self._expires - 300:
                 # ponytail: a sync HTTP call about once an hour from inside the event loop; fine at this rate.
                 jwt = app_jwt(self._app_id, self._key_path.read_bytes(), now=self._clock())
-                response = self._http.post(f"{self._api_url}/app/installations/{self._installation_id}/access_tokens",
-                                           headers={**_HEADERS, "Authorization": f"Bearer {jwt}"})
+                response = self._http.post(
+                    f"{self._api_url}/app/installations/{self._installation_id}/access_tokens",
+                    headers={**_HEADERS, "Authorization": f"Bearer {jwt}"},
+                )
                 response.raise_for_status()
                 body = response.json()
                 self._token = body["token"]

@@ -56,7 +56,8 @@ default = { features = ["test"], solve-group = "default" }
 
 [tool.pixi.tasks]
 test = "pytest tests/"
-lint = "ruff check ."
+lint = "ruff check . && ruff format --check ."
+fmt = "ruff format . && ruff check --fix ."
 ad = "autodev"
 md = "mia-data"
 

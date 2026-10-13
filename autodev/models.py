@@ -30,6 +30,7 @@ def check_key(key: str) -> str:
 @dataclass
 class Feedback:
     """One reviewer request for changes, from a PR review or a `/revise` comment."""
+
     id: str  # "review-<id>" | "comment-<id>"
     text: str
 
@@ -40,6 +41,7 @@ class IssueInput:
 
     It is the workflow's start argument and is passed to continue_as_new, so every field that must
     survive a history rollover lives here."""
+
     issue: int
     max_revisions: int = 3
     poll_minutes: int = 2
@@ -75,6 +77,7 @@ class RoundInput:
 @dataclass
 class Workspace:
     """Where one agent round runs: the directory holding prompt.md, repo/, result.* and exit_code."""
+
     dir: str
     base_sha: str
     branch: str
@@ -131,6 +134,7 @@ class ObserveInput:
 @dataclass
 class PrSnapshot:
     """What the PR looks like right now, as read by the observe_pr activity."""
+
     pr: int
     state: str  # open | closed | merged
     head_sha: str
@@ -164,6 +168,7 @@ class FailureInput:
 @dataclass
 class Status:
     """The answer to the workflow's `status` query."""
+
     issue: int
     state: str
     round: int

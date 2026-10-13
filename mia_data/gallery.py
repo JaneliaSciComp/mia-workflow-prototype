@@ -33,7 +33,10 @@ def gallery_files(crop_workspace: Path, verify_workspace: Path, verified: list[d
             raise ValueError(f"{crop_id}/raw.png differs from the verified checksum")
         out[f"{crop_id}/raw.png"] = raw
         out[f"{crop_id}/overlay.png"] = _read(verify_workspace, f"preview/{crop_id}/overlay.png")
-    out["binding.yaml"], out["verify.json"] = _read(verify_workspace, "binding.yaml"), _read(verify_workspace, "verify.json")
+    out["binding.yaml"], out["verify.json"] = (
+        _read(verify_workspace, "binding.yaml"),
+        _read(verify_workspace, "verify.json"),
+    )
     return out
 
 

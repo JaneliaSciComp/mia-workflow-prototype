@@ -10,8 +10,9 @@ from .models import Feedback, PrSnapshot
 DONE, CLOSED, MERGE, REVISE, ESCALATE, WAIT = "DONE", "CLOSED", "MERGE", "REVISE", "ESCALATE", "WAIT"
 
 
-def decide(snapshot: PrSnapshot, handled: list[str], revisions: int,
-           max_revisions: int) -> tuple[str, Feedback | str | None]:
+def decide(
+    snapshot: PrSnapshot, handled: list[str], revisions: int, max_revisions: int
+) -> tuple[str, Feedback | str | None]:
     """Return (action, detail): the Feedback to act on for REVISE, the reason for ESCALATE, else None.
 
     Pending change requests win over an approval while revisions remain; once the limit is hit, a pending

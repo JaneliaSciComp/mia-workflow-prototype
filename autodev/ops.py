@@ -66,8 +66,14 @@ def cmd_ps(cfg: Config, args: argparse.Namespace) -> int:
         print(f"{cfg.deployment}: not running")
         return 1
     print(f"{cfg.deployment}: running (tmux session)")
-    windows = _tmux("list-windows", "-t", f"={cfg.deployment}", "-F", "  #{window_name}: #{?pane_dead,dead,alive}",
-                    capture_output=True)
+    windows = _tmux(
+        "list-windows",
+        "-t",
+        f"={cfg.deployment}",
+        "-F",
+        "  #{window_name}: #{?pane_dead,dead,alive}",
+        capture_output=True,
+    )
     print(windows.stdout, end="")
     for name, path in log_files(cfg).items():
         if path.is_file():

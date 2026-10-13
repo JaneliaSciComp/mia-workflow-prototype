@@ -27,13 +27,22 @@ def render_crops_table(rows: list[dict]) -> str:
     """A markdown table of crop thumbnails (raw, overlay, caption), folded into <details> when it is long.
 
     Each row has crop_id, plane, box, raw_url and overlay_url (see Activities.publish_gallery)."""
+
     def caption(row: dict) -> str:
         plane, box = row.get("plane") or {}, row.get("box") or {}
-        return safe_text(neutralize(f"{row['crop_id']} · z={plane.get('z')} c={plane.get('c')} · "
-                                    f"({box.get('y')}, {box.get('x')})"))
-    lines = ["| raw | overlay | caption |", "|---|---|---|",
-             *(f"| ![raw]({quote(row['raw_url'], safe=':/?=&%')}) | ![overlay]({quote(row['overlay_url'], safe=':/?=&%')}) "
-               f"| {caption(row)} |" for row in rows)]
+        return safe_text(
+            neutralize(f"{row['crop_id']} · z={plane.get('z')} c={plane.get('c')} · ({box.get('y')}, {box.get('x')})")
+        )
+
+    lines = [
+        "| raw | overlay | caption |",
+        "|---|---|---|",
+        *(
+            f"| ![raw]({quote(row['raw_url'], safe=':/?=&%')}) | ![overlay]({quote(row['overlay_url'], safe=':/?=&%')}) "
+            f"| {caption(row)} |"
+            for row in rows
+        ),
+    ]
     table = "\n".join(lines) + "\n"
     return f"<details><summary>{len(rows)} crops</summary>\n\n{table}\n</details>\n" if len(rows) > 4 else table
 

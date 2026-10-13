@@ -81,11 +81,20 @@ SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
-CROP_STATUS = {"pending": "test crops running", "success": "test crops passed", "failure": "test crops failed",
-               "error": "test crops could not run"}
-PERMANENT = (HostsNotAllowed, PinMoved, Conflict, ValueError, FileNotFoundError,
-             yaml.YAMLError)  # inputs that a retry can't fix
-
+CROP_STATUS = {
+    "pending": "test crops running",
+    "success": "test crops passed",
+    "failure": "test crops failed",
+    "error": "test crops could not run",
+}
+PERMANENT = (
+    HostsNotAllowed,
+    PinMoved,
+    Conflict,
+    ValueError,
+    FileNotFoundError,
+    yaml.YAMLError,
+)  # inputs that a retry can't fix
 
 
 def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
@@ -100,8 +109,10 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
         try:
             return await inner(*args, **kwargs)
         except PERMANENT as error:
-            raise ApplicationError(f"{type(error).__name__}: {error}", type=type(error).__name__,
-                                   non_retryable=True) from error
+            raise ApplicationError(
+                f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
+            ) from error
+
     return wrapper
 
 
@@ -154,15 +165,21 @@ def _fenced(text: str, lang: str = "") -> str:
 def withdrawn_snippets(snapshot_dir: Path) -> dict[str, str]:
     """snippet name -> reason, from the snapshot's WITHDRAWN.yaml."""
     entries = yaml.safe_load(read_untrusted(snapshot_dir, "WITHDRAWN.yaml", 1 << 20) or "") or []
-    return {entry["name"]: _text(entry.get("reason")) for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str)}
+    return {
+        entry["name"]: _text(entry.get("reason"))
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
 
 
 def visible_snippets(snapshot_dir: Path) -> dict[str, str]:
     """snippet name -> its snippet.yaml text, hiding withdrawn snippets and ones another snippet supersedes."""
     root = snapshot_dir / "snippets"
-    catalog_text = {entry.name: text for entry in sorted(root.iterdir() if root.is_dir() else [])
-                    if (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None}
+    catalog_text = {
+        entry.name: text
+        for entry in sorted(root.iterdir() if root.is_dir() else [])
+        if (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None
+    }
     hidden = set(withdrawn_snippets(snapshot_dir))
     for text in catalog_text.values():
         parsed = yaml.safe_load(text)
@@ -181,8 +198,17 @@ class Activities:
     `bot` is the GitHub login mia-data posts as. `probe` returns the csub policy's allowed_hosts patterns;
     it is injectable for tests."""
 
-    def __init__(self, cfg: Config, gh_data: GitHub, gh_snippets: GitHub, gh_catalog: GitHub, jobs: CsubJobs,
-                 bot: str, client: Client | None = None, probe: Callable[[], list[str]] | None = None):
+    def __init__(
+        self,
+        cfg: Config,
+        gh_data: GitHub,
+        gh_snippets: GitHub,
+        gh_catalog: GitHub,
+        jobs: CsubJobs,
+        bot: str,
+        client: Client | None = None,
+        probe: Callable[[], list[str]] | None = None,
+    ):
         self.cfg, self.gh_data, self.gh_snippets, self.gh_catalog = cfg, gh_data, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
@@ -191,10 +217,28 @@ class Activities:
 
     def all(self) -> list:
         """The main queue's activities; await_job runs on the -await queue."""
-        return [self.admit, self.limits, self.poll, self.set_stage, self.comment, self.prepare_match, self.prepare_job,
-                self.probe_hosts, self.submit, self.read_match, self.read_smoke, self.read_verify, self.publish_gallery,
-                self.publish_crops, self.refuse_label, self.open_snippet_issue, self.pr_state, self.set_crop_status,
-                self.tree_sha, self.adopt_pr_binding]
+        return [
+            self.admit,
+            self.limits,
+            self.poll,
+            self.set_stage,
+            self.comment,
+            self.prepare_match,
+            self.prepare_job,
+            self.probe_hosts,
+            self.submit,
+            self.read_match,
+            self.read_smoke,
+            self.read_verify,
+            self.publish_gallery,
+            self.publish_crops,
+            self.refuse_label,
+            self.open_snippet_issue,
+            self.pr_state,
+            self.set_crop_status,
+            self.tree_sha,
+            self.adopt_pr_binding,
+        ]
 
     # --- helpers -----------------------------------------------------------------------------
 
@@ -203,9 +247,14 @@ class Activities:
 
     async def _bot_comment(self, gh: GitHub, number: int, marker: str) -> dict | None:
         """The bot's own comment carrying `marker` (an outsider's copy must not count)."""
-        return next((comment for comment in await gh.issue_comments(number)
-                     if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or "")),
-                    None)
+        return next(
+            (
+                comment
+                for comment in await gh.issue_comments(number)
+                if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or "")
+            ),
+            None,
+        )
 
     async def _comment_once(self, gh: GitHub, number: int, body: str, marker: str) -> str | None:
         """Post the comment unless one with this marker exists. Returns the comment's URL (the earlier one, on a retry)."""
@@ -285,8 +334,12 @@ class Activities:
         if path is None:
             raise ValueError(f"{record_id}: no record on main")
         record = await catalog.record(self.gh_catalog, path, entry["record_commit"])
-        pins = Pins(record_id, entry["record_commit"], await self.gh_snippets.get_ref_sha("main"),
-                    *await asyncio.to_thread(harness_pin, self.cfg))
+        pins = Pins(
+            record_id,
+            entry["record_commit"],
+            await self.gh_snippets.get_ref_sha("main"),
+            *await asyncio.to_thread(harness_pin, self.cfg),
+        )
         write_atomic(round_dir / "record.yaml", yaml.safe_dump(record, sort_keys=False))
         write_atomic(round_dir / "downloads.json", json.dumps(entry, indent=1))
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
@@ -296,13 +349,15 @@ class Activities:
     async def limits(self) -> RoundLimits:
         """The config values the workflow needs but cannot read itself."""
         cfg = self.cfg
-        return RoundLimits(cfg.crops.test_per_round, cfg.crops.per_round, cfg.limits.job_walltime_min,
-                           cfg.limits.max_pr_revisions)
+        return RoundLimits(
+            cfg.crops.test_per_round, cfg.crops.per_round, cfg.limits.job_walltime_min, cfg.limits.max_pr_revisions
+        )
 
     @activity.defn(name="set_stage")
     @mia_permanent_errors
-    async def set_stage(self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "",
-                        extra: str = "") -> None:
+    async def set_stage(
+        self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
+    ) -> None:
         """Swap the `data:<stage>` label and, within a round, post the stage's comment once.
 
         The comment has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
@@ -323,22 +378,31 @@ class Activities:
         if stage == "done":
             pins = self._pins(round_id)
             links["Crops"] = paths.link(self._dataset_dir(round_id, pins))
-            links["Gallery"] = (f"https://github.com/{gh.repo}/tree/{self.cfg.gallery.branch}/galleries/"
-                                f"{pins.record}/{round_id}")
+            links["Gallery"] = (
+                f"https://github.com/{gh.repo}/tree/{self.cfg.gallery.branch}/galleries/{pins.record}/{round_id}"
+            )
         marker = self.cfg.marker(f"stage {round_id} {stage}")
         parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
         await self._comment_once(gh, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
-    async def comment(self, issue: int, body: str, marker: str, repo: str = "data", binding_path: str | None = None,
-                      binding_hash: str | None = None) -> str | None:
+    async def comment(
+        self,
+        issue: int,
+        body: str,
+        marker: str,
+        repo: str = "data",
+        binding_path: str | None = None,
+        binding_hash: str | None = None,
+    ) -> str | None:
         """Post once per marker, on a data issue or (repo="snippets") a snippets issue or PR, with the binding
         appended when one is given. Returns the comment's URL."""
         full_marker = self.cfg.marker(marker)
         body = self._clean(body) + (f"\n\n{render_binding(binding_path, binding_hash)}" if binding_path else "")
-        return await self._comment_once(self.gh_snippets if repo == "snippets" else self.gh_data, issue,
-                                        f"{body}\n\n{full_marker}", full_marker)
+        return await self._comment_once(
+            self.gh_snippets if repo == "snippets" else self.gh_data, issue, f"{body}\n\n{full_marker}", full_marker
+        )
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -402,12 +466,26 @@ class Activities:
         if kind == "smoke":
             return smoke_job(cfg, workspace, pins, "binding.yaml", snapshot_dir, "record.yaml")
         if kind == "crop":
-            return crop_job(cfg, workspace, pins, "binding.yaml", snapshot_dir, "record.yaml", args.n_crops, args.seed,
-                            args.round_id, args.batch, existing, args.trusted)
+            return crop_job(
+                cfg,
+                workspace,
+                pins,
+                "binding.yaml",
+                snapshot_dir,
+                "record.yaml",
+                args.n_crops,
+                args.seed,
+                args.round_id,
+                args.batch,
+                existing,
+                args.trusted,
+            )
         if kind == "verify":
             if Path(args.crop_workspace).parent != workspace.parent:
                 raise ValueError(f"crop workspace {args.crop_workspace} is not of this round")
-            return verify_job(cfg, workspace, pins, self._crops_dir(Path(args.crop_workspace)), "binding.yaml", existing)
+            return verify_job(
+                cfg, workspace, pins, self._crops_dir(Path(args.crop_workspace)), "binding.yaml", existing
+            )
         raise ValueError(f"unknown job kind {kind!r}")
 
     @activity.defn(name="submit")
@@ -418,12 +496,15 @@ class Activities:
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         patterns = await asyncio.to_thread(self.probe)
-        snapshot_dir = await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
+        snapshot_dir = (
+            await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
+        )
 
         def build() -> JobSpec:
             spec = self._spec(kind, args, snapshot_dir)
             check_hosts_allowed(spec, patterns)
             return spec
+
         try:
             return await self.jobs.submit(key, build)
         except CsubError as error:
@@ -455,34 +536,46 @@ class Activities:
             return MatchResult("blocked", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
         if kind == "blocked":
-            return MatchResult("blocked", _text(outcome.get("reason")) or "the match agent reported blocked, with no reason")
+            return MatchResult(
+                "blocked", _text(outcome.get("reason")) or "the match agent reported blocked, with no reason"
+            )
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
         if kind not in ("matched", "ineligible"):
             return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
-        binding, errors = await self._check_binding(read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins,
-                                                    pins.snippets_commit)
+        binding, errors = await self._check_binding(
+            read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
+        )
         if errors:
             return MatchResult("blocked", _text("binding check failed: " + "; ".join(errors)))
-        binding_path, digest = self._store_binding(round_dir / f"binding-{match.group(1)}.yaml",
-                                                   {**binding, "snippets_commit": pins.snippets_commit})
-        return MatchResult(kind, binding_path=binding_path, binding_hash=digest,
-                           shapes=_small_dict(outcome.get("shapes")) if kind == "ineligible" else None,
-                           reasons=_texts(binding.get("reasons")))
+        binding_path, digest = self._store_binding(
+            round_dir / f"binding-{match.group(1)}.yaml", {**binding, "snippets_commit": pins.snippets_commit}
+        )
+        return MatchResult(
+            kind,
+            binding_path=binding_path,
+            binding_hash=digest,
+            shapes=_small_dict(outcome.get("shapes")) if kind == "ineligible" else None,
+            reasons=_texts(binding.get("reasons")),
+        )
 
-    async def _check_binding(self, text: str | None, round_id: str, pins: Pins,
-                             sha: str) -> tuple[dict | None, list[str]]:
+    async def _check_binding(
+        self, text: str | None, round_id: str, pins: Pins, sha: str
+    ) -> tuple[dict | None, list[str]]:
         """Parse an agent-written binding and check it against the round's record and the snippets at `sha`.
         Returns (binding, errors); the binding is None when there are errors."""
         if text is None:
             return None, ["the binding is missing or unreadable"]
         try:
             binding = yaml.safe_load(text)
-            errors = check_binding(binding, self._record(round_id), set(visible_snippets(await self._snapshot(sha))),
-                                   pins=pins)
+            errors = check_binding(
+                binding, self._record(round_id), set(visible_snippets(await self._snapshot(sha))), pins=pins
+            )
             if not errors:  # hosts() raises if a URL would grant a GitHub host
-                hosts([url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg)
+                hosts(
+                    [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
+                )
         except (yaml.YAMLError, ValueError, RecursionError) as error:  # a malformed URL raises in urlsplit
             errors = [f"{type(error).__name__}: {error}"]
         return binding if not errors else None, errors
@@ -501,10 +594,15 @@ class Activities:
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
-        return SmokeResult(report.get("ok") is True, report.get("eligible") is True, _small_dict(report.get("shapes")),
-                           _texts(report.get("errors")), _texts(report.get("warnings")),
-                           fetched if type(fetched) is int and fetched >= 0 else 0,
-                           _text(report.get("host_not_allowed"), 300) or None)
+        return SmokeResult(
+            report.get("ok") is True,
+            report.get("eligible") is True,
+            _small_dict(report.get("shapes")),
+            _texts(report.get("errors")),
+            _texts(report.get("warnings")),
+            fetched if type(fetched) is int and fetched >= 0 else 0,
+            _text(report.get("host_not_allowed"), 300) or None,
+        )
 
     @activity.defn(name="read_verify")
     @mia_permanent_errors
@@ -523,10 +621,19 @@ class Activities:
             if not isinstance(crop, dict):
                 continue
             crop_id, files = crop.get("crop_id"), crop.get("files")
-            if (crop.get("ok") is True and isinstance(crop_id, str) and CROP_ID_RE.fullmatch(crop_id) and crop_id not in seen
-                    and isinstance(files, dict) and len(files) <= 64 and {"crop.json", "raw.png"} <= files.keys()
-                    and all(isinstance(rel, str) and isinstance(digest, str) and HEX64.fullmatch(digest)
-                            for rel, digest in files.items())):
+            if (
+                crop.get("ok") is True
+                and isinstance(crop_id, str)
+                and CROP_ID_RE.fullmatch(crop_id)
+                and crop_id not in seen
+                and isinstance(files, dict)
+                and len(files) <= 64
+                and {"crop.json", "raw.png"} <= files.keys()
+                and all(
+                    isinstance(rel, str) and isinstance(digest, str) and HEX64.fullmatch(digest)
+                    for rel, digest in files.items()
+                )
+            ):
                 verified.append({"crop_id": crop_id, "files": files})
                 seen.add(crop_id)
             else:
@@ -542,15 +649,17 @@ class Activities:
             value = crop_report.get(key)
             return value if type(value) is int and value >= 0 else None
 
-        return VerifyResult(len(verified), n_crops, (errors + failed)[:20], verified, count("n"),
-                            count("bytes_fetched") or 0)
+        return VerifyResult(
+            len(verified), n_crops, (errors + failed)[:20], verified, count("n"), count("bytes_fetched") or 0
+        )
 
     # --- publication -------------------------------------------------------------------------
 
     @activity.defn(name="publish_gallery")
     @mia_permanent_errors
-    async def publish_gallery(self, issue: int, round_id: str, kind: str, crop_workspace: str, verify_workspace: str,
-                              verified: list[dict]) -> GalleryResult:
+    async def publish_gallery(
+        self, issue: int, round_id: str, kind: str, crop_workspace: str, verify_workspace: str, verified: list[dict]
+    ) -> GalleryResult:
         """Publish raw.png + overlay.png of the verified crops, with the binding and verify report, under
         galleries/<record>/<round>/<kind> (kind = the tested SHA, or production) on the galleries branch; a
         test-pr round's go under galleries/_test-pr/<record>/<pr>/<kind>. Returns the URLs and a crops table."""
@@ -559,8 +668,11 @@ class Activities:
         crop_dir = self._job_workspace(issue, round_id, crop_workspace)
         verify_dir = self._job_workspace(issue, round_id, verify_workspace)
         record_id, test_pr = self._pins(round_id).record, TEST_PR_RE.fullmatch(round_id)
-        prefix = (f"galleries/_test-pr/{record_id}/{test_pr.group(1)}/{kind}" if test_pr
-                  else f"galleries/{record_id}/{round_id}/{kind}")
+        prefix = (
+            f"galleries/_test-pr/{record_id}/{test_pr.group(1)}/{kind}"
+            if test_pr
+            else f"galleries/{record_id}/{round_id}/{kind}"
+        )
         files = await asyncio.to_thread(gallery_files, crop_dir, verify_dir, verified)
         urls = await publish_gallery(self.gh_data, self.cfg.gallery.branch, prefix, files)
         rows = []
@@ -570,23 +682,35 @@ class Activities:
             if raw is None or hashlib.sha256(raw).hexdigest() != crop["files"]["crop.json"]:
                 raise ValueError(f"{crop_id}/crop.json is missing or differs from the verified checksum")
             crop_json = parsed if isinstance(parsed := _loads(raw), dict) else {}
-            rows.append({"crop_id": crop_id,
-                         "plane": crop_json.get("plane") if isinstance(crop_json.get("plane"), dict) else {},
-                         "box": crop_json.get("box") if isinstance(crop_json.get("box"), dict) else {},
-                         "raw_url": urls[f"{crop_id}/raw.png"], "overlay_url": urls[f"{crop_id}/overlay.png"]})
+            rows.append(
+                {
+                    "crop_id": crop_id,
+                    "plane": crop_json.get("plane") if isinstance(crop_json.get("plane"), dict) else {},
+                    "box": crop_json.get("box") if isinstance(crop_json.get("box"), dict) else {},
+                    "raw_url": urls[f"{crop_id}/raw.png"],
+                    "overlay_url": urls[f"{crop_id}/overlay.png"],
+                }
+            )
         return GalleryResult(prefix, urls, render_crops_table(rows))
 
     @activity.defn(name="publish_crops")
     @mia_permanent_errors
-    async def publish_crops(self, issue: int, round_id: str, crop_workspace: str, verified: list[dict], sha: str) -> dict:
+    async def publish_crops(
+        self, issue: int, round_id: str, crop_workspace: str, verified: list[dict], sha: str
+    ) -> dict:
         """Publish the verified crops into the dataset folder, marking crops of snippets withdrawn in
         mia-snippets at `sha`. Returns {"published", "already", "total"}."""
         crops_dir = self._crops_dir(self._job_workspace(issue, round_id, crop_workspace))
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
-        return await asyncio.to_thread(crop_publish.publish, self._dataset_dir(round_id, self._pins(round_id)), crops_dir,
-                                       verified, withdrawn,
-                                       tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600))
+        return await asyncio.to_thread(
+            crop_publish.publish,
+            self._dataset_dir(round_id, self._pins(round_id)),
+            crops_dir,
+            verified,
+            withdrawn,
+            tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600),
+        )
 
     # --- snippet development -----------------------------------------------------------------
 
@@ -599,29 +723,45 @@ class Activities:
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
         # ponytail: lists every issue; one call per round. Filter by author here: an outsider can copy the marker.
         for existing in await gh.list_issues(state="all"):
-            if (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(marker):
+            if (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
+                marker
+            ):
                 return existing["number"]
         record = self._record(round_id)
         urls = record_urls(record)
         data_format = _text(((record.get("data") or {}).get("formats") or ["unknown"])[0], 40)
         # ponytail: container guessed from the record's URLs; the agent's what_fails is the authority
-        container = ("zip" if any("::" in url or url.split("?")[0].endswith(".zip") for url in urls)
-                     else "s3" if any(url.startswith("s3://") for url in urls) else "http")
-        excerpt = yaml.safe_dump({key: record.get(key) for key in ("title", "imaging", "data", "technical")},
-                                 sort_keys=False)
+        container = (
+            "zip"
+            if any("::" in url or url.split("?")[0].endswith(".zip") for url in urls)
+            else "s3"
+            if any(url.startswith("s3://") for url in urls)
+            else "http"
+        )
+        excerpt = yaml.safe_dump(
+            {key: record.get(key) for key in ("title", "imaging", "data", "technical")}, sort_keys=False
+        )
         draft = draft or {}
-        body = "\n\n".join([
-            marker, f"New snippet needed for dataset `{pins.record}` ([{github_cfg.data_repo}#{issue}]"
-                    f"(https://github.com/{github_cfg.data_repo}/issues/{issue})). Read "
-                    f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md) first, and add the "
-                    f"binding you test as `examples/{pins.record}.yaml`.",
-            f"**Record** (at `{pins.record_commit}`):", _fenced(self._clean(excerpt[:8000]), "yaml"),
-            "**What fails** (the match agent's report):", _fenced(self._clean(_text(draft.get("what_fails"), 4000))),
-            "**Tried:**", _fenced(self._clean(json.dumps(draft.get("tried"), indent=1)[:8000]), "json"),
-            "**Draft binding:**",
-            _fenced(self._clean(yaml.safe_dump(draft.get("draft_binding"), sort_keys=False)[:16000]), "yaml")])
-        title = (f"New snippet for {self._clean(data_format)}/{container} "
-                 f"({github_cfg.data_repo.split('/')[-1]}#{issue})")
+        body = "\n\n".join(
+            [
+                marker,
+                f"New snippet needed for dataset `{pins.record}` ([{github_cfg.data_repo}#{issue}]"
+                f"(https://github.com/{github_cfg.data_repo}/issues/{issue})). Read "
+                f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md) first, and add the "
+                f"binding you test as `examples/{pins.record}.yaml`.",
+                f"**Record** (at `{pins.record_commit}`):",
+                _fenced(self._clean(excerpt[:8000]), "yaml"),
+                "**What fails** (the match agent's report):",
+                _fenced(self._clean(_text(draft.get("what_fails"), 4000))),
+                "**Tried:**",
+                _fenced(self._clean(json.dumps(draft.get("tried"), indent=1)[:8000]), "json"),
+                "**Draft binding:**",
+                _fenced(self._clean(yaml.safe_dump(draft.get("draft_binding"), sort_keys=False)[:16000]), "yaml"),
+            ]
+        )
+        title = (
+            f"New snippet for {self._clean(data_format)}/{container} ({github_cfg.data_repo.split('/')[-1]}#{issue})"
+        )
         return (await gh.create_issue(title, body, ["snippets:go"]))["number"]
 
     @activity.defn(name="pr_state")
@@ -634,9 +774,15 @@ class Activities:
             raise ValueError(f"PR #{pr} is not on a snippets/issue-<K> branch of {self.gh_snippets.repo}")
         snippet_issue, merged = int(match.group(1)), bool(pr_data.get("merged"))
         labels = {label["name"] for label in (await self.gh_snippets.get_issue(snippet_issue)).get("labels", [])}
-        return PrUpdate(pr, pr_data["head"]["sha"], "merged" if merged else pr_data["state"],
-                        pr_data.get("merge_commit_sha") if merged else None, snippet_issue,
-                        "snippets:needs-human" in labels, pr_data.get("html_url"))
+        return PrUpdate(
+            pr,
+            pr_data["head"]["sha"],
+            "merged" if merged else pr_data["state"],
+            pr_data.get("merge_commit_sha") if merged else None,
+            snippet_issue,
+            "snippets:needs-human" in labels,
+            pr_data.get("html_url"),
+        )
 
     @activity.defn(name="set_crop_status")
     @mia_permanent_errors
@@ -666,8 +812,9 @@ class Activities:
         if not SHA_RE.fullmatch(sha):
             raise ValueError(f"bad sha {sha!r}")
         gh, round_dir, pins = self.gh_snippets, self._round_dir(round_id), self._pins(round_id)
-        names = sorted({file.split("/")[1] for file in await gh.pr_files(pr)
-                        if file.startswith("snippets/") and "/" in file[9:]})
+        names = sorted(
+            {file.split("/")[1] for file in await gh.pr_files(pr) if file.startswith("snippets/") and "/" in file[9:]}
+        )
         if len(names) != 1 or not NAME_RE.fullmatch(name := names[0]):
             return {"errors": [_text(f"the PR must add exactly one snippets/<name>/ directory, not {names}", 500)]}
         if not await gh.dir_sha(f"snippets/{name}", sha):
@@ -680,8 +827,9 @@ class Activities:
             errors = [f"{rel} does not use snippet {name!r}"]
         if errors:
             return {"errors": [f"{rel}: {error}" for error in _texts(errors)]}
-        binding_path, digest = self._store_binding(round_dir / f"binding-pr-{sha[:7]}.yaml",
-                                                   {**binding, "snippets_commit": sha})
+        binding_path, digest = self._store_binding(
+            round_dir / f"binding-pr-{sha[:7]}.yaml", {**binding, "snippets_commit": sha}
+        )
         return {"path": binding_path, "hash": digest, "name": name, "errors": []}
 
     # --- the poller --------------------------------------------------------------------------
@@ -705,19 +853,32 @@ class Activities:
                     if not actor or await gh_data.permission(actor) not in WRITE_PERMISSIONS:
                         await gh_data.remove_label(number, label)
                         marker = cfg.marker(f"ignored {label} {event_id}")
-                        await self._comment_once(gh_data, number,
-                                                 f"Ignoring `{label}`: it was added by `{actor or 'unknown'}`, who does "
-                                                 f"not have write access to this repository.\n\n{marker}", marker)
+                        await self._comment_once(
+                            gh_data,
+                            number,
+                            f"Ignoring `{label}`: it was added by `{actor or 'unknown'}`, who does "
+                            f"not have write access to this repository.\n\n{marker}",
+                            marker,
+                        )
                     elif not (event_id and labeled_at):
                         log.warning("poll: #%s %s: label event has no id or time", number, label)
                     elif kind == "go" and "licence-excluded" in {lb["name"] for lb in issue.get("labels", [])}:
-                        await self.refuse_label(number, label, "the dataset's licence is not in `crops.licences` "
-                                                               "(`licence-excluded`)", event_id)
+                        await self.refuse_label(
+                            number,
+                            label,
+                            "the dataset's licence is not in `crops.licences` (`licence-excluded`)",
+                            event_id,
+                        )
                     else:
                         # start_signal: starts the workflow if needed and delivers the label as a signal either way
                         await self.client.start_workflow(
-                            "MiaDataDataset", DatasetState(number), id=cfg.workflow_id(number), task_queue=cfg.task_queue,
-                            start_signal=kind, start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)])
+                            "MiaDataDataset",
+                            DatasetState(number),
+                            id=cfg.workflow_id(number),
+                            task_queue=cfg.task_queue,
+                            start_signal=kind,
+                            start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)],
+                        )
                         await gh_data.remove_label(number, label)  # only once the signal is accepted
                         done.append(f"{kind} #{number}")
                 except Exception:
@@ -727,32 +888,45 @@ class Activities:
         for pr_data in await gh_snippets.list_prs(state="all"):
             try:
                 head = pr_data["head"]
-                if pr_data["state"] == "open" and not any(status.get("context") == "mia-data/crops"
-                                                          for status in await gh_snippets.statuses(head["sha"])):
+                if pr_data["state"] == "open" and not any(
+                    status.get("context") == "mia-data/crops" for status in await gh_snippets.statuses(head["sha"])
+                ):
                     files = await gh_snippets.pr_files(pr_data["number"])
                     if len(files) < 100 and not any(file.startswith("snippets/") for file in files):  # 100: a full page
-                        await gh_snippets.set_status(head["sha"], "mia-data/crops", "success", "no snippet in this PR",
-                                                     None)
+                        await gh_snippets.set_status(
+                            head["sha"], "mia-data/crops", "success", "no snippet in this PR", None
+                        )
                         done.append(f"status PR #{pr_data['number']}")
                 match = re.fullmatch(r"snippets/issue-(\d+)", head["ref"])
-                if (not match or (head.get("repo") or {}).get("full_name") != gh_snippets.repo
-                        or (pr_data["state"] != "open" and datetime.fromisoformat(pr_data["updated_at"]) < recent)):
+                if (
+                    not match
+                    or (head.get("repo") or {}).get("full_name") != gh_snippets.repo
+                    or (pr_data["state"] != "open" and datetime.fromisoformat(pr_data["updated_at"]) < recent)
+                ):
                     continue
                 snippet_issue = await gh_snippets.get_issue(int(match.group(1)))
                 issue_marker = SNIPPET_ISSUE_RE.match(snippet_issue.get("body") or "")
-                if not issue_marker or (snippet_issue.get("user") or {}).get("login") != self.bot:  # an outsider can copy the marker
+                if (
+                    not issue_marker or (snippet_issue.get("user") or {}).get("login") != self.bot
+                ):  # an outsider can copy the marker
                     continue
                 merged = bool(pr_data.get("merged_at"))
-                update = PrUpdate(pr_data["number"], head["sha"], "merged" if merged else pr_data["state"],
-                                  pr_data.get("merge_commit_sha") if merged else None, snippet_issue["number"],
-                                  "snippets:needs-human" in {lb["name"] for lb in snippet_issue.get("labels", [])},
-                                  pr_data.get("html_url"))
+                update = PrUpdate(
+                    pr_data["number"],
+                    head["sha"],
+                    "merged" if merged else pr_data["state"],
+                    pr_data.get("merge_commit_sha") if merged else None,
+                    snippet_issue["number"],
+                    "snippets:needs-human" in {lb["name"] for lb in snippet_issue.get("labels", [])},
+                    pr_data.get("html_url"),
+                )
                 fingerprint = (update.head_sha, update.state, update.merge_sha, update.needs_human)
                 if self._sent.get(update.pr) == fingerprint:
                     continue  # signalled already: a wake-up per change, not per poll
                 try:
                     await self.client.get_workflow_handle(cfg.workflow_id(int(issue_marker.group(1)))).signal(
-                        "pr_update", update)
+                        "pr_update", update
+                    )
                     self._sent[update.pr] = fingerprint
                     done.append(f"pr_update PR #{pr_data['number']}")
                 except RPCError as error:

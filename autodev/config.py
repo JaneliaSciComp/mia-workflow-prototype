@@ -84,6 +84,7 @@ class AgentCfg(BaseModel):
 
 class Config(BaseModel):
     """The whole autodev.yaml, validated, plus the derived names (labels, branches, markers) built from it."""
+
     deployment: str = "autodev"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg()
