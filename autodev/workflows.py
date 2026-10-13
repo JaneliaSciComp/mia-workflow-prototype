@@ -174,6 +174,7 @@ class IssueWorkflow:
 
         Rolls the history over with continue_as_new when Temporal suggests it or the poll cap is hit."""
         state = self.state
+        assert state.pr is not None  # a round opened the PR before _watch_pr runs
         for _ in range(MAX_POLLS_PER_EXECUTION):
             self.phase = "REVIEW"
             snapshot = await self._act("observe_pr", ObserveInput(state.pr), result_type=PrSnapshot)
@@ -195,6 +196,7 @@ class IssueWorkflow:
                     state.pr, f"Approved, but merging failed: {merge.message}", f"merge-failed {snapshot.head_sha}"
                 )
             elif action == REVISE:
+                assert isinstance(detail, Feedback)  # decide() returns the Feedback to act on for REVISE
                 state.handled.append(detail.id)
                 state.revisions += 1
                 await self._act("set_stage", StageInput(state.issue, "working"))

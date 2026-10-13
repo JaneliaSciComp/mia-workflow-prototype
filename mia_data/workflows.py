@@ -59,9 +59,11 @@ def _rollover_due() -> bool:
 
 def _parse_time(iso: str | None) -> datetime | None:
     """Parse an ISO-8601 timestamp as UTC; None if missing or malformed."""
+    if iso is None:
+        return None
     try:
         parsed = datetime.fromisoformat(iso)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
@@ -136,6 +138,12 @@ class MiaDataDataset:
             result_type=result_type,
         )
 
+    async def _limits(self) -> RoundLimits:
+        """The round's config values. They are not part of the durable state, so a rollover re-reads them."""
+        if self.limits is None:
+            self.limits = await self._act("limits", result_type=RoundLimits)
+        return self.limits
+
     async def _guard(self, step: Awaitable[None]) -> None:
         """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow."""
         try:
@@ -197,6 +205,7 @@ class MiaDataDataset:
         The wait is its own activity on a separate queue so a worker restart reattaches to the running job.
         `workspace_kind` distinguishes several jobs of one kind in a round (crop-<sha>); it defaults to `kind`."""
         state = self.state
+        assert state.round_id and state.pins  # a round is admitted before any job runs
         job_id = await self._act(
             "submit",
             job_key(state.issue, state.round_id, workspace_kind or kind, 1),
@@ -205,7 +214,7 @@ class MiaDataDataset:
             seconds=600,
             result_type=str,
         )
-        walltime = timedelta(minutes=self.limits.walltime_min)
+        walltime = timedelta(minutes=(await self._limits()).walltime_min)
         return await workflow.execute_activity(
             "await_job",
             args=[job_id, workspace],
@@ -271,11 +280,13 @@ class MiaDataDataset:
         Returns (the Test record, descriptions of failed jobs, the markdown report for the issue)."""
         state = self.state
         crop_workspace, verify_workspace, verify, crop_job, verify_job = await self._crop(
-            sha, sha, self.limits.test_n, seed, 0, trusted
+            sha, sha, (await self._limits()).test_n, seed, 0, trusted
         )
         passed, failed_jobs = judge(verify, [crop_job, verify_job])
         gallery = await self._gallery(sha, crop_workspace, verify_workspace, verify) if verify.crops else None
-        test = Test(sha, f"{state.round_id}-{sha[:12]}", passed, workflow.now().isoformat(), gallery and gallery.prefix)
+        test = Test(
+            sha, f"{state.round_id}-{sha[:12]}", passed, workflow.now().isoformat(), gallery.prefix if gallery else None
+        )
         lines = [
             f"Test crops at `{sha}`: **{'passed' if passed else 'failed'}**, {verify.ok_count} of "
             f"{verify.n} verified; the crop job fetched {verify.bytes_fetched} bytes.",
@@ -357,10 +368,10 @@ class MiaDataDataset:
         """Make and publish the full set of crops. Passing crops stay published even when the round ends in
         needs-human."""
         state = self.state
+        assert state.pins and state.seed  # set at admission; carried in the durable state across rollovers
         sha = state.pins.snippets_commit
         await self._stage("cropping")
-        self.limits = self.limits or await self._act("limits", result_type=RoundLimits)  # gone after a rollover
-        n_crops = self.limits.per_round
+        n_crops = (await self._limits()).per_round
         crop_workspace, verify_workspace, verify, crop_job, _ = await self._crop(
             "production", sha, n_crops, state.seed + "-p", 1
         )
@@ -403,7 +414,7 @@ class MiaDataDataset:
 
     async def _review(self) -> bool:
         """Wait for an approve newer than the test result (True), or a new go (False). Stale approves are refused."""
-        tested_at = _parse_time(self.state.tests[-1].finished_at)
+        tested_at = _parse_time(self.state.tests[-1].finished_at) or workflow.now()  # unparseable: nothing older counts
         while True:
             await workflow.wait_condition(lambda: bool(self.approve_events or self.go_events) or _rollover_due())
             if not (self.approve_events or self.go_events):
@@ -439,7 +450,7 @@ class MiaDataDataset:
     async def _follow_pr(self) -> None:
         """Wake on pr_update until the round ends, refusing labels meanwhile (busy). Rolls over only here, idle."""
         state = self.state
-        self.limits = self.limits or await self._act("limits", result_type=RoundLimits)  # gone after a rollover
+        await self._limits()
         while True:
             await workflow.wait_condition(
                 lambda: bool(state.pending or self.go_events or self.approve_events) or _rollover_due()
@@ -469,7 +480,7 @@ class MiaDataDataset:
                 return True
             if any(test.sha == pr.head_sha for test in state.tests):
                 return False  # tested: its status stands until a new head
-            if len(state.tests) >= self.limits.max_pr_revisions:
+            if len(state.tests) >= (await self._limits()).max_pr_revisions:
                 await self._finish(
                     "needs-human", f"{where}: revision limit, {len(state.tests)} heads tested and none merged"
                 )
@@ -527,6 +538,9 @@ class MiaDataDataset:
         The merged head's passing test carries over if the snippet tree is unchanged by the merge; otherwise
         the merge commit gets its own (trusted, status-less) test first. An older head's pass never counts."""
         state, merge_sha = self.state, pr.merge_sha
+        if not merge_sha:
+            raise RoundFailed(f"snippet PR #{pr.pr} is merged but GitHub reports no merge commit")
+        assert state.pins and state.seed  # set at admission; carried in the durable state across rollovers
         tree = state.snippet_name and await self._act("tree_sha", merge_sha, state.snippet_name)
         binding = await self._act("adopt_pr_binding", state.round_id, pr.pr, merge_sha, seconds=600, result_type=dict)
         if binding["errors"]:

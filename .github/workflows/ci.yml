@@ -14,4 +14,5 @@ jobs:
         with:
           cache: true
       - run: pixi run lint
+      - run: pixi run typecheck
       - run: pixi run test

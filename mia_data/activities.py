@@ -20,7 +20,7 @@ import shutil
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 from temporalio import activity
@@ -114,7 +114,7 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
                 f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
             ) from error
 
-    return wrapper
+    return cast(Fn, wrapper)
 
 
 def write_atomic(path: Path, data: str | bytes) -> None:
@@ -215,6 +215,13 @@ class Activities:
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
         self._sent: dict[int, tuple] = {}  # poll: PR number -> the (head, state, merge, needs_human) last signalled
+
+    @property
+    def temporal(self) -> Client:
+        """The Temporal client; only the worker's activities (poll) have one."""
+        if self.client is None:
+            raise RuntimeError("no Temporal client: this activity runs only inside the worker")
+        return self.client
 
     def all(self) -> list:
         """The main queue's activities; await_job runs on the -await queue."""
@@ -433,8 +440,8 @@ class Activities:
         shutil.copyfile(round_dir / "downloads.json", workspace / "downloads.json")
         dataset_dir = json.loads((round_dir / "downloads.json").read_text()).get("dataset_dir")
         for name in ("conversion.json", "manifest.json"):
-            if isinstance(dataset_dir, str) and (text := read_untrusted(Path(dataset_dir), name, 16 << 20)) is not None:
-                (workspace / name).write_text(text)
+            if isinstance(dataset_dir, str) and (data := read_untrusted(Path(dataset_dir), name, 16 << 20)) is not None:
+                (workspace / name).write_text(data)
         (workspace / "SPEC.md").write_text(read_untrusted(snapshot_dir, "SPEC.md", 1 << 20) or "")
         (workspace / "prompt.md").write_text(match_prompt(pins))
         return str(workspace)
@@ -463,11 +470,13 @@ class Activities:
         workspace, pins, cfg = Path(args.workspace), args.pins, self.cfg
         if kind == "match":
             return match_job(cfg, workspace, pins, "record.yaml")
+        if kind in ("smoke", "crop") and snapshot_dir is None:
+            raise ValueError(f"{kind} job needs a snippets snapshot")
         existing = self._dataset_dir(args.round_id, pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
-        if kind == "smoke":
+        if kind == "smoke" and snapshot_dir:
             return smoke_job(cfg, workspace, pins, "binding.yaml", snapshot_dir, "record.yaml")
-        if kind == "crop":
+        if kind == "crop" and snapshot_dir:
             return crop_job(
                 cfg,
                 workspace,
@@ -483,11 +492,12 @@ class Activities:
                 args.trusted,
             )
         if kind == "verify":
-            if Path(args.crop_workspace).parent != workspace.parent:
+            if args.crop_workspace is None:
+                raise ValueError("verify job needs crop_workspace")
+            crop_workspace = Path(args.crop_workspace)
+            if crop_workspace.parent != workspace.parent:
                 raise ValueError(f"crop workspace {args.crop_workspace} is not of this round")
-            return verify_job(
-                cfg, workspace, pins, self._crops_dir(Path(args.crop_workspace)), "binding.yaml", existing
-            )
+            return verify_job(cfg, workspace, pins, self._crops_dir(crop_workspace), "binding.yaml", existing)
         raise ValueError(f"unknown job kind {kind!r}")
 
     @activity.defn(name="submit")
@@ -562,13 +572,11 @@ class Activities:
             reasons=_texts(binding.get("reasons")),
         )
 
-    async def _check_binding(
-        self, text: str | None, round_id: str, pins: Pins, sha: str
-    ) -> tuple[dict | None, list[str]]:
+    async def _check_binding(self, text: str | None, round_id: str, pins: Pins, sha: str) -> tuple[dict, list[str]]:
         """Parse an agent-written binding and check it against the round's record and the snippets at `sha`.
-        Returns (binding, errors); the binding is None when there are errors."""
+        Returns (binding, errors); the binding is empty when there are errors."""
         if text is None:
-            return None, ["the binding is missing or unreadable"]
+            return {}, ["the binding is missing or unreadable"]
         try:
             binding = yaml.safe_load(text)
             errors = check_binding(
@@ -580,7 +588,7 @@ class Activities:
                 )
         except (yaml.YAMLError, ValueError, RecursionError) as error:  # a malformed URL raises in urlsplit
             errors = [f"{type(error).__name__}: {error}"]
-        return binding if not errors else None, errors
+        return binding if not errors else {}, errors
 
     @staticmethod
     def _store_binding(path: Path, binding: dict) -> tuple[str, str]:
@@ -617,9 +625,10 @@ class Activities:
         if not isinstance(report, dict):
             return VerifyResult(0, 0, ["verify.json is missing, unreadable or not a JSON object"], [])
         errors = _texts(report.get("errors"))
-        n_crops = report.get("n") if type(report.get("n")) is int and report["n"] >= 0 else 0
+        n_asked, crops = report.get("n"), report.get("crops")
+        n_crops = n_asked if type(n_asked) is int and n_asked >= 0 else 0
         verified, failed, seen = [], [], set()
-        for crop in (report.get("crops") if isinstance(report.get("crops"), list) else [])[:1000]:
+        for crop in (crops if isinstance(crops, list) else [])[:1000]:
             if not isinstance(crop, dict):
                 continue
             crop_id, files = crop.get("crop_id"), crop.get("files")
@@ -871,7 +880,7 @@ class Activities:
                         )
                     else:
                         # start_signal: starts the workflow if needed and delivers the label as a signal either way
-                        await self.client.start_workflow(
+                        await self.temporal.start_workflow(
                             "MiaDataDataset",
                             DatasetState(number),
                             id=cfg.workflow_id(number),
@@ -924,7 +933,7 @@ class Activities:
                 if self._sent.get(update.pr) == fingerprint:
                     continue  # signalled already: a wake-up per change, not per poll
                 try:
-                    await self.client.get_workflow_handle(cfg.workflow_id(int(issue_marker.group(1)))).signal(
+                    await self.temporal.get_workflow_handle(cfg.workflow_id(int(issue_marker.group(1)))).signal(
                         "pr_update", update
                     )
                     self._sent[update.pr] = fingerprint

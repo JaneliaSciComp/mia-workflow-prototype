@@ -50,6 +50,9 @@ pytest = "*"
 pytest-asyncio = "*"
 respx = "*"
 ruff = "*"
+mypy = "*"
+types-PyYAML = "*"
+orjson = "*"  # mypy writes its cache with it; without the real package an empty site-packages dir shadows it
 
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }
@@ -58,6 +61,7 @@ default = { features = ["test"], solve-group = "default" }
 test = "pytest tests/"
 lint = "ruff check . && ruff format --check ."
 fmt = "ruff format . && ruff check --fix ."
+typecheck = "mypy autodev mia_data"
 ad = "autodev"
 md = "mia-data"
 
@@ -68,3 +72,13 @@ extend-exclude = ["notes"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
 ignore = ["E501"]  # long lines are reviewed by eye; the renames pushed a few past 120
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["csub", "csub.*"]
+ignore_missing_imports = true

@@ -75,4 +75,4 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 | `docs/` | setup guides and the [mia-data workflow overview](docs/mia-data-workflow.md) |
 | `notes/` | design notes, runbook, specs |
 | `scripts/` | `autodev-up.sh`, `mia-data-up.sh` |
-| `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed. `pixi run lint` runs ruff |
+| `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed. `pixi run lint` runs ruff, `pixi run typecheck` runs mypy |

@@ -127,7 +127,7 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
                 "crop_id": crop_dir.name,
                 "files": _hashes(crop_dir),
                 "withdrawn": withdrawn_snippet is not None,
-                "withdrawn_reason": withdrawn.get(withdrawn_snippet),
+                "withdrawn_reason": withdrawn.get(withdrawn_snippet) if withdrawn_snippet is not None else None,
             }
         )
     tmp = dataset_dir / f".tmp-manifest-{uuid.uuid4().hex}.json"  # per writer: a zombie attempt can't interleave
