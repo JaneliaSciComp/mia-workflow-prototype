@@ -32,7 +32,8 @@ A gitignored manifest, `mia.yaml`, next to the app configs (shipped as `mia.yaml
 ```yaml
 sandbox_dir: ../agentic-sandbox/scripts      # replaces $SANDBOX; relative to the repo
 temporal:
-  state_dir: ~/.local/state/temporal          # temporal.db, logs/, and bin/temporal if the CLI must be downloaded
+  managed: true                               # true: mia runs a local dev server; false: an external Temporal (k8s)
+  state_dir: ~/.local/state/temporal          # managed only: temporal.db, logs/, bin/temporal if the CLI is downloaded
 services:
   autodev:  {app: autodev,  config: autodev.yaml}
   snippets: {app: autodev,  config: autodev-snippets.yaml}
@@ -44,21 +45,33 @@ services:
 - `app` selects the per-app recipe (below). `config` is relative to the repo; it is loaded with that app's
   `load_config`, so all existing validation applies.
 - **`temporal` is an implicit service**, always present, never listed. Its address comes from the app configs'
-  `temporal.address`; `mia` refuses to start if the listed services disagree on it.
+  `temporal.address`; `mia` refuses to start if the listed services disagree on it. `temporal.managed` says whether
+  `mia` owns the process (local dev server, the default) or only depends on one that something else runs
+  (production: Temporal in k8s).
 - Unknown service names, unknown apps, or a missing manifest are errors with a one-line message.
 
 ## Behaviour
 
-**Ordering.** `up` with no arguments starts `temporal`, then the services in manifest order. `up X` starts
-`temporal` if it is not healthy, then X. `down` with no arguments stops services in reverse order, then `temporal`.
+**Ordering.** `up` with no arguments starts `temporal` (managed) or verifies it (external), then the services in
+manifest order. `up X` does the same for `temporal`, then X. `down` with no arguments stops services in reverse order, then `temporal`.
 `down X` stops only X and never touches `temporal`; `down temporal` is explicit and allowed. `restart` is `down`
 then `up` with the same selection, so `restart autodev` leaves Temporal and the other workers alone.
 
-**Temporal service.** One tmux session `temporal` running `temporal server start-dev --db-filename
-<state_dir>/temporal.db`, log at `<state_dir>/logs/temporal.log`. The binary is `temporal` on PATH, else downloaded
-once into `<state_dir>/bin`. Health is `temporal operator cluster health`. If Temporal is healthy at the configured
-address but there is no `temporal` tmux session (started by hand, or by the old scripts), `ps` shows it as
-`external`, `up` reuses it, and `down` leaves it alone.
+**Temporal service, managed (`managed: true`).** One tmux session `temporal` running `temporal server start-dev
+--db-filename <state_dir>/temporal.db`, log at `<state_dir>/logs/temporal.log`. The binary is `temporal` on PATH,
+else downloaded once into `<state_dir>/bin`. Health is `temporal operator cluster health`. If Temporal is healthy at
+the configured address but there is no `temporal` tmux session (started by hand, or by the old scripts), `ps` shows
+it as `external`, `up` reuses it, and `down` leaves it alone.
+
+**Temporal service, external (`managed: false`).** `mia` never starts, stops or restarts Temporal, and never
+downloads or writes anything for it. `up` only runs the health check against the configured address and stops with
+`temporal: unreachable at <address>` if it fails; nothing else starts. `ps` shows `temporal: external (healthy)` or
+`external (unreachable)`. `down temporal`, `restart temporal`, `logs temporal` and `attach temporal` are errors
+("temporal is external; see your cluster"). The namespace check still runs with the `temporal` CLI, since a fresh
+cluster needs the namespaces created once; the CLI must be on PATH (no download in this mode).
+
+In both modes the worker reaches Temporal through the sandbox's allowlist proxy, so the recipe adds
+`--allow <host of temporal.address>` instead of the hard-coded `--allow localhost`.
 
 **App service start** (ported from the two scripts, one recipe parameterised per app):
 
@@ -114,6 +127,8 @@ Unit tests only, with the monkeypatched `subprocess.run` pattern from `tests/tes
 - recipes: the tmux command lines for an autodev and a mia-data service contain the expected mounts and env vars;
   the already-running path only re-applies the schedule.
 - `ps` exit code and `external` state for Temporal.
+- external mode: `up` with Temporal unreachable starts nothing and exits non-zero; `down` all issues no temporal
+  command; `down temporal` is an error; the worker allowlist carries the remote host.
 
 Then one manual run on a submit host: `mia up`, `mia ps`, `mia restart snippets`, `mia down`.
 
@@ -132,5 +147,7 @@ picked up again on the next poll.
 
 ## Out of scope
 
-One broker shared by all services, one tmux session for everything, an aggregated `mia check`, health watching or
+TLS, mTLS or API-key auth for Temporal: the app configs have no such fields yet, and the workers would need them
+before `mia` does, so that is its own change. The `temporal` CLI used for health and namespace checks will need the
+same options then. One broker shared by all services, one tmux session for everything, an aggregated `mia check`, health watching or
 auto-restart, systemd units. Each is a separate change if it ever earns its keep.
