@@ -1,6 +1,6 @@
-"""The `autodev` command line: health checks, label setup, the worker, the poll schedule, and deployment
-management (up/down/ps/logs, from ops.py). Heavy imports happen inside the commands that need them so
-`--help` and the ops commands stay fast.
+"""The `autodev` command line: health checks, label setup, the worker and the poll schedule. Heavy imports
+happen inside the commands that need them so `--help` stays fast. Starting and stopping deployments is
+`pixi run mia` (mia_ops).
 """
 
 from __future__ import annotations
@@ -17,22 +17,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from . import ops
-from .config import PROJECT_DIR, STAGES, load_config
+from .config import STAGES, load_config
 
 if TYPE_CHECKING:
     from temporalio.client import Client
 
     from .config import Config, Deployment
-
-OPS = {
-    "up": ops.cmd_up,
-    "down": ops.cmd_down,
-    "restart": ops.cmd_restart,
-    "ps": ops.cmd_ps,
-    "attach": ops.cmd_attach,
-    "logs": ops.cmd_logs,
-}
 
 log = logging.getLogger("autodev")
 
@@ -250,24 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("worker", help="run the Temporal worker")
     schedule = sub.add_parser("schedule", help="manage the poll Schedule")
     schedule.add_argument("action", choices=["apply"])
-    sub.add_parser("up", help="start this deployment (tmux: Temporal, broker, worker)")
-    sub.add_parser("down", help="stop this deployment's tmux session")
-    sub.add_parser("restart", help="down, then up")
-    sub.add_parser("ps", help="show whether this deployment is running")
-    sub.add_parser("attach", help="attach to the deployment's tmux session")
-    logs = sub.add_parser("logs", help="tail a log (default: worker)")
-    logs.add_argument("name", nargs="?", default="worker", choices=["worker", "temporal", "broker"])
-    logs.add_argument("-n", "--lines", type=int, default=50)
-    logs.add_argument(
-        "-f", "--follow", action="store_true", help="keep following the log (default: print the last lines and exit)"
-    )
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
-    if args.cmd in OPS:
-        args.config_path = Path(
-            args.config or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml"
-        ).resolve()
-        return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     cmd = {"check": cmd_check, "init-labels": cmd_init_labels, "worker": cmd_worker, "schedule": cmd_schedule}[args.cmd]
     return asyncio.run(cmd(cfg, args))

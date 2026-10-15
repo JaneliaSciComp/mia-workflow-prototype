@@ -1,6 +1,6 @@
 """The `mia-data` command line: health checks, seeding issues, labels, the worker, the poll schedule, a
-synchronous crop test for snippet PRs, storage maintenance, and deployment management (shared with autodev
-through autodev.ops). Heavy imports happen inside the commands that need them.
+synchronous crop test for snippet PRs and storage maintenance (deployments start and stop with
+`pixi run mia`). Heavy imports happen inside the commands that need them.
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from autodev.auth import bot_login, token_fn
-from autodev.cli import OPS, _client, _setup_logging
+from autodev.cli import _client, _setup_logging
 from autodev.github import GitHub
 
-from .config import EXTRA_LABELS, HUMAN_LABELS, PROJECT_DIR, STAGES, load_config
+from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -444,23 +444,8 @@ def main(argv: list[str] | None = None) -> int:
     test_pr.add_argument("--record", required=True, help="catalog record id")
     sub.add_parser("worker", help="run the Temporal workers (main and await queues)")
     sub.add_parser("schedule", help="manage the poll Schedule").add_argument("action", choices=["apply"])
-    sub.add_parser("up", help="start this deployment (tmux: broker, worker; Temporal must already run)")
-    sub.add_parser("down", help="stop this deployment's tmux session")
-    sub.add_parser("restart", help="down, then up")
-    sub.add_parser("ps", help="show whether this deployment is running")
-    sub.add_parser("attach", help="attach to the deployment's tmux session")
-    logs = sub.add_parser("logs", help="tail a log (default: worker)")
-    logs.add_argument("name", nargs="?", default="worker", choices=["worker", "broker"])
-    logs.add_argument("-n", "--lines", type=int, default=50)
-    logs.add_argument("-f", "--follow", action="store_true", help="keep following the log")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
-    if args.cmd in OPS:
-        args.config_path = Path(
-            args.config or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml"
-        ).resolve()
-        args.up_script, args.config_env = PROJECT_DIR / "scripts" / "mia-data-up.sh", "MIA_DATA_CONFIG"
-        return OPS[args.cmd](cfg, args)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
     commands = {
         "check": cmd_check,
