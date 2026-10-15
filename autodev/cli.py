@@ -11,7 +11,7 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -79,26 +79,32 @@ def _csub_problems(cfg: Config, probe: Any) -> list[str]:
     ]
 
 
+async def run_checks(checks: Sequence[tuple[str, Callable[[], Awaitable[Any]]]]) -> int:
+    """Run every named check (none is skipped because an earlier one failed), print one ok/BAD line each
+    and return 1 if any failed. Shared with mia-data's `check`."""
+    rows: list[tuple[str, bool, str]] = []
+    for name, check in checks:
+        try:
+            rows.append((name, True, str(await check())))
+        except Exception as error:  # report every check, then fail
+            rows.append((name, False, f"{type(error).__name__}: {error}"))
+    for name, ok, detail in rows:
+        print(f"{'ok ' if ok else 'BAD'}  {name:16} {detail}")
+    return 0 if all(ok for _, ok, _ in rows) else 1
+
+
 async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     """Try every external dependency and print one ok/BAD line per check."""
     from .agent import csub_client
     from .auth import bot_login
     from .github import GitHub
 
-    rows: list[tuple[str, bool, str]] = []
-
-    async def row(name: str, check: Callable[[], Awaitable[Any]]) -> None:
-        try:
-            rows.append((name, True, str(await check())))
-        except Exception as error:  # report every check, then fail
-            rows.append((name, False, f"{type(error).__name__}: {error}"))
-
-    gh = None
-
     async def repo():
-        nonlocal gh
         gh = GitHub.for_autodev(cfg)
-        info = (await gh.request("GET", f"/repos/{cfg.github.repo}")).json()
+        try:
+            info = (await gh.request("GET", f"/repos/{cfg.github.repo}")).json()
+        finally:
+            await gh.aclose()
         return f"{info['full_name']} (default branch {info['default_branch']})"
 
     async def csub_ok():
@@ -119,16 +125,15 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             (directory / ".write-test").unlink()
         return f"{cfg.paths.state_dir}, {cfg.paths.work_root}"
 
-    await row("github identity", lambda: bot_login(cfg))
-    await row("github repo", repo)
-    await row("temporal", temporal)
-    await row("csub broker", csub_ok)
-    await row("directories", dirs)
-    if gh:
-        await gh.aclose()
-    for name, ok, detail in rows:
-        print(f"{'ok ' if ok else 'BAD'}  {name:16} {detail}")
-    return 0 if all(ok for _, ok, _ in rows) else 1
+    return await run_checks(
+        [
+            ("github identity", lambda: bot_login(cfg)),
+            ("github repo", repo),
+            ("temporal", temporal),
+            ("csub broker", csub_ok),
+            ("directories", dirs),
+        ]
+    )
 
 
 async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
