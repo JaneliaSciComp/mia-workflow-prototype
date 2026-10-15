@@ -899,7 +899,7 @@ git commit -m "mia: start an app service (broker + sandboxed worker) from its co
 
 **Interfaces:**
 - Consumes: everything in `mia_ops.services` and `load_manifest`.
-- Produces: `mia_ops.cli.main(argv: list[str] | None = None) -> int`; console script `mia`; pixi task `mia`.
+- Produces: `mia_ops.cli.main(argv: list[str] | None = None) -> int`; console script `mia`; pixi task `mia` (the `ad` and `md` tasks are removed).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1156,16 +1156,18 @@ mia-data = "mia_data.cli:main"
 mia = "mia_ops.cli:main"
 ```
 
-and under `[tool.pixi.tasks]`, after `md = "mia-data"`:
+and under `[tool.pixi.tasks]`, replace the two lines `ad = "autodev"` and `md = "mia-data"` with:
 
 ```toml
 mia = "mia"
 ```
 
+(`pixi run mia exec <service> ...` replaces `pixi run ad ...` and `pixi run md ...`; the console scripts stay for the worker.)
+
 - [ ] **Step 4: Run the tests, lint, typecheck, and the real entry point**
 
 Run: `pixi install && pixi run pytest tests/test_mia_ops_cli.py -v && pixi run lint && pixi run typecheck && pixi run mia --help`
-Expected: tests PASS; `--help` prints the seven subcommands.
+Expected: tests PASS; `--help` prints the seven subcommands; `pixi run ad` and `pixi run md` now fail with "task not found".
 
 - [ ] **Step 5: Commit**
 
@@ -1251,7 +1253,8 @@ git commit -m "Remove the up-scripts and the per-app up/down/ps/logs commands; m
 ### Task 6: Docs
 
 **Files:**
-- Modify: `README.md:74-77`, `docs/autodev-local-setup.md:7-25,76-123`, `docs/github-app.md:85,106,128`, `docs/mia-data-workflow.md:158-166`, `notes/autodev-runbook.md:41-47,66,75-76,108-118`, `autodev.yaml.example:9`
+- Modify: `README.md:74-77`, `docs/autodev-local-setup.md:7-25,76-123`, `docs/github-app.md:85,92,96,106,128`, `docs/mia-data-workflow.md:81,158-166`, `notes/autodev-runbook.md:39-47,66,75-76,100,108-120`, `notes/mia-data-handoff.md:21,48-60,118`, `autodev.yaml.example:9`
+- Rule for every file: `pixi run autodev X`, `pixi run ad X` and `pixi run md X` become `pixi run mia exec <service> X` (`autodev` or `mia-data` as the service, matching `mia.yaml.example`); a bare `md check` in prose becomes `mia exec mia-data check`.
 - Not tracked but on your host: the header comment of `autodev-snippets.yaml` (line 2) says `AUTODEV_CONFIG=autodev-snippets.yaml pixi run ad up`; change it to `pixi run mia up snippets` locally.
 
 **Interfaces:** none.
@@ -1261,8 +1264,8 @@ git commit -m "Remove the up-scripts and the per-app up/down/ps/logs commands; m
 Replace the `mia_data/` and `scripts/` rows:
 
 ```markdown
-| `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run md`) |
-| `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data) |
+| `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run mia exec mia-data ...`) |
+| `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data), and `mia exec <service> <cmd>` runs an app command with that service's config |
 ```
 
 (delete the `scripts/` row).
@@ -1292,10 +1295,10 @@ In section 4 replace the four commands with:
 
 ```bash
 cp mia.yaml.example mia.yaml      # keep only the `autodev` service, pointing at your autodev.yaml; keep temporal.managed: true
-pixi run autodev check          # the `temporal` row is BAD until `mia up` starts the dev server; fix any other BAD first
-pixi run autodev init-labels    # creates the autodev-<you>:* labels (idempotent)
-pixi run mia up                 # tmux sessions temporal and autodev; applies the poll schedule
-pixi run autodev check          # now every row should say ok
+pixi run mia exec autodev check         # the `temporal` row is BAD until `mia up` starts the dev server; fix any other BAD first
+pixi run mia exec autodev init-labels   # creates the autodev-<you>:* labels (idempotent)
+pixi run mia up                         # tmux sessions temporal and autodev; applies the poll schedule
+pixi run mia exec autodev check         # now every row should say ok
 ```
 
 In section 5: `pixi run mia attach autodev    # windows: broker, worker (Temporal: mia attach temporal)`.
@@ -1310,6 +1313,7 @@ pixi run mia attach autodev
 pixi run mia restart autodev        # after changing code or config; leaves Temporal and other services alone
 pixi run mia restart                # everything, Temporal included
 pixi run mia down                   # everything, Temporal last
+pixi run mia exec autodev check     # any app command, with this service's config
 pixi run test                       # unit tests; no GitHub, LSF or Temporal server needed
 ```
 
@@ -1317,26 +1321,29 @@ Gotcha line: `**`agent.api_key_env` is refused** by `mia up` for now. Use a Clau
 
 - [ ] **Step 3: `docs/github-app.md`, `docs/mia-data-workflow.md`, `autodev.yaml.example`**
 
-github-app.md line 85: `scripts/autodev-up.sh` -> `` `mia up` ``. Lines 106 and 128: `pixi run ad restart` -> `pixi run mia restart autodev` (or the service name the App runs under).
+github-app.md line 85: `scripts/autodev-up.sh` -> `` `mia up` ``. Lines 92 and 96: `pixi run autodev check` / `init-labels` -> `pixi run mia exec autodev check` / `init-labels`. Lines 106 and 128: `pixi run ad restart` -> `pixi run mia restart autodev` (or the service name the App runs under).
 
 mia-data-workflow.md "Operating it":
 
 ```
-pixi run md check            # repos, Temporal, csub policy, directories, harness pin
-pixi run mia up              # Temporal, then every service in mia.yaml; or: mia up mia-data
+pixi run mia exec mia-data check    # repos, Temporal, csub policy, directories, harness pin
+pixi run mia up                     # Temporal, then every service in mia.yaml; or: mia up mia-data
 pixi run mia ps | logs mia-data -f | attach mia-data | down mia-data | restart mia-data
-pixi run md seed --dry-run
+pixi run mia exec mia-data seed --dry-run
 ```
+
+mia-data-workflow.md line 81: `pixi run md seed` -> `pixi run mia exec mia-data seed`.
 
 autodev.yaml.example line 9: `scripts/autodev-up.sh needs it` -> `` `mia up` needs it ``.
 
 - [ ] **Step 4: `notes/autodev-runbook.md`**
 
-Line 41: `then `scripts/autodev-up.sh`. It starts, in tmux, a Temporal dev server and` -> `then `pixi run mia up`. It starts, in tmux, a Temporal dev server (session `temporal`) and`.
+Lines 39 and 43: `pixi run autodev check` -> `pixi run mia exec autodev check`. Line 41: `pixi run autodev init-labels` -> `pixi run mia exec autodev init-labels`, and `then `scripts/autodev-up.sh`. It starts, in tmux, a Temporal dev server and` -> `then `pixi run mia up`. It starts, in tmux, a Temporal dev server (session `temporal`) and`.
 Line 44: `watch `tmux attach -t autodev-<you>`` -> `watch `pixi run mia attach <service>``.
 Lines 46-47 become: `Manage the services listed in `mia.yaml`: `pixi run mia ps`, `mia logs <service> [worker|broker]` (`-n N`, `-f` to follow), `mia logs temporal`, `mia attach <service>`, `mia down [<service>...]`, `mia restart [<service>...]`, `mia up [<service>...]`. Without a service name each command acts on everything, Temporal first on the way up and last on the way down.`
 Line 66: `autodev-up.sh` -> `mia up`.
-Lines 75-76: `scripts/autodev-up.sh`, then `pixi run autodev check` (the `temporal` row needs the dev server that `autodev-up.sh` starts)` -> `` `pixi run mia up`, then `pixi run autodev check` ``.
+Lines 75-76: `pixi run autodev init-labels`, `scripts/autodev-up.sh`, then `pixi run autodev check` (the `temporal` row needs the dev server that `autodev-up.sh` starts)` -> `` `pixi run mia exec autodev init-labels`, `pixi run mia up`, then `pixi run mia exec autodev check` ``.
+Line 100: `md check` -> `mia exec mia-data check`. Lines 108-110: `pixi run md check` -> `pixi run mia exec mia-data check` (twice), `md check` and `md test-pr` -> `mia exec mia-data check` and `mia exec mia-data test-pr`. Lines 119-120: `pixi run md init-labels` / `seed` / `test-pr` -> `pixi run mia exec mia-data init-labels` / `seed` / `test-pr`.
 Lines 111-118 become:
 
 ```
@@ -1350,14 +1357,18 @@ Lines 111-118 become:
    with no service stops everything, Temporal last; naming a service never touches Temporal.
 ```
 
-- [ ] **Step 5: Check and commit**
+- [ ] **Step 5: `notes/mia-data-handoff.md`**
 
-Run: `grep -rn "up\.sh\|pixi run ad up\|pixi run md up\|ad restart\|md restart\|ad down\|md down\|ad ps\|md ps\|ad logs\|md logs\|\$SANDBOX" README.md docs notes/autodev-runbook.md autodev.yaml.example mia_data.yaml.example; true`
+Line 21: `` CLI (`pixi run md …`) `` -> `` CLI (`pixi run mia exec mia-data …`) ``. Lines 48, 52 and 118: `pixi run md check` / `md check` -> `pixi run mia exec mia-data check` / `mia exec mia-data check`. Lines 54-57 become: `5. **Bring up.** `pixi run mia up` (Temporal if `mia.yaml` manages it, then every service: broker, sandboxed worker, poll schedule; without that schedule labels are never read). Then `mia ps`, `mia logs mia-data -f`, `mia down mia-data`, `mia restart mia-data`. `pixi run mia exec mia-data init-labels`; `pixi run mia exec mia-data seed --dry-run`; `pixi run mia exec mia-data seed`.` Line 60: `pixi run md test-pr` -> `pixi run mia exec mia-data test-pr`.
+
+- [ ] **Step 6: Check and commit**
+
+Run: `grep -rn "up\.sh\|pixi run ad\b\|pixi run md\b\|pixi run autodev\|\`ad \|\`md \|\$SANDBOX" README.md docs notes/autodev-runbook.md notes/mia-data-handoff.md autodev.yaml.example mia_data.yaml.example; true`
 Expected: no output. Then:
 
 ```bash
-git add README.md docs notes/autodev-runbook.md autodev.yaml.example
-git commit -m "Docs: pixi run mia replaces the up-scripts and ad/md lifecycle commands" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git add README.md docs notes/autodev-runbook.md notes/mia-data-handoff.md autodev.yaml.example
+git commit -m "Docs: pixi run mia replaces the up-scripts and the ad/md tasks" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1368,4 +1379,4 @@ git commit -m "Docs: pixi run mia replaces the up-scripts and ad/md lifecycle co
 
 - [ ] **Step 1: Migrate the Temporal database** so running workflows survive: `mkdir -p ~/.local/state/temporal && cp <autodev state_dir>-host/temporal.db ~/.local/state/temporal/` while the old session is down (`tmux kill-session -t <deployment>` for each old session, or point `temporal.state_dir` in `mia.yaml` at the old `-host` directory instead).
 - [ ] **Step 2:** `cp mia.yaml.example mia.yaml`, edit services to the configs on this host, then `pixi run mia up`, `pixi run mia ps`, `pixi run mia logs autodev -n 5`, `pixi run mia restart snippets`, `pixi run mia ps`, `pixi run mia down`. Confirm `pixi run mia ps` then exits 1 and reports everything stopped.
-- [ ] **Step 3:** `pixi run mia exec snippets check` should print the same rows `AUTODEV_CONFIG=autodev-snippets.yaml pixi run ad check` used to.
+- [ ] **Step 3:** `pixi run mia exec snippets check` should print the same rows `AUTODEV_CONFIG=autodev-snippets.yaml pixi run ad check` used to, and `pixi run mia exec mia-data seed --dry-run` the same as `pixi run md seed --dry-run` did.

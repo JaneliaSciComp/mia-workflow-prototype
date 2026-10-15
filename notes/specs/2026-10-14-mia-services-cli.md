@@ -22,8 +22,10 @@ pixi run mia attach    SERVICE
 pixi run mia exec      SERVICE ARGS...  # run the service's app CLI with its config, e.g. `mia exec snippets check`
 ```
 
-`pixi run ad` and `pixi run md` keep only app commands (`check`, `init-labels`, `worker`, `schedule`, `seed`,
-`test-pr`, ...). Lifecycle lives in `mia` alone.
+`mia` is the only pixi task. The `ad` and `md` tasks go away: every app command (`check`, `init-labels`, `seed`,
+`test-pr`, `reindex`, `crops-by-snippet`, `schedule apply`) runs as `pixi run mia exec <service> <command>`, with
+that service's config, so there is never a second way to run a command that picks up a different config file.
+The `autodev` and `mia-data` console scripts stay: the worker window and the schedule call them inside the sandbox.
 
 ## Services
 
@@ -102,8 +104,8 @@ allowlist, `CSUB_TRANSPORT=unix`, `CSUB_SOCKET`) is shared.
 paths under `state/logs` and `state-host/logs`), generalised over the selected services. `ps` exits 1 if any
 selected service is stopped.
 
-**exec** runs `python -m <module> ARGS...` with the service's config env var set. It exists so `snippets` no
-longer needs the `AUTODEV_CONFIG=... pixi run ad` incantation; it is five lines.
+**exec** runs `python -m <module> ARGS...` with the service's config env var set. It replaces `pixi run ad` and
+`pixi run md` entirely, and ends the `AUTODEV_CONFIG=... pixi run ad` incantation for `snippets`; it is five lines.
 
 ## Code
 
@@ -112,9 +114,9 @@ longer needs the `AUTODEV_CONFIG=... pixi run ad` incantation; it is five lines.
   - `tmux.py`: the helpers now in `autodev/ops.py` (`is_running`, session kill/list, `log_files`), moved.
   - `services.py`: temporal + app start recipes, ordering, the command functions.
   - `cli.py`: argparse, `main`.
-- Delete `scripts/autodev-up.sh`, `scripts/mia-data-up.sh`, `autodev/ops.py`, and the six lifecycle subparsers plus
-  the `OPS` dispatch in `autodev/cli.py` and `mia_data/cli.py`. Add `mia_ops` to the hatch wheel packages and to
-  `pixi run typecheck`.
+- Delete `scripts/autodev-up.sh`, `scripts/mia-data-up.sh`, `autodev/ops.py`, the six lifecycle subparsers plus
+  the `OPS` dispatch in `autodev/cli.py` and `mia_data/cli.py`, and the `ad` and `md` pixi tasks. Add `mia_ops` to
+  the hatch wheel packages and to `pixi run typecheck`.
 - `mia.yaml` joins `.gitignore`; `mia.yaml.example` is tracked with placeholder paths only.
 
 ## Tests
@@ -135,8 +137,9 @@ Then one manual run on a submit host: `mia up`, `mia ps`, `mia restart snippets`
 ## Docs to update
 
 `README.md` (layout table, `scripts/` row goes away), `docs/autodev-local-setup.md`, `docs/github-app.md`,
-`docs/mia-data-workflow.md`, `notes/autodev-runbook.md`, the header comment in `autodev-snippets.yaml`, the
-`token_file` comment in `autodev.yaml.example`.
+`docs/mia-data-workflow.md`, `notes/autodev-runbook.md`, `notes/mia-data-handoff.md`, the header comment in
+`autodev-snippets.yaml`, the `token_file` comment in `autodev.yaml.example`. Every `pixi run autodev X`,
+`pixi run ad X` and `pixi run md X` becomes `pixi run mia exec <service> X`.
 
 ## Migration
 
