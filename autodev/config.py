@@ -135,25 +135,39 @@ class Config(BaseModel):
         """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
+        self._check_github()
+        self._resolve_paths()
+        self._check_agent()
+        self._check_mounts()
+        return self
+
+    def _check_github(self) -> None:
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
         if bad := [login for login in github.trusted_bots if not login.endswith("[bot]")]:
             raise ValueError(f"github.trusted_bots: {bad} must be app logins ending in '[bot]'")
-        if self.agent.max_budget_usd is not None and self.agent.max_budget_usd <= 0:
-            raise ValueError("agent.max_budget_usd must be positive")
-        # Paths are made canonical because csub rejects non-canonical mounts, and round dirs (under work_root)
-        # are mounted into jobs.
-        self.paths.state_dir = self.paths.state_dir.expanduser().resolve()
-        self.paths.work_root = self.paths.work_root.expanduser().resolve()
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())
+
+    def _resolve_paths(self) -> None:
+        """Paths are made canonical because csub rejects non-canonical mounts, and round dirs (under work_root)
+        are mounted into jobs."""
+        self.paths.state_dir = self.paths.state_dir.expanduser().resolve()
+        self.paths.work_root = self.paths.work_root.expanduser().resolve()
+
+    def _check_agent(self) -> None:
+        if self.agent.max_budget_usd is not None and self.agent.max_budget_usd <= 0:
+            raise ValueError("agent.max_budget_usd must be positive")
         for host in self.agent.allow_hosts:
             if is_github_host(host):
                 raise ValueError(f"agent.allow_hosts: {host.strip()!r} would let the agent reach GitHub")
-        # An extra mount must not expose anything that holds credentials or trusted state.
-        secrets = [self.paths.state_dir, github.token_file, github.private_key_path]
+
+    def _check_mounts(self) -> None:
+        """Extra mounts are read-only, absolute, and must not expose anything that holds credentials or trusted
+        state."""
+        secrets = [self.paths.state_dir, self.github.token_file, self.github.private_key_path]
         for index, mount in enumerate(self.agent.extra_mounts):
             if not mount.endswith(":ro"):
                 raise ValueError(f"agent.extra_mounts: {mount!r} must end with ':ro'")
@@ -166,7 +180,6 @@ class Config(BaseModel):
                 secret = Path(secret).resolve()
                 if mount_path == secret or mount_path in secret.parents or secret in mount_path.parents:
                     raise ValueError(f"agent.extra_mounts: {mount!r} overlaps {secret}, which the agent must not see")
-        return self
 
     @property
     def task_queue(self) -> str:

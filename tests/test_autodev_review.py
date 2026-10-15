@@ -5,11 +5,12 @@ from autodev_helpers import API, R
 
 from autodev.github import GitHub
 from autodev.models import Feedback
-from autodev.review import approved, combine_checks, feedback, handled_ids, latest_round_at
+from autodev.review import Reviewers, approved, combine_checks, feedback, handled_ids, latest_round_at
 
 MP = "<!-- autodev:"
 HEAD = "abc1234def5678"
 W = {"alice": "write", "bob": "read", "bot": "write", "admin": "admin"}
+BOT = Reviewers(W, "bot", False, MP)
 
 
 def rv(id, login, state, commit=HEAD, body="", at="2026-10-10T01:00:00Z"):
@@ -21,7 +22,7 @@ def cm(id, login, body, at="2026-10-10T02:00:00Z"):
 
 
 def ok(reviews=(), comments=(), bot="bot", allow_self=False, since=None):
-    return approved(HEAD, list(reviews), list(comments), W, bot, allow_self, MP, since)
+    return approved(HEAD, list(reviews), list(comments), Reviewers(W, bot, allow_self, MP), since)
 
 
 def test_approval_must_match_head():
@@ -65,8 +66,8 @@ def test_latest_round_at_is_the_bots_latest_round_marker():
         cm(3, "mallory", f"{MP} round k-3 -->", at="2026-10-10T04:00:00Z"),
         cm(4, "bot", f"{MP} started k-3 -->", at="2026-10-10T05:00:00Z"),
     ]
-    assert latest_round_at(comments, MP, "bot") == "2026-10-10T03:00:00Z"
-    assert latest_round_at([], MP, "bot") is None
+    assert latest_round_at(comments, BOT) == "2026-10-10T03:00:00Z"
+    assert latest_round_at([], BOT) is None
 
 
 def test_feedback_from_reviews_and_revise_comments_oldest_first():
@@ -83,7 +84,7 @@ def test_feedback_from_reviews_and_revise_comments_oldest_first():
         cm(11, "alice", "looks good"),
         cm(12, "bot", f"/revise {MP} x -->"),
     ]
-    fb = feedback(reviews, inline, comments, W, "bot", False, MP)
+    fb = feedback(reviews, inline, comments, BOT)
     assert fb == [Feedback("comment-10", "also update docs"), Feedback("review-3", "rename foo\n- `a.py` line 4: here")]
 
 
@@ -93,7 +94,7 @@ def test_handled_ids_come_from_our_markers():
         cm(2, "alice", "<!-- autodev: handled review-9 -->"),  # a person pasting our marker does not count
         cm(3, "bot", "see <!-- autodev: round k-1 --> and handled review-7 -->"),
     ]  # not anchored to the prefix
-    assert handled_ids(comments, MP, "bot") == {"review-3"}
+    assert handled_ids(comments, BOT) == {"review-3"}
 
 
 @pytest.mark.parametrize(

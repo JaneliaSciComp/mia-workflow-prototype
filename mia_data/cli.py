@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from autodev.auth import bot_login, token_fn
-from autodev.cli import _client, _setup_logging
+from autodev.cli import _client, _setup_logging, run_checks
 from autodev.github import GitHub
 
 from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
@@ -139,14 +139,6 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
 
     from .jobspec import harness_env, harness_pin
 
-    rows: list[tuple[str, bool, str]] = []
-
-    async def row(name: str, check: Callable[[], Awaitable[Any]]) -> None:
-        try:
-            rows.append((name, True, str(await check())))
-        except Exception as error:  # report every check, then fail
-            rows.append((name, False, f"{type(error).__name__}: {error}"))
-
     def repo_check(repo: str) -> Callable[[], Awaitable[str]]:
         async def check():
             gh = _gh(cfg, repo)
@@ -187,15 +179,12 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             )
         return f"{commit[:12]} env {digest[:12]}"
 
-    for kind in ("data", "snippets", "catalog"):
-        await row(f"github {kind}", repo_check(getattr(cfg.github, f"{kind}_repo")))
-    await row("temporal", temporal)
-    await row("csub broker", csub)
-    await row("directories", dirs)
-    await row("harness pin", pin)
-    for name, ok, detail in rows:
-        print(f"{'ok ' if ok else 'BAD'}  {name:16} {detail}")
-    return 0 if all(ok for _, ok, _ in rows) else 1
+    repos = [
+        (f"github {kind}", repo_check(getattr(cfg.github, f"{kind}_repo"))) for kind in ("data", "snippets", "catalog")
+    ]
+    return await run_checks(
+        [*repos, ("temporal", temporal), ("csub broker", csub), ("directories", dirs), ("harness pin", pin)]
+    )
 
 
 async def cmd_crops_by_snippet(cfg: Config, args: argparse.Namespace) -> int:

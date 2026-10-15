@@ -96,8 +96,11 @@ class GitHub:
         self._last_write = time.monotonic()
 
     @staticmethod
-    def _rate_limit_delay(response: httpx.Response, attempt: int) -> float | None:
-        """Seconds to wait if this response is a (primary or secondary) rate limit, else None."""
+    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
+        """Seconds to wait before retrying this response, or None when it is final. A 5xx backs off
+        exponentially; a (primary or secondary) rate limit waits as long as GitHub says."""
+        if response.status_code >= 500:
+            return min(2**attempt, 60)
         if response.status_code not in (403, 429):
             return None
         if "retry-after" in response.headers:
@@ -107,6 +110,12 @@ class GitHub:
         if response.status_code == 429 or "rate limit" in response.text.lower():
             return min(60.0 * 2**attempt, 900.0)  # GitHub: wait ≥1 min, then back off exponentially
         return None
+
+    def _remember_etag(self, cache_key: tuple, response: httpx.Response) -> None:
+        if response.headers.get("etag"):
+            self._etags[cache_key] = (response.headers["etag"], response)
+        else:
+            self._etags.pop(cache_key, None)
 
     @overload
     async def request(
@@ -172,13 +181,9 @@ class GitHub:
                 log.warning("github %s %s transport error %s (attempt %d)", method, path, error, attempt + 1)
                 await self._sleep(min(2**attempt, 60))
                 continue
-            delay = self._rate_limit_delay(response, attempt)
-            if delay is not None:
-                log.warning("github rate limited on %s %s; sleeping %.0fs", method, path, delay)
+            if (delay := self._retry_delay(response, attempt)) is not None:
+                log.warning("github %s %s -> %d; retrying in %.0fs", method, path, response.status_code, delay)
                 await self._sleep(delay)
-                continue
-            if response.status_code >= 500:
-                await self._sleep(min(2**attempt, 60))
                 continue
             if response.status_code == 304 and cache_key in self._etags:
                 return self._etags[cache_key][1]
@@ -191,10 +196,7 @@ class GitHub:
             if write:
                 log.info("github %s %s -> %d", method, path, response.status_code)
             if cache_key is not None:
-                if response.headers.get("etag"):
-                    self._etags[cache_key] = (response.headers["etag"], response)
-                else:
-                    self._etags.pop(cache_key, None)
+                self._remember_etag(cache_key, response)
             return response
         raise GitHubError(f"{method} {path}: gave up after {attempts} attempts")
 

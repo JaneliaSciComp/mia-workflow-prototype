@@ -44,7 +44,7 @@ from .models import (
     Workspace,
     check_key,
 )
-from .review import WRITE_PERMISSIONS, approved, feedback, handled_ids, latest_round_at
+from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
 if TYPE_CHECKING:
@@ -318,26 +318,11 @@ class Activities:
         logins = {login for item in [*reviews, *comments] if (login := (item.get("user") or {}).get("login"))}
         # ponytail: one permission lookup per participant per poll; cache if the rate limit ever matters.
         permissions = {login: await self.gh.permission(login) for login in logins}
-        marker_prefix = self.cfg.marker_prefix
-        allow_self = (
-            self.cfg.github.auth == "token"
-        )  # under a personal token the reviewer and the bot are the same user
-        handled = handled_ids(comments, marker_prefix, self.bot)
-        pending = [
-            item
-            for item in feedback(reviews, inline_comments, comments, permissions, self.bot, allow_self, marker_prefix)
-            if item.id not in handled
-        ]
-        is_approved = approved(
-            head_sha,
-            reviews,
-            comments,
-            permissions,
-            self.bot,
-            allow_self,
-            marker_prefix,
-            latest_round_at(comments, marker_prefix, self.bot),
-        )
+        # under a personal token the reviewer and the bot are the same user
+        reviewers = Reviewers(permissions, self.bot, self.cfg.github.auth == "token", self.cfg.marker_prefix)
+        handled = handled_ids(comments, reviewers)
+        pending = [item for item in feedback(reviews, inline_comments, comments, reviewers) if item.id not in handled]
+        is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
 
