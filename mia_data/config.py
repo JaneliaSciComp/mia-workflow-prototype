@@ -143,33 +143,52 @@ class Config(BaseModel):
         """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
+        self._check_github()
+        self._resolve_paths()
+        self._check_limits()
+        self._check_agent()
+        if not self.crops.licences:
+            raise ValueError("crops.licences must not be empty")
+        self._check_network()
+        return self
+
+    def _check_github(self) -> None:
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())
+
+    def _resolve_paths(self) -> None:
+        """Make every path absolute, and keep state_dir (secrets, never mounted) apart from the mounted roots."""
         paths = self.paths
         for section in (paths, self.harness):
             for name, value in vars(section).items():
                 if isinstance(value, Path):
                     setattr(section, name, value.expanduser().resolve())
-        for other in (paths.work_root, paths.storage_root):  # state_dir holds secrets and is never mounted
+        for other in (paths.work_root, paths.storage_root):
             if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
                 raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")
+
+    def _check_limits(self) -> None:
         for name, value in vars(self.limits).items():
             if not (math.isfinite(value) and value > 0):
                 raise ValueError(f"limits.{name} must be finite and positive")
         if self.limits.max_stage_attempts != 1:
             raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")
-        for name in ("allow_hosts", "extra_mounts", "api_key_env"):  # autodev's; mia-data's jobs never read them
+
+    def _check_agent(self) -> None:
+        """The agent section is autodev's; mia-data's jobs never read these fields, so setting them is a mistake."""
+        for name in ("allow_hosts", "extra_mounts", "api_key_env"):
             if getattr(self.agent, name):
                 raise ValueError(
                     f"agent.{name} is not used by mia-data (job hosts come from the binding and network.*, "
                     "mounts from the job builders); remove it"
                 )
-        if not self.crops.licences:
-            raise ValueError("crops.licences must not be empty")
+
+    def _check_network(self) -> None:
+        """No GitHub host may be allowed to a job, and redirect targets must be exact hosts."""
         network = self.network
         redirect_targets = [target for targets in network.redirect_hosts.values() for target in targets]
         for host in network.package_hosts + list(network.redirect_hosts) + redirect_targets:
@@ -177,7 +196,6 @@ class Config(BaseModel):
                 raise ValueError(f"network: {host!r} is a GitHub host")
         if bad := [target for target in redirect_targets if "*" in target]:
             raise ValueError(f"network.redirect_hosts: {bad} must be exact hosts, no '*'")
-        return self
 
     @property
     def task_queue(self) -> str:

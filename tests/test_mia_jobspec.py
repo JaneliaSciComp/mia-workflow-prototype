@@ -25,7 +25,7 @@ from mia_data.jobspec import (
     snapshot,
     verify_job,
 )
-from mia_data.models import Pins
+from mia_data.models import JobArgs, Pins
 
 RECORD = {"data": {"download_url": "https://data.example.org/a.zip"}}
 BINDING = {
@@ -52,6 +52,11 @@ def _cfg(tmp_path):
 
 def _pins(cfg, record="rec-1"):
     return Pins(record, "c" * 40, "a" * 40, *harness_pin(cfg))
+
+
+def _args(ws, pins, **job_args):
+    """A submit activity's JobArgs for workspace `ws` in round i1-e2."""
+    return JobArgs(str(ws), "i1-e2", pins, **job_args)
 
 
 def _ws(tmp_path):
@@ -146,7 +151,7 @@ def test_a_new_harness_commit_does_not_touch_an_admitted_round(tmp_path):
     run_git("add", "-A", cwd=cfg.harness.dir)
     run_git(*GIT_ID, "commit", "-qm", "moved", cwd=cfg.harness.dir)
     assert_pin(cfg, pins)  # HEAD moved, env didn't
-    s = smoke_job(cfg, ws, pins, "binding.yaml", tmp_path / "snap", "record.yaml")
+    s = smoke_job(cfg, _args(ws, pins), tmp_path / "snap")
     assert f"PYTHONPATH={snap}/src" in s.command and str(snap) in s.ro_mounts
     assert (snap / "src" / "mia_harness" / "cli.py").read_text() == "def main(): return 0\n"  # still the admitted one
     assert harness_snapshot(cfg, harness_pin(cfg)[0]) != snap  # the new commit gets its own
@@ -171,7 +176,7 @@ def test_assert_pin_raises_when_lock_changes(tmp_path):
 def test_match_job(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     pins = _pins(cfg)
-    s = match_job(cfg, ws, pins, "record.yaml")
+    s = match_job(cfg, _args(ws, pins))
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.agent == "claude" and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
@@ -187,9 +192,7 @@ def test_match_job(tmp_path):
 @pytest.mark.parametrize("trusted", [False, True])
 def test_crop_job_cache_mode(tmp_path, trusted):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    s = crop_job(
-        cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s-t", "i1-e2", 0, None, trusted
-    )
+    s = crop_job(cfg, _args(ws, _pins(cfg), n_crops=4, seed="s-t", batch=0, trusted=trusted), tmp_path / "snap", None)
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert (cache in s.rw_mounts, cache in s.ro_mounts) == (trusted, not trusted)
     assert s.env["MIA_HARNESS_CACHE_WRITABLE"] == ("1" if trusted else "0") and Path(cache).is_dir()
@@ -199,7 +202,7 @@ def test_crop_job_cache_mode(tmp_path, trusted):
 
 def test_crop_job_mounts_the_existing_manifests_dir(tmp_path):
     cfg, ws, m = _cfg(tmp_path), _ws(tmp_path), tmp_path / "ds" / "manifest.json"
-    s = crop_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml", 4, "s", "i1-e2", 1, m, True)
+    s = crop_job(cfg, _args(ws, _pins(cfg), n_crops=4, seed="s", batch=1, trusted=True), tmp_path / "snap", m)
     body = next(line for line in s.command.split("\n") if line.startswith("harness crop"))
     assert body.endswith(f"--existing {m}")
     assert str(m.parent) in s.ro_mounts and str(m) not in s.ro_mounts  # csub mounts directories only
@@ -209,7 +212,7 @@ def test_verify_job(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
     crops = tmp_path / "crop-ws" / "crops"
     m = tmp_path / "ds" / "manifest.json"
-    s = verify_job(cfg, ws, _pins(cfg), crops, "binding.yaml", m)
+    s = verify_job(cfg, _args(ws, _pins(cfg)), crops, m)
     assert s.allow_hosts == [] and str(crops) in s.ro_mounts and f"--existing {m} " in s.command
     assert str(m.parent) in s.ro_mounts and str(m) not in s.ro_mounts  # csub mounts directories only
     assert s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_DIR"] == "" and "harness preview" in s.command
@@ -218,7 +221,7 @@ def test_verify_job(tmp_path):
 
 def test_check_hosts_allowed(tmp_path):
     cfg, ws = _cfg(tmp_path), _ws(tmp_path)
-    s = smoke_job(cfg, ws, _pins(cfg), "binding.yaml", tmp_path / "snap", "record.yaml")
+    s = smoke_job(cfg, _args(ws, _pins(cfg)), tmp_path / "snap")
     check_hosts_allowed(s, ["*.example.org", "cdn.example.net", *cfg.network.package_hosts])
     with pytest.raises(HostsNotAllowed, match="data.example.org") as e:
         check_hosts_allowed(s, ["cdn.example.net", "*.pypi.org", *cfg.network.package_hosts])
@@ -228,12 +231,10 @@ def test_check_hosts_allowed(tmp_path):
 def _builders(cfg, ws, pins, tmp_path):
     snap = tmp_path / "snap"
     return [
-        lambda: match_job(cfg, ws, pins, "record.yaml"),
-        lambda: smoke_job(cfg, ws, pins, "binding.yaml", snap, "record.yaml"),
-        lambda: crop_job(
-            cfg, ws, pins, "binding.yaml", snap, "record.yaml", 4, "s", "i1-e2", 1, tmp_path / "m.json", True
-        ),
-        lambda: verify_job(cfg, ws, pins, tmp_path / "crops", "binding.yaml", None),
+        lambda: match_job(cfg, _args(ws, pins)),
+        lambda: smoke_job(cfg, _args(ws, pins), snap),
+        lambda: crop_job(cfg, _args(ws, pins, n_crops=4, seed="s", batch=1, trusted=True), snap, tmp_path / "m.json"),
+        lambda: verify_job(cfg, _args(ws, pins), tmp_path / "crops", None),
     ]
 
 
