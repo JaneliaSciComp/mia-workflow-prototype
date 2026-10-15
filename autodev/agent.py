@@ -41,7 +41,7 @@ directory on branch `{branch}` at commit {base_sha}.
 """
 
 
-def render_prompt(
+def render_prompt(  # noqa: PLR0913  the template's seven inputs; a PromptInput would be this signature as a class
     cfg: Config, issue: dict, comments: list[dict], branch: str, base_sha: str, pr: int | None, feedback: str | None
 ) -> str:
     """Fill the prompt template with the issue, the human discussion on it, and any reviewer feedback.

@@ -169,7 +169,7 @@ class IssueWorkflow:
             self.workspace = None
         return result
 
-    async def _watch_pr(self) -> str:
+    async def _watch_pr(self) -> str:  # noqa: C901  the review state machine, one branch per action; kept whole so replay changes are visible
         """Watch the PR until it is merged or closed, running revision rounds and escalations as needed.
 
         The wait between polls is observe_pr's retry interval (the activity fails while there is nothing to

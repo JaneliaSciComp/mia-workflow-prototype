@@ -196,7 +196,7 @@ class Activities:
     `bot` is the GitHub login mia-data posts as. `probe` returns the csub policy's allowed_hosts patterns;
     it is injectable for tests."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  the clients the activities need, injected here so tests can fake them
         self,
         cfg: Config,
         gh_data: GitHub,

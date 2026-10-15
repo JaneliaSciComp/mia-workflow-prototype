@@ -234,7 +234,7 @@ async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-async def run_test_pr(activities: Activities, pr: int, binding_file: Path, record_id: str) -> int:
+async def run_test_pr(activities: Activities, pr: int, binding_file: Path, record_id: str) -> int:  # noqa: C901, PLR0912, PLR0915  long but linear: the PR path through the same stages the workflow runs
     """Run the test crops on a snippets PR's head with a binding from disk, synchronously, and post the
     `mia-data/crops` status and a result comment on the PR. Returns 0 if the crops passed.
 

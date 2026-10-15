@@ -238,7 +238,7 @@ def _parent(file: Path | None) -> Path | None:
     return Path(file).parent if file else None
 
 
-def _spec(
+def _spec(  # noqa: PLR0913  keyword-only; every job builder is a thin wrapper that fills these in
     cfg: Config,
     kind: str,
     workspace: Path,

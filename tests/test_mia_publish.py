@@ -82,7 +82,7 @@ def test_concurrent_publishers(tmp_path, monkeypatch):
     def run(src, verified):
         try:
             results.append(publish(ds, src, verified, {}, tmp_max_age_s=AGE))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(e)
 
     ts = [threading.Thread(target=run, args=s) for s in srcs]

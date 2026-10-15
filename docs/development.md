@@ -21,7 +21,12 @@ Run all of these before pushing. CI runs the last three in this order on every p
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
 Configuration for all four is in `pyproject.toml`. Keep them clean rather than suppressing: there are no
-`type: ignore` or `noqa` comments in the source today, and a new one needs a reason next to it.
+`type: ignore` comments in the source today, and a `noqa` needs its reason on the same line.
+
+ruff also enforces size limits: complexity 10 (`C901`), 12 branches, 50 statements, 8 returns and 6 parameters
+per function (`PLR09xx`). More than six parameters wants a parameter object (`JobArgs`, `Reviewers`). The nine
+functions over the line are marked with a `noqa` saying why they are kept whole; do not add to that list
+without the same.
 
 ## Layout
 

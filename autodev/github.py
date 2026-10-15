@@ -147,7 +147,7 @@ class GitHub:
         conditional: bool = False,
     ) -> httpx.Response | None: ...
 
-    async def request(
+    async def request(  # noqa: C901, PLR0913  one retry loop over every request option; splitting it hides the order of checks
         self,
         method: str,
         path: str,

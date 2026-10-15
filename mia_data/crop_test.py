@@ -34,7 +34,7 @@ def judge(verify: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
     return not failed and verify.ok_count > 0 and not verify.errors, failed
 
 
-async def run_crop_test(
+async def run_crop_test(  # noqa: PLR0913  keyword-only; the workflow passes the round's state through
     activities: Activities,
     *,
     issue: int,

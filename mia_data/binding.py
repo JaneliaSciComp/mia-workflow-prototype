@@ -46,7 +46,7 @@ def record_urls(record: dict) -> list[str]:
     ]
 
 
-def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins: Pins) -> list[str]:
+def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins: Pins) -> list[str]:  # noqa: C901  a validator: one branch per rule
     """Errors in an agent-written binding (empty = ok). Rewrites s3:// URLs to https in place.
 
     The binding must name the pinned record and commit, use only snippets from the catalog, and only URLs

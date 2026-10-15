@@ -48,7 +48,7 @@ def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
         raise Conflict(f"{crop_id} is already published with different checksums")
 
 
-def publish(
+def publish(  # noqa: C901, PLR0912  one pass over the crops with a branch per file outcome; the tests cover each
     dataset_dir: Path, src_dir: Path, verified: list[dict], withdrawn: dict[str, str], *, tmp_max_age_s: float
 ) -> dict:
     """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`.

@@ -70,8 +70,16 @@ line-length = 120
 extend-exclude = ["notes"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+select = ["E", "F", "W", "I", "UP", "B", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "RUF100"]
 ignore = ["E501"]  # long lines are reviewed by eye; the renames pushed a few past 120
+
+[tool.ruff.lint.per-file-ignores]
+# fake activity dispatchers and fake services are one big switch each; that is the test, not a smell
+"tests/*" = ["C901", "PLR0913"]
+
+[tool.ruff.lint.pylint]
+max-args = 6  # more than this wants a parameter object (JobArgs, Reviewers)
+max-returns = 8  # decide() and _round() return once per outcome
 
 [tool.mypy]
 python_version = "3.12"
