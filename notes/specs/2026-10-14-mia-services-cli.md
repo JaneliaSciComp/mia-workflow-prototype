@@ -32,7 +32,7 @@ A gitignored manifest, `mia.yaml`, next to the app configs (shipped as `mia.yaml
 ```yaml
 sandbox_dir: ../agentic-sandbox/scripts      # replaces $SANDBOX; relative to the repo
 temporal:
-  managed: true                               # true: mia runs a local dev server; false: an external Temporal (k8s)
+  managed: true                               # dev hosts: mia runs a local dev server. Default false: external Temporal
   state_dir: ~/.local/state/temporal          # managed only: temporal.db, logs/, bin/temporal if the CLI is downloaded
 services:
   autodev:  {app: autodev,  config: autodev.yaml}
@@ -45,9 +45,9 @@ services:
 - `app` selects the per-app recipe (below). `config` is relative to the repo; it is loaded with that app's
   `load_config`, so all existing validation applies.
 - **`temporal` is an implicit service**, always present, never listed. Its address comes from the app configs'
-  `temporal.address`; `mia` refuses to start if the listed services disagree on it. `temporal.managed` says whether
-  `mia` owns the process (local dev server, the default) or only depends on one that something else runs
-  (production: Temporal in k8s).
+  `temporal.address`; `mia` refuses to start if the listed services disagree on it. `temporal.managed: true` says
+  `mia` owns the process (a local dev server, for dev hosts). The default is `false`: omitting the `temporal`
+  section entirely means an external Temporal (production: in k8s) that `mia` only depends on.
 - Unknown service names, unknown apps, or a missing manifest are errors with a one-line message.
 
 ## Behaviour
@@ -63,7 +63,7 @@ else downloaded once into `<state_dir>/bin`. Health is `temporal operator cluste
 the configured address but there is no `temporal` tmux session (started by hand, or by the old scripts), `ps` shows
 it as `external`, `up` reuses it, and `down` leaves it alone.
 
-**Temporal service, external (`managed: false`).** `mia` never starts, stops or restarts Temporal, and never
+**Temporal service, external (`managed: false`, the default).** `mia` never starts, stops or restarts Temporal, and never
 downloads or writes anything for it. `up` only runs the health check against the configured address and stops with
 `temporal: unreachable at <address>` if it fails; nothing else starts. `ps` shows `temporal: external (healthy)` or
 `external (unreachable)`. `down temporal`, `restart temporal`, `logs temporal` and `attach temporal` are errors

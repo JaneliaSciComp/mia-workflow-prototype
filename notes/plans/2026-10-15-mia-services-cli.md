@@ -18,7 +18,7 @@
 - The service name is the tmux session name; a tmux target is always written `=<name>` (exact match).
 - Per-app table (from the spec): autodev = module `autodev.cli`, env `AUTODEV_CONFIG`, proxy flag `AUTODEV_TEMPORAL_VIA_PROXY`, no extra mounts; mia-data = module `mia_data.cli`, env `MIA_DATA_CONFIG`, proxy flag `MIA_DATA_TEMPORAL_VIA_PROXY`, extra mounts `--ro harness.dir`, `--rw paths.storage_root`.
 - Shared mounts and env for every worker: `--ro <repo> --ro <config> --ro <secret> --rw <work_root> --rw /scratch/$USER/<service>`, `--allow github.com --allow api.github.com --allow <host of temporal.address>`, `CSUB_TRANSPORT=unix`, `CSUB_SOCKET=<run>/csub.sock`.
-- `temporal.managed: false` means `mia` never starts, stops, downloads or writes anything for Temporal.
+- `temporal.managed` defaults to `false`; omitting the `temporal` section means an external Temporal that `mia` never starts, stops, downloads or writes anything for. Dev hosts set `managed: true` explicitly.
 - Deviation from the spec, on purpose: the "no single quotes in paths" refusal is dropped. Every tmux command line is built with `shlex.quote`, which is correct for any path; the refusal only existed because the bash scripts hand-quoted.
 - Commit after every task with a message in the repo's style (imperative, one line, optional body) ending in `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 
@@ -64,6 +64,10 @@ def test_example_manifest_loads():
     m = load_manifest(PROJECT_DIR / "mia.yaml.example")
     assert list(m.services) == ["autodev", "snippets", "mia-data"] and m.temporal.managed is True
     assert m.services["snippets"].app == "autodev"
+
+
+def test_omitted_temporal_section_means_external():
+    assert Manifest(services=SERVICES).temporal.managed is False
 
 
 def test_paths_resolve_against_the_repo():
@@ -140,7 +144,7 @@ NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,30}")
 
 
 class TemporalCfg(BaseModel):
-    managed: bool = True  # True: `mia` runs a local dev server; False: something else does (k8s)
+    managed: bool = False  # True: `mia` runs a local dev server (dev hosts); False: something else does (k8s)
     state_dir: Path = Path("~/.local/state/temporal")  # managed only: temporal.db, logs/, bin/temporal
 
 
@@ -191,8 +195,8 @@ def load_manifest(path: str | os.PathLike | None = None) -> Manifest:
 # Copy to mia.yaml (git-ignored). Lists the services `pixi run mia` manages on this host.
 # Each service is one tmux session named after it: a csub broker and a sandboxed worker.
 sandbox_dir: ../agentic-sandbox/scripts   # agentic-sandbox's scripts dir, relative to this repo
-temporal:
-  managed: true                           # true: mia runs a local dev server; false: external Temporal (k8s)
+temporal:                                 # omit this section entirely for an external Temporal (production: k8s)
+  managed: true                           # dev hosts: mia runs a local dev server (the default is false)
   state_dir: ~/.local/state/temporal      # managed only: temporal.db, logs/, and bin/temporal if downloaded
 services:                                 # name -> app (autodev | mia-data) + its config file
   autodev:  {app: autodev,  config: autodev.yaml}
@@ -1287,7 +1291,7 @@ Prerequisite 2 becomes: `**agentic-sandbox** checked out next to this repo (`../
 In section 4 replace the four commands with:
 
 ```bash
-cp mia.yaml.example mia.yaml      # keep only the `autodev` service, pointing at your autodev.yaml
+cp mia.yaml.example mia.yaml      # keep only the `autodev` service, pointing at your autodev.yaml; keep temporal.managed: true
 pixi run autodev check          # the `temporal` row is BAD until `mia up` starts the dev server; fix any other BAD first
 pixi run autodev init-labels    # creates the autodev-<you>:* labels (idempotent)
 pixi run mia up                 # tmux sessions temporal and autodev; applies the poll schedule
