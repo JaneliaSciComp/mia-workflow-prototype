@@ -71,8 +71,8 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 | path | |
 |---|---|
 | `autodev/` | autodev: workflows, activities, CLI; GitHub client and csub job runner shared with mia-data |
-| `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run md`) |
+| `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run mia exec mia-data ...`) |
+| `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data), and `mia exec <service> <cmd>` runs an app command with that service's config |
 | `docs/` | setup guides, the [mia-data workflow overview](docs/mia-data-workflow.md) and the [development guide](docs/development.md) |
 | `notes/` | design notes, runbook, specs |
-| `scripts/` | `autodev-up.sh`, `mia-data-up.sh` |
 | `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed. `pixi run lint` runs ruff, `pixi run typecheck` runs mypy |

@@ -1,0 +1,10 @@
+# Copy to mia.yaml (git-ignored). Lists the services `pixi run mia` manages on this host.
+# Each service is one tmux session named after it: a csub broker and a sandboxed worker.
+sandbox_dir: ../agentic-sandbox/scripts   # agentic-sandbox's scripts dir, relative to this repo
+temporal:                                 # omit this section entirely for an external Temporal (production: k8s)
+  managed: true                           # dev hosts: mia runs a local dev server (the default is false)
+  state_dir: ~/.local/state/temporal      # managed only: temporal.db, logs/, and bin/temporal if downloaded
+services:                                 # name -> app (autodev | mia-data) + its config file
+  autodev:  {app: autodev,  config: autodev.yaml}
+  snippets: {app: autodev,  config: autodev-snippets.yaml}
+  mia-data: {app: mia-data, config: mia_data.yaml}

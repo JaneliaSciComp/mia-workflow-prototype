@@ -170,37 +170,13 @@ def test_check_flags_policy_queue_lsf_does_not_have(monkeypatch, tmp_path, capsy
     )
 
 
-def test_help_lists_devops_commands(capsys):
+def test_help_lists_app_commands(capsys):
     import pytest
 
     with pytest.raises(SystemExit) as e:
         main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("up", "down", "restart", "ps", "attach", "logs", "check", "seed", "worker"):
+    for cmd in ("check", "seed", "worker", "test-pr", "schedule"):
         assert cmd in out
-
-
-def test_devops_commands_drive_the_mia_session(monkeypatch, tmp_path, capsys):
-    import subprocess
-
-    from autodev import ops
-
-    calls = []
-
-    def run(argv, **kw):
-        calls.append((argv, kw))
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(ops.subprocess, "run", run)
-    cfg = make_cfg(tmp_path)
-    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
-    assert main(["down"]) == 0 and ["tmux", "kill-session", "-t", "=mia-data"] in [c[0] for c in calls]
-    assert main(["up"]) == 0
-    argv, kw = calls[-1]
-    assert argv[0].endswith("scripts/mia-data-up.sh") and kw["env"]["MIA_DATA_CONFIG"].endswith("mia_data.yaml")
-    log = cfg.paths.state_dir / "logs" / "worker.log"
-    log.parent.mkdir(parents=True)
-    log.write_text("x\n")
-    assert main(["logs", "-n", "3"]) == 0 and calls[-1][0] == ["tail", "-n", "3", str(log)]
-    assert main(["ps"]) == 0 and "mia-data: running" in capsys.readouterr().out
+    assert "restart" not in out and "attach" not in out

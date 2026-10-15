@@ -1,0 +1,308 @@
+"""The services in mia.yaml and how to run them: a Temporal dev server (or an external one), and per app
+service one tmux session holding a csub broker and a worker inside agentic-sandbox."""
+
+from __future__ import annotations
+
+import getpass
+import importlib
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from autodev.config import PROJECT_DIR
+
+from .manifest import Manifest
+
+PY = PROJECT_DIR / ".pixi/envs/default/bin/python"
+BROKER = PROJECT_DIR / ".pixi/envs/default/bin/csub-broker"
+SCRATCH = Path("/scratch")  # node-local; the csub broker's unix socket lives under it
+TEMPORAL_CLI_URL = "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64"
+
+
+# ---- tmux
+
+
+def _tmux(*args: str, **kwargs: Any) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["tmux", *args], text=True, **kwargs)
+    except FileNotFoundError:
+        sys.exit("tmux not found on PATH")
+
+
+def is_running(session: str) -> bool:
+    return _tmux("has-session", "-t", f"={session}", capture_output=True).returncode == 0
+
+
+def kill(session: str) -> int:
+    if not is_running(session):
+        print(f"{session}: not running")
+        return 0
+    rc = _tmux("kill-session", "-t", f"={session}").returncode
+    if rc == 0:
+        print(f"{session}: stopped")
+    return rc
+
+
+def windows(session: str) -> str:
+    fmt = "  #{window_name}: #{?pane_dead,dead,alive}"
+    return _tmux("list-windows", "-t", f"={session}", "-F", fmt, capture_output=True).stdout
+
+
+def attach(session: str) -> int:
+    if not is_running(session):
+        sys.exit(f"{session} is not running (run `mia up {session}` first)")
+    return _tmux("attach", "-t", f"={session}").returncode
+
+
+def new_session(session: str, window: str, command: str) -> None:
+    _tmux("new-session", "-d", "-s", session, "-n", window, command, check=True)
+
+
+def new_window(session: str, window: str, command: str) -> None:
+    _tmux("new-window", "-t", f"={session}", "-n", window, command, check=True)
+
+
+def shell(*parts: object) -> str:
+    """One shell command line for tmux from argv parts; quoting handles any path, quotes included."""
+    return " ".join(shlex.quote(str(p)) for p in parts)
+
+
+# ---- apps and services
+
+
+@dataclass(frozen=True)
+class App:
+    package: str  # `python -m <package>.cli`; `<package>.config.load_config`
+    config_env: str
+    proxy_env: str
+
+    @property
+    def module(self) -> str:
+        return f"{self.package}.cli"
+
+    def load_config(self, path: Path) -> Any:
+        return importlib.import_module(f"{self.package}.config").load_config(path)
+
+    def extra_mounts(self, cfg: Any) -> list[tuple[str, Path]]:
+        if self.package == "mia_data":
+            return [("--ro", cfg.harness.dir), ("--rw", cfg.paths.storage_root)]
+        return []
+
+
+APPS = {
+    "autodev": App("autodev", "AUTODEV_CONFIG", "AUTODEV_TEMPORAL_VIA_PROXY"),
+    "mia-data": App("mia_data", "MIA_DATA_CONFIG", "MIA_DATA_TEMPORAL_VIA_PROXY"),
+}
+
+
+@dataclass
+class Service:
+    name: str  # also the tmux session
+    app: App
+    config_path: Path
+    cfg: Any  # the app's validated Config
+
+    @property
+    def state(self) -> Path:
+        return self.cfg.paths.state_dir
+
+    @property
+    def host(self) -> Path:  # host-only files beside the state dir, which the sandbox binds read-write
+        return self.state.with_name(self.state.name + "-host")
+
+    @property
+    def run(self) -> Path:  # the csub broker's unix socket dir
+        return SCRATCH / (os.environ.get("USER") or getpass.getuser()) / self.name
+
+    @property
+    def secret(self) -> Path | None:
+        g = self.cfg.github
+        path = g.private_key_path if g.auth == "app" else g.token_file
+        return Path(path).expanduser().resolve() if path else None
+
+    def logs(self) -> dict[str, Path]:
+        return {"worker": self.state / "logs/worker.log", "broker": self.host / "logs/broker.log"}
+
+
+class Stack:
+    """mia.yaml loaded: every service with its config, and the one Temporal address they share."""
+
+    def __init__(self, manifest: Manifest):
+        self.manifest = manifest
+        self.services = {
+            name: Service(name, APPS[s.app], s.config, APPS[s.app].load_config(s.config))
+            for name, s in manifest.services.items()
+        }
+        addresses = {s.cfg.temporal.address for s in self.services.values()}
+        if len(addresses) != 1:
+            sys.exit(f"mia: services disagree on temporal.address: {sorted(addresses)}")
+        self.temporal_address: str = addresses.pop()
+        # Two workers binding one state dir read-write, or two deployments with one label prefix, would corrupt
+        # each other: the usual slip is copying a config and forgetting to change these.
+        seen: dict[tuple[str, object], str] = {}
+        for name, svc in self.services.items():
+            for key, value in (("paths.state_dir", svc.state), ("deployment", svc.cfg.deployment)):
+                if (key, value) in seen:
+                    sys.exit(f"mia: services {seen[key, value]!r} and {name!r} share {key} {value}")
+                seen[key, value] = name
+
+    def service(self, name: str) -> Service:
+        if name not in self.services:
+            sys.exit(f"mia: unknown service {name!r}; mia.yaml lists {list(self.services)} (and temporal)")
+        return self.services[name]
+
+    def select(self, names: list[str]) -> tuple[bool, list[Service]]:
+        """(temporal selected?, app services in manifest order). No names means everything."""
+        if not names:
+            return True, list(self.services.values())
+        for name in names:
+            if name != "temporal":
+                self.service(name)
+        return "temporal" in names, [s for n, s in self.services.items() if n in names]
+
+
+# ---- temporal
+
+
+class Temporal:
+    SESSION = "temporal"
+
+    def __init__(self, stack: Stack):
+        self.managed = stack.manifest.temporal.managed
+        self.state = stack.manifest.temporal.state_dir
+        self.address = stack.temporal_address
+        self.log = self.state / "logs/temporal.log"
+
+    @property
+    def host(self) -> str:
+        return self.address.rsplit(":", 1)[0] if ":" in self.address else self.address
+
+    def cli_if_present(self) -> Path | None:
+        """The `temporal` CLI on PATH or already downloaded; None if a managed server would have to download it."""
+        if found := shutil.which("temporal"):
+            return Path(found)
+        if not self.managed:
+            sys.exit("mia: the `temporal` CLI must be on PATH when temporal.managed is false")
+        target = self.state / "bin/temporal"
+        return target if target.exists() else None
+
+    def cli(self) -> Path:
+        if present := self.cli_if_present():
+            return present
+        target = self.state / "bin/temporal"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        print(f"downloading the temporal CLI to {target}")
+        cmd = f"curl -sSL {shlex.quote(TEMPORAL_CLI_URL)} | tar xz -C {shlex.quote(str(target.parent))} temporal"
+        subprocess.run(cmd, shell=True, check=True)
+        return target
+
+    def _run(self, *args: str, download: bool = True) -> int:
+        cli = self.cli() if download else self.cli_if_present()
+        if cli is None:  # no CLI and not allowed to fetch one: treat the server as unreachable
+            return 1
+        return subprocess.run([str(cli), *args, "--address", self.address], capture_output=True).returncode
+
+    def healthy(self, download: bool = True) -> bool:
+        return self._run("operator", "cluster", "health", download=download) == 0
+
+    def status(self) -> str:
+        """Read-only: never downloads the CLI or writes anything."""
+        if self.managed:
+            return "running" if is_running(self.SESSION) else "external" if self.healthy(download=False) else "stopped"
+        return "external (healthy)" if self.healthy() else "external (unreachable)"
+
+    def up(self) -> None:
+        if self.healthy():
+            print(f"temporal: {self.status()} at {self.address}")
+            return
+        if not self.managed:
+            sys.exit(f"temporal: unreachable at {self.address} (temporal.managed is false; see your cluster)")
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        server = shell(self.cli(), "server", "start-dev", "--db-filename", self.state / "temporal.db")
+        new_session(self.SESSION, "temporal", f"{server} 2>&1 | tee -a {shell(self.log)}")
+        for _ in range(60):
+            if self.healthy():
+                print(f"temporal: started at {self.address}")
+                return
+            time.sleep(1)
+        sys.exit(f"temporal: did not come up; see {self.log}")
+
+    def down(self, explicit: bool) -> int:
+        if not self.managed:
+            if explicit:
+                sys.exit("temporal is external (temporal.managed is false); see your cluster")
+            print("temporal: external, left alone")
+            return 0
+        return kill(self.SESSION)
+
+    def ensure_namespace(self, ns: str) -> None:
+        if self._run("operator", "namespace", "describe", "-n", ns) == 0:
+            return
+        if self._run("operator", "namespace", "create", "-n", ns) != 0:
+            sys.exit(f"temporal: could not create namespace {ns!r} at {self.address}")
+        for _ in range(30):  # registration is async: the frontend's namespace cache refreshes every ~10 s
+            if self._run("workflow", "list", "-n", ns, "--limit", "1") == 0:
+                return
+            time.sleep(1)
+
+
+# ---- app services
+
+
+def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
+    """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule.
+    Temporal is started (managed) or verified (external) first. Re-running on a live session only
+    re-applies the schedule, so a run that failed partway is repaired by running it again."""
+    cfg = svc.cfg
+    if cfg.agent.api_key_env:
+        sys.exit(f"{svc.name}: agent.api_key_env is not supported by `mia up` yet; give the account a Claude login")
+    if not svc.secret:  # the sandbox masks .env and tmux passes no env, so the GitHub secret must be a file
+        sys.exit(f"{svc.name}: set github.token_file (auth: token) or github.private_key_path (auth: app)")
+    sandbox = stack.manifest.sandbox_dir / "sandbox-run.sh"
+    prerequisites = (
+        (PY, "run `pixi install`"),
+        (BROKER, "run `pixi install`"),
+        (sandbox, "set sandbox_dir in mia.yaml"),
+    )
+    for path, hint in prerequisites:
+        if not os.access(path, os.X_OK):
+            sys.exit(f"{svc.name}: {path} not found ({hint})")
+    extra = svc.app.extra_mounts(cfg)
+    rw_extra = (p for flag, p in extra if flag == "--rw")
+    for d in (svc.state / "logs", svc.host / "logs", cfg.paths.work_root, svc.run, *rw_extra):
+        d.mkdir(parents=True, exist_ok=True)
+
+    temporal.up()
+    temporal.ensure_namespace(cfg.temporal.namespace)
+
+    schedule = [str(PY), "-m", svc.app.module, "schedule", "apply"]
+    env = {**os.environ, svc.app.config_env: str(svc.config_path)}
+    if is_running(svc.name):
+        subprocess.run(schedule, env=env, check=True)
+        print(f"{svc.name}: already running (tmux attach -t {svc.name})")
+        return 0
+
+    sock = svc.run / "csub.sock"
+    broker_log = svc.host / "logs/broker.log"
+    new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
+    # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
+    # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
+    mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]
+    for flag, path in extra:
+        mounts += [flag, path]
+    mounts += ["--rw", cfg.paths.work_root, "--rw", svc.run]
+    worker = shell(
+        sandbox, *mounts, "--allow", "github.com", "--allow", "api.github.com", "--allow", temporal.host, "--",
+        "env", f"{svc.app.config_env}={svc.config_path}", "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
+        f"{svc.app.proxy_env}=1", PY, "-m", svc.app.module, "worker",
+    )  # fmt: skip
+    new_window(svc.name, "worker", f"cd {shell(svc.state)} && {worker}; read -p 'worker exited; press enter'")
+    subprocess.run(schedule, env=env, check=True)
+    print(f"{svc.name}: started (attach: mia attach {svc.name}; logs: mia logs {svc.name} -f)")
+    return 0
