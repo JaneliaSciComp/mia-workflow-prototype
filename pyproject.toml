@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 autodev = "autodev.cli:main"
 mia-data = "mia_data.cli:main"
+mia = "mia_ops.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -62,8 +63,7 @@ test = "pytest tests/"
 lint = "ruff check . && ruff format --check ."
 fmt = "ruff format . && ruff check --fix ."
 typecheck = "mypy autodev mia_data mia_ops"
-ad = "autodev"
-md = "mia-data"
+mia = "mia"
 
 [tool.ruff]
 line-length = 120
