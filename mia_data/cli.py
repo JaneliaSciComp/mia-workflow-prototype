@@ -63,12 +63,81 @@ def _gh(cfg: Config, repo: str, tokens: Callable[[], str | None] | None = None) 
     return GitHub(repo, tokens or token_fn(cfg), api_url=cfg.github.api_url)
 
 
+def _wanted_hosts(cfg: Config) -> list[str]:
+    """Every host a mia-data job may need: package indexes, redirect sources and targets, the data hosts."""
+    network = cfg.network
+    return [
+        *network.package_hosts,
+        *network.redirect_hosts,
+        *(target for targets in network.redirect_hosts.values() for target in targets),
+        *DATA_HOSTS,
+    ]
+
+
+def _csub_problems(cfg: Config, probe: Any, lsf_queues: set[str] | None) -> list[str]:
+    """Everything in the broker policy (`csub probe`) that would stop mia-data's jobs: hosts, the agent, env
+    vars, mounts, queues. Each message says what to change in broker.toml."""
+    from .binding import missing_hosts
+    from .jobspec import HARNESS_ENV
+
+    problems = [f"host not allowed: {host}" for host in missing_hosts(_wanted_hosts(cfg), list(probe.allowed_hosts))]
+    if "claude" not in probe.agents:
+        problems.append(
+            'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
+            '"claude.ai", "platform.claude.com"])'
+        )
+    if missing := [var for var in HARNESS_ENV if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
+        problems.append(
+            f'env not allowed: {", ".join(missing)} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
+        )
+    problems += _mount_problems(cfg, probe)
+    problems += _queue_problems(probe, lsf_queues)
+    return problems
+
+
+def _mount_problems(cfg: Config, probe: Any) -> list[str]:
+    """The directories every job mounts must be under the policy's allowed_roots and away from $HOME, which
+    csub never mounts."""
+    mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.paths.storage_root]
+    problems = []
+    if outside := [
+        str(directory)
+        for directory in mounted
+        if not any(directory.is_relative_to(root) for root in probe.allowed_roots)
+    ]:
+        problems.append(
+            f"outside allowed_roots: {', '.join(outside)} (broker.toml [broker]: add "
+            f"{', '.join(json.dumps(directory) for directory in outside)} to allowed_roots)"
+        )
+    home = Path.home().resolve()
+    if inside := [
+        str(directory) for directory in mounted if directory.is_relative_to(home) or home.is_relative_to(directory)
+    ]:
+        problems.append(
+            f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
+            "(move it out of $HOME)"
+        )
+    return problems
+
+
+def _queue_problems(probe: Any, lsf_queues: set[str] | None) -> list[str]:
+    """A policy queue table named after a queue LSF does not have fails every submit with "No such queue".
+    Skipped (None) where bqueues is not installed."""
+    if lsf_queues is None:
+        return []
+    if missing := [name for name, queue in probe.queues.items() if not queue.get("gpu") and name not in lsf_queues]:
+        return [
+            f"not an LSF queue: {', '.join(missing)} (broker.toml: name the CPU [queues.<name>] tables and "
+            f"[limits] cpu_short_queue/cpu_default_queue after real queues from `bqueues`, e.g. short, local)"
+        ]
+    return []
+
+
 async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     """Try every external dependency and print one ok/BAD line per check."""
     from autodev.jobs import csub_client
 
-    from .binding import missing_hosts
-    from .jobspec import HARNESS_ENV, harness_env, harness_pin
+    from .jobspec import harness_env, harness_pin
 
     rows: list[tuple[str, bool, str]] = []
 
@@ -97,55 +166,11 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
         return f"{cfg.temporal.address} ns={cfg.temporal.namespace}"
 
     async def csub():
-        """Everything in the broker policy that would stop mia-data's jobs: hosts, the agent, env vars, mounts, queues."""
         probe = await asyncio.to_thread(csub_client(cfg.deployment).probe)
-        network = cfg.network
-        want = [
-            *network.package_hosts,
-            *network.redirect_hosts,
-            *(target for targets in network.redirect_hosts.values() for target in targets),
-            *DATA_HOSTS,
-        ]
-        bad = [f"host not allowed: {host}" for host in missing_hosts(want, list(probe.allowed_hosts))]
-        if "claude" not in probe.agents:
-            bad.append(
-                'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
-                '"claude.ai", "platform.claude.com"])'
-            )
-        if missing := [var for var in HARNESS_ENV if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
-            bad.append(
-                f'env not allowed: {", ".join(missing)} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
-            )
-        mounted = [cfg.harness.dir, cfg.paths.work_root, cfg.paths.storage_root]  # every job mounts under these
-        if missing := [
-            str(directory)
-            for directory in mounted
-            if not any(directory.is_relative_to(root) for root in probe.allowed_roots)
-        ]:
-            bad.append(
-                f"outside allowed_roots: {', '.join(missing)} (broker.toml [broker]: add "
-                f"{', '.join(json.dumps(directory) for directory in missing)} to allowed_roots)"
-            )
-        home = Path.home().resolve()
-        if inside := [
-            str(directory) for directory in mounted if directory.is_relative_to(home) or home.is_relative_to(directory)
-        ]:
-            bad.append(
-                f"under or containing the home directory {home}, which csub never mounts: {', '.join(inside)} "
-                "(move it out of $HOME)"
-            )
-        # a policy queue table named after a queue LSF does not have fails every submit with "No such queue"
-        if (lsf_queues := await asyncio.to_thread(_lsf_queues)) is not None:
-            if missing := [
-                name for name, queue in probe.queues.items() if not queue.get("gpu") and name not in lsf_queues
-            ]:
-                bad.append(
-                    f"not an LSF queue: {', '.join(missing)} (broker.toml: name the CPU [queues.<name>] tables and "
-                    f"[limits] cpu_short_queue/cpu_default_queue after real queues from `bqueues`, e.g. short, local)"
-                )
-        if bad:
+        lsf_queues = await asyncio.to_thread(_lsf_queues)
+        if bad := _csub_problems(cfg, probe, lsf_queues):
             raise RuntimeError("; ".join(bad))
-        return f"broker user {probe.user}, {len(want)} hosts ok"
+        return f"broker user {probe.user}, {len(_wanted_hosts(cfg))} hosts ok"
 
     async def dirs():
         for directory in (cfg.paths.state_dir, cfg.paths.work_root, cfg.paths.storage_root):

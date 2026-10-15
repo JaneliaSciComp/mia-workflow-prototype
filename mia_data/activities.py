@@ -18,7 +18,6 @@ import os
 import re
 import shutil
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -28,7 +27,6 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, neutralize, permanent_errors
 from autodev.jobs import JobSpec, read_untrusted
-from autodev.review import WRITE_PERMISSIONS
 
 from . import catalog
 from . import publish as crop_publish
@@ -54,7 +52,6 @@ from .models import (
     GalleryResult,
     JobArgs,
     JobDone,
-    LabelEvent,
     MatchResult,
     Pins,
     PrUpdate,
@@ -62,6 +59,7 @@ from .models import (
     SmokeResult,
     VerifyResult,
 )
+from .poll import run_poll
 from .publish import CROP_ID_RE, Conflict
 from .seed import ID_RE, MARKER_RE
 from .status import render_binding, render_crops_table, render_links, render_stage
@@ -78,7 +76,6 @@ log = logging.getLogger(__name__)
 
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
-SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->")  # open_snippet_issue's marker
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
@@ -467,37 +464,24 @@ class Activities:
 
     def _spec(self, kind: str, args: JobArgs, snapshot_dir: Path | None) -> JobSpec:
         """Build the JobSpec for one job kind from its arguments."""
-        workspace, pins, cfg = Path(args.workspace), args.pins, self.cfg
+        cfg = self.cfg
         if kind == "match":
-            return match_job(cfg, workspace, pins, "record.yaml")
-        if kind in ("smoke", "crop") and snapshot_dir is None:
-            raise ValueError(f"{kind} job needs a snippets snapshot")
-        existing = self._dataset_dir(args.round_id, pins) / "manifest.json" if args.existing else None
+            return match_job(cfg, args)
+        existing = self._dataset_dir(args.round_id, args.pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
-        if kind == "smoke" and snapshot_dir:
-            return smoke_job(cfg, workspace, pins, "binding.yaml", snapshot_dir, "record.yaml")
-        if kind == "crop" and snapshot_dir:
-            return crop_job(
-                cfg,
-                workspace,
-                pins,
-                "binding.yaml",
-                snapshot_dir,
-                "record.yaml",
-                args.n_crops,
-                args.seed,
-                args.round_id,
-                args.batch,
-                existing,
-                args.trusted,
-            )
+        if kind in ("smoke", "crop"):
+            if snapshot_dir is None:
+                raise ValueError(f"{kind} job needs a snippets snapshot")
+            if kind == "smoke":
+                return smoke_job(cfg, args, snapshot_dir)
+            return crop_job(cfg, args, snapshot_dir, existing)
         if kind == "verify":
             if args.crop_workspace is None:
                 raise ValueError("verify job needs crop_workspace")
             crop_workspace = Path(args.crop_workspace)
-            if crop_workspace.parent != workspace.parent:
+            if crop_workspace.parent != Path(args.workspace).parent:
                 raise ValueError(f"crop workspace {args.crop_workspace} is not of this round")
-            return verify_job(cfg, workspace, pins, self._crops_dir(crop_workspace), "binding.yaml", existing)
+            return verify_job(cfg, args, self._crops_dir(crop_workspace), existing)
         raise ValueError(f"unknown job kind {kind!r}")
 
     @activity.defn(name="submit")
@@ -846,103 +830,6 @@ class Activities:
     @activity.defn(name="poll")
     @mia_permanent_errors
     async def poll(self) -> list[str]:
-        """One poll: deliver `data:go`/`data:approve` labels as signals, wake dataset workflows whose snippet
-        PR changed, and pass the `mia-data/crops` status on PRs that add no snippet.
-
-        One bad issue or PR never skips the rest; the next poll retries it. Returns a log of what was done."""
-        from temporalio.service import RPCError, RPCStatusCode
-
-        cfg, gh_data, gh_snippets, done = self.cfg, self.gh_data, self.gh_snippets, []
-        for kind in HUMAN_LABELS:
-            label = cfg.label(kind)
-            for issue in await gh_data.list_issues(labels=label, state="open"):
-                number = issue["number"]
-                try:
-                    actor, event_id, labeled_at = await gh_data.label_event(number, label)
-                    if not actor or await gh_data.permission(actor) not in WRITE_PERMISSIONS:
-                        await gh_data.remove_label(number, label)
-                        marker = cfg.marker(f"ignored {label} {event_id}")
-                        await self._comment_once(
-                            gh_data,
-                            number,
-                            f"Ignoring `{label}`: it was added by `{actor or 'unknown'}`, who does "
-                            f"not have write access to this repository.\n\n{marker}",
-                            marker,
-                        )
-                    elif not (event_id and labeled_at):
-                        log.warning("poll: #%s %s: label event has no id or time", number, label)
-                    elif kind == "go" and "licence-excluded" in {lb["name"] for lb in issue.get("labels", [])}:
-                        await self.refuse_label(
-                            number,
-                            label,
-                            "the dataset's licence is not in `crops.licences` (`licence-excluded`)",
-                            event_id,
-                        )
-                    else:
-                        # start_signal: starts the workflow if needed and delivers the label as a signal either way
-                        await self.temporal.start_workflow(
-                            "MiaDataDataset",
-                            DatasetState(number),
-                            id=cfg.workflow_id(number),
-                            task_queue=cfg.task_queue,
-                            start_signal=kind,
-                            start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)],
-                        )
-                        await gh_data.remove_label(number, label)  # only once the signal is accepted
-                        done.append(f"{kind} #{number}")
-                except Exception:
-                    log.exception("poll: issue #%s %s failed", number, label)
-        recent = datetime.now(UTC) - timedelta(days=1)
-        # ponytail: the first page (50 most recently updated PRs); paginate if more than 50 are active
-        for pr_data in await gh_snippets.list_prs(state="all"):
-            try:
-                head = pr_data["head"]
-                if pr_data["state"] == "open" and not any(
-                    status.get("context") == "mia-data/crops" for status in await gh_snippets.statuses(head["sha"])
-                ):
-                    files = await gh_snippets.pr_files(pr_data["number"])
-                    if len(files) < 100 and not any(file.startswith("snippets/") for file in files):  # 100: a full page
-                        await gh_snippets.set_status(
-                            head["sha"], "mia-data/crops", "success", "no snippet in this PR", None
-                        )
-                        done.append(f"status PR #{pr_data['number']}")
-                match = re.fullmatch(r"snippets/issue-(\d+)", head["ref"])
-                if (
-                    not match
-                    or (head.get("repo") or {}).get("full_name") != gh_snippets.repo
-                    or (pr_data["state"] != "open" and datetime.fromisoformat(pr_data["updated_at"]) < recent)
-                ):
-                    continue
-                snippet_issue = await gh_snippets.get_issue(int(match.group(1)))
-                issue_marker = SNIPPET_ISSUE_RE.match(snippet_issue.get("body") or "")
-                if (
-                    not issue_marker or (snippet_issue.get("user") or {}).get("login") != self.bot
-                ):  # an outsider can copy the marker
-                    continue
-                merged = bool(pr_data.get("merged_at"))
-                update = PrUpdate(
-                    pr_data["number"],
-                    head["sha"],
-                    "merged" if merged else pr_data["state"],
-                    pr_data.get("merge_commit_sha") if merged else None,
-                    snippet_issue["number"],
-                    "snippets:needs-human" in {lb["name"] for lb in snippet_issue.get("labels", [])},
-                    pr_data.get("html_url"),
-                )
-                fingerprint = (update.head_sha, update.state, update.merge_sha, update.needs_human)
-                if self._sent.get(update.pr) == fingerprint:
-                    continue  # signalled already: a wake-up per change, not per poll
-                try:
-                    await self.temporal.get_workflow_handle(cfg.workflow_id(int(issue_marker.group(1)))).signal(
-                        "pr_update", update
-                    )
-                    self._sent[update.pr] = fingerprint
-                    done.append(f"pr_update PR #{pr_data['number']}")
-                except RPCError as error:
-                    if error.status != RPCStatusCode.NOT_FOUND:  # no dataset workflow (any more): nothing to wake
-                        raise
-            except Exception:
-                log.exception("poll: PR #%s failed", pr_data.get("number"))
-        if done:
-            log.info("poll: %s", ", ".join(done))
-        return done
+        """One scheduled pass over GitHub: labels become signals, changed snippet PRs wake their workflows
+        (see poll.py). Returns a log of what was done."""
+        return await run_poll(self)

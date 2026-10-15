@@ -38,7 +38,7 @@ from .seed import ID_RE
 
 if TYPE_CHECKING:
     from .config import Config
-    from .models import Pins
+    from .models import JobArgs, Pins
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
@@ -51,6 +51,8 @@ HARNESS_ENV = (
     "MIA_HARNESS_CACHE_WRITABLE",
 )  # every job's env; csub's env_allow must cover it
 quote = shlex.quote
+BINDING_FILE = "binding.yaml"  # the round's checked binding, copied into the workspace by prepare_job
+RECORD_FILE = "record.yaml"  # the dataset record, copied into every workspace
 
 
 class PinMoved(RuntimeError):
@@ -291,13 +293,14 @@ def _spec(
     )
 
 
-def match_job(cfg: Config, workspace: Path, pins: Pins, record_path: str = "record.yaml") -> JobSpec:
+def match_job(cfg: Config, args: JobArgs) -> JobSpec:
     """The match agent: Claude Code with the harness's `smoke` command as its only tool besides reading.
 
     The caller has written `prompt.md` (match_prompt), `record.yaml`, `downloads.json`, any `conversion.json`
     / `manifest.json`, `catalog/` and `SPEC.md` into the workspace, and made the snapshot of
     `pins.snippets_commit`. Anthropic hosts come from the csub policy's [agents] table, never from here."""
-    record = yaml.safe_load(Path(workspace, record_path).read_text()) or {}
+    workspace, pins = Path(args.workspace), args.pins
+    record = yaml.safe_load((workspace / RECORD_FILE).read_text()) or {}
     snapshot_dir = _snapshot_dir(cfg, pins.snippets_commit)
     body = (
         f"ln -sfn {quote(str(snapshot_dir))} snapshot && \\\n"
@@ -320,62 +323,46 @@ def match_job(cfg: Config, workspace: Path, pins: Pins, record_path: str = "reco
     )
 
 
-def smoke_job(cfg: Config, workspace: Path, pins: Pins, binding_path: str, snapshot: Path, record_path: str) -> JobSpec:
+def smoke_job(cfg: Config, args: JobArgs, snapshot: Path) -> JobSpec:
     """The worker's own smoke of a binding, so the agent's claim is checked. Reviewed code: cache read-write."""
-    record, urls = _binding(workspace, binding_path)
+    workspace = Path(args.workspace)
+    record, urls = _binding(workspace, BINDING_FILE)
+    body = f"harness smoke {BINDING_FILE} --snippets {quote(str(snapshot))} --record {RECORD_FILE} --out smoke.json"
+    return _spec(cfg, "smoke", workspace, args.pins, body, hosts(urls, cfg), [snapshot], record=record, writable=True)
+
+
+def crop_job(cfg: Config, args: JobArgs, snapshot: Path, existing: Path | None) -> JobSpec:
+    """`harness crop` into `<workspace>/crops`, `args.n_crops` of them from `args.seed`.
+
+    `args.trusted` (a matched or merged SHA, or production) mounts the dataset cache read-write; a PR head gets
+    it read-only and keeps a private cache. `existing` is a published manifest.json to avoid duplicating."""
+    workspace = Path(args.workspace)
+    record, urls = _binding(workspace, BINDING_FILE)
     body = (
-        f"harness smoke {quote(binding_path)} --snippets {quote(str(snapshot))} "
-        f"--record {quote(record_path)} --out smoke.json"
-    )
-    return _spec(cfg, "smoke", workspace, pins, body, hosts(urls, cfg), [snapshot], record=record, writable=True)
-
-
-def crop_job(
-    cfg: Config,
-    workspace: Path,
-    pins: Pins,
-    binding_path: str,
-    snapshot: Path,
-    record_path: str,
-    n_crops: int,
-    seed: str,
-    round_id: str,
-    batch: int,
-    existing: Path | None,
-    trusted: bool,
-) -> JobSpec:
-    """`harness crop` into `<workspace>/crops`.
-
-    `trusted` (a matched or merged SHA, or production) mounts the dataset cache read-write; a PR head gets it
-    read-only and keeps a private cache. `existing` is a published manifest.json to avoid duplicating."""
-    record, urls = _binding(workspace, binding_path)
-    body = (
-        f"harness crop {quote(binding_path)} --snippets {quote(str(snapshot))} --record {quote(record_path)} "
-        f"--n {int(n_crops)} --seed {quote(seed)} --round {quote(round_id)} --batch {int(batch)} --out crops"
-        + (f" --existing {quote(str(existing))}" if existing else "")
+        f"harness crop {BINDING_FILE} --snippets {quote(str(snapshot))} --record {RECORD_FILE} "
+        f"--n {int(args.n_crops)} --seed {quote(args.seed)} --round {quote(args.round_id)} "
+        f"--batch {int(args.batch)} --out crops" + (f" --existing {quote(str(existing))}" if existing else "")
     )
     return _spec(
         cfg,
         "crop",
         workspace,
-        pins,
+        args.pins,
         body,
         hosts(urls, cfg),
         [snapshot, _parent(existing)],
         record=record,
-        writable=trusted,
+        writable=args.trusted,
     )
 
 
-def verify_job(
-    cfg: Config, workspace: Path, pins: Pins, crops_dir: Path, binding_path: str, existing: Path | None
-) -> JobSpec:
+def verify_job(cfg: Config, args: JobArgs, crops_dir: Path, existing: Path | None) -> JobSpec:
     """`harness verify` then `harness preview` on a crop job's output, mounted read-only. Loads no snippet
     code: no network, no dataset cache."""
     crops = quote(str(crops_dir))
     body = (
-        f"harness verify {crops} --binding {quote(binding_path)}"
+        f"harness verify {crops} --binding {BINDING_FILE}"
         + (f" --existing {quote(str(existing))}" if existing else "")
         + f" --out verify.json; v=$?\nharness preview {crops} --out preview && (exit $v)"
     )  # overlays even if a crop fails
-    return _spec(cfg, "verify", workspace, pins, body, [], [crops_dir, _parent(existing)])
+    return _spec(cfg, "verify", Path(args.workspace), args.pins, body, [], [crops_dir, _parent(existing)])
