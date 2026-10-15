@@ -58,8 +58,8 @@ Edit `autodev.yaml`:
 - `github.repo`: the repo to watch.
 - `paths.work_root`: agent workspaces, which must be inside your broker's `allowed_roots`.
 - `paths.state_dir`: the worker's logs and state. Keep it apart from `work_root`. `work_root` is bound read-write
-  into the sandbox, so it must not be an ancestor of `state_dir`, and `<state_dir>-host` (the Temporal binary and
-  database) must stay outside every writable bind.
+  into the sandbox, so it must not be an ancestor of `state_dir`, and `<state_dir>-host` (the broker log) and
+  `temporal.state_dir` from `mia.yaml` (the Temporal binary and database) must stay outside every writable bind.
 
 ### 3. GitHub token
 
@@ -113,7 +113,8 @@ pixi run mia exec autodev check     # any app command, with this service's confi
 pixi run test                       # unit tests; no GitHub, LSF or Temporal server needed
 ```
 
-Logs: worker logs are in `<state_dir>/logs`. The Temporal and broker logs are in `<state_dir>-host/logs`.
+Logs: worker logs are in `<state_dir>/logs`, the broker log in `<state_dir>-host/logs`, and Temporal's in
+`temporal.state_dir/logs` from `mia.yaml` (`mia logs temporal`).
 
 ## Gotchas
 

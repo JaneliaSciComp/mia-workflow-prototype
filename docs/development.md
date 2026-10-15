@@ -27,12 +27,12 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 
 | path | |
 |---|---|
-| `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), the Temporal connection and logging (`cli.py`), and the up/down/ps/logs commands (`ops.py`) |
+| `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
 | `tests/` | one `test_<package>_<module>.py` per module; `autodev_helpers.py` and `mia_helpers.py` build configs and fake repos; `fixtures/` holds recorded workflow histories and sample catalog data |
 | `docs/` | setup guides, the mia-data workflow overview, this page |
 | `notes/` | design: `mia-crops-spec.md` (the mia-data spec), `autodev-runbook.md` (operations and known gaps), `agentic-dev-infrastructure.md` (why), `specs/` and `plans/` (dated, historical; they describe the code as it was when written) |
-| `scripts/` | the up-scripts that start a deployment under agentic-sandbox |
+| `mia_ops/` | `pixi run mia`: the services manifest (`mia.yaml`), the Temporal and app-service recipes under tmux and agentic-sandbox, and `mia exec` for app commands |
 
 Within each package the split is the same: `workflows.py` (deterministic Temporal code, no I/O), `activities.py`
 (everything that touches GitHub, the filesystem or the cluster), `models.py` (the dataclasses that cross between

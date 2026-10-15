@@ -30,8 +30,8 @@ Trust boundaries:
 2. `cp autodev.yaml.example autodev.yaml` and set `deployment: autodev-<you>` (keeps your labels, branches and
    workflows apart from the service and from colleagues), `paths.work_root` under your csub `allowed_roots`.
    Keep `work_root` and `paths.state_dir` apart: `work_root` must not be an ancestor of `state_dir`, because
-   `work_root` is bound read-write into the sandbox and `<state_dir>-host` (the Temporal binary and database the
-   host runs) must stay outside every writable bind.
+   `work_root` is bound read-write into the sandbox, and `<state_dir>-host` (the broker log) and `temporal.state_dir`
+   from `mia.yaml` (the Temporal binary and database) must stay outside every writable bind.
 3. `gh auth token > ~/.config/autodev/token && chmod 600 ~/.config/autodev/token` (or a fine-grained PAT with
    Contents, Pull requests and Issues read/write, and Checks and Commit statuses read), and set
    `github.token_file: ~/.config/autodev/token`. The sandboxed worker reads the token from this file (the sandbox
@@ -48,8 +48,14 @@ follow), `mia logs temporal`, `mia attach <service>`, `mia down [<service>...]`,
 `mia up [<service>...]`. Without a service name each command acts on everything, Temporal first on the way up and
 last on the way down.
 
-Files: host-only things (Temporal CLI binary, `temporal.db`, temporal/broker logs) live in `<state_dir>-host`,
-which the sandbox never binds; worker logs are in `<state_dir>/logs`.
+Files: the Temporal CLI binary, `temporal.db` and its log live in `temporal.state_dir` from `mia.yaml` (default
+`~/.local/state/temporal`); the broker log is in `<state_dir>-host/logs`, which the sandbox never binds; worker logs
+are in `<state_dir>/logs`.
+
+Upgrading a host from the old up-scripts: the dev server's database used to be `<autodev state_dir>-host/temporal.db`.
+To keep in-flight workflows, stop the old tmux sessions (`tmux kill-session -t <deployment>`) and copy that file into
+`temporal.state_dir` before the first `mia up`, or point `temporal.state_dir` at the old `-host` directory. A fresh
+database is fine on a dev host: the poll schedule is re-applied and open issues are picked up on the next poll.
 
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
