@@ -289,3 +289,43 @@ def test_up_refuses_api_key_env_and_missing_secret(tmp_path, fake):
     svc.cfg.github.token_file = None
     with pytest.raises(SystemExit, match="token_file"):
         services.service_up(svc, s, Temporal(s))
+
+
+# ---- final review fixes
+
+
+def test_status_never_downloads_the_cli(tmp_path, fake, monkeypatch):
+    monkeypatch.setattr(services.shutil, "which", lambda name: None)
+    assert Temporal(make_stack(tmp_path)).status() == "stopped"
+    assert not [c for c, kw in fake.calls if kw.get("shell")], "a status check must not run curl"
+    assert not (tmp_path / "temporal/bin/temporal").exists()
+
+
+def test_stack_rejects_services_sharing_a_state_dir(tmp_path, fake):
+    write_configs(tmp_path)
+    (tmp_path / "autodev2.yaml").write_text(
+        (tmp_path / "autodev.yaml").read_text().replace("deployment: autodev", "deployment: other")
+    )
+    with pytest.raises(SystemExit, match="share paths.state_dir"):
+        Stack(
+            Manifest(
+                services={
+                    "autodev": {"app": "autodev", "config": tmp_path / "autodev.yaml"},
+                    "other": {"app": "autodev", "config": tmp_path / "autodev2.yaml"},
+                }
+            )
+        )
+
+
+def test_stack_rejects_services_sharing_a_deployment(tmp_path, fake):
+    write_configs(tmp_path)
+    (tmp_path / "autodev2.yaml").write_text((tmp_path / "autodev.yaml").read_text().replace("ad-state", "ad2-state"))
+    with pytest.raises(SystemExit, match="share deployment"):
+        Stack(
+            Manifest(
+                services={
+                    "autodev": {"app": "autodev", "config": tmp_path / "autodev.yaml"},
+                    "other": {"app": "autodev", "config": tmp_path / "autodev2.yaml"},
+                }
+            )
+        )

@@ -143,6 +143,14 @@ class Stack:
         if len(addresses) != 1:
             sys.exit(f"mia: services disagree on temporal.address: {sorted(addresses)}")
         self.temporal_address: str = addresses.pop()
+        # Two workers binding one state dir read-write, or two deployments with one label prefix, would corrupt
+        # each other: the usual slip is copying a config and forgetting to change these.
+        seen: dict[tuple[str, object], str] = {}
+        for name, svc in self.services.items():
+            for key, value in (("paths.state_dir", svc.state), ("deployment", svc.cfg.deployment)):
+                if (key, value) in seen:
+                    sys.exit(f"mia: services {seen[key, value]!r} and {name!r} share {key} {value}")
+                seen[key, value] = name
 
     def service(self, name: str) -> Service:
         if name not in self.services:
@@ -175,28 +183,38 @@ class Temporal:
     def host(self) -> str:
         return self.address.rsplit(":", 1)[0] if ":" in self.address else self.address
 
-    def cli(self) -> Path:
+    def cli_if_present(self) -> Path | None:
+        """The `temporal` CLI on PATH or already downloaded; None if a managed server would have to download it."""
         if found := shutil.which("temporal"):
             return Path(found)
         if not self.managed:
             sys.exit("mia: the `temporal` CLI must be on PATH when temporal.managed is false")
         target = self.state / "bin/temporal"
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            print(f"downloading the temporal CLI to {target}")
-            cmd = f"curl -sSL {shlex.quote(TEMPORAL_CLI_URL)} | tar xz -C {shlex.quote(str(target.parent))} temporal"
-            subprocess.run(cmd, shell=True, check=True)
+        return target if target.exists() else None
+
+    def cli(self) -> Path:
+        if present := self.cli_if_present():
+            return present
+        target = self.state / "bin/temporal"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        print(f"downloading the temporal CLI to {target}")
+        cmd = f"curl -sSL {shlex.quote(TEMPORAL_CLI_URL)} | tar xz -C {shlex.quote(str(target.parent))} temporal"
+        subprocess.run(cmd, shell=True, check=True)
         return target
 
-    def _run(self, *args: str) -> int:
-        return subprocess.run([str(self.cli()), *args, "--address", self.address], capture_output=True).returncode
+    def _run(self, *args: str, download: bool = True) -> int:
+        cli = self.cli() if download else self.cli_if_present()
+        if cli is None:  # no CLI and not allowed to fetch one: treat the server as unreachable
+            return 1
+        return subprocess.run([str(cli), *args, "--address", self.address], capture_output=True).returncode
 
-    def healthy(self) -> bool:
-        return self._run("operator", "cluster", "health") == 0
+    def healthy(self, download: bool = True) -> bool:
+        return self._run("operator", "cluster", "health", download=download) == 0
 
     def status(self) -> str:
+        """Read-only: never downloads the CLI or writes anything."""
         if self.managed:
-            return "running" if is_running(self.SESSION) else "external" if self.healthy() else "stopped"
+            return "running" if is_running(self.SESSION) else "external" if self.healthy(download=False) else "stopped"
         return "external (healthy)" if self.healthy() else "external (unreachable)"
 
     def up(self) -> None:
