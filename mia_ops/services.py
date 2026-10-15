@@ -21,6 +21,7 @@ from .manifest import Manifest
 
 PY = PROJECT_DIR / ".pixi/envs/default/bin/python"
 BROKER = PROJECT_DIR / ".pixi/envs/default/bin/csub-broker"
+SCRATCH = Path("/scratch")  # node-local; the csub broker's unix socket lives under it
 TEMPORAL_CLI_URL = "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64"
 
 
@@ -116,8 +117,8 @@ class Service:
         return self.state.with_name(self.state.name + "-host")
 
     @property
-    def run(self) -> Path:  # node-local: the csub broker's unix socket
-        return Path(f"/scratch/{os.environ.get('USER') or getpass.getuser()}/{self.name}")
+    def run(self) -> Path:  # the csub broker's unix socket dir
+        return SCRATCH / (os.environ.get("USER") or getpass.getuser()) / self.name
 
     @property
     def secret(self) -> Path | None:
@@ -231,3 +232,59 @@ class Temporal:
             if self._run("workflow", "list", "-n", ns, "--limit", "1") == 0:
                 return
             time.sleep(1)
+
+
+# ---- app services
+
+
+def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
+    """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule.
+    Temporal is started (managed) or verified (external) first. Re-running on a live session only
+    re-applies the schedule, so a run that failed partway is repaired by running it again."""
+    cfg = svc.cfg
+    if cfg.agent.api_key_env:
+        sys.exit(f"{svc.name}: agent.api_key_env is not supported by `mia up` yet; give the account a Claude login")
+    if not svc.secret:  # the sandbox masks .env and tmux passes no env, so the GitHub secret must be a file
+        sys.exit(f"{svc.name}: set github.token_file (auth: token) or github.private_key_path (auth: app)")
+    sandbox = stack.manifest.sandbox_dir / "sandbox-run.sh"
+    prerequisites = (
+        (PY, "run `pixi install`"),
+        (BROKER, "run `pixi install`"),
+        (sandbox, "set sandbox_dir in mia.yaml"),
+    )
+    for path, hint in prerequisites:
+        if not os.access(path, os.X_OK):
+            sys.exit(f"{svc.name}: {path} not found ({hint})")
+    extra = svc.app.extra_mounts(cfg)
+    rw_extra = (p for flag, p in extra if flag == "--rw")
+    for d in (svc.state / "logs", svc.host / "logs", cfg.paths.work_root, svc.run, *rw_extra):
+        d.mkdir(parents=True, exist_ok=True)
+
+    temporal.up()
+    temporal.ensure_namespace(cfg.temporal.namespace)
+
+    schedule = [str(PY), "-m", svc.app.module, "schedule", "apply"]
+    env = {**os.environ, svc.app.config_env: str(svc.config_path)}
+    if is_running(svc.name):
+        subprocess.run(schedule, env=env, check=True)
+        print(f"{svc.name}: already running (tmux attach -t {svc.name})")
+        return 0
+
+    sock = svc.run / "csub.sock"
+    broker_log = svc.host / "logs/broker.log"
+    new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
+    # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
+    # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
+    mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]
+    for flag, path in extra:
+        mounts += [flag, path]
+    mounts += ["--rw", cfg.paths.work_root, "--rw", svc.run]
+    worker = shell(
+        sandbox, *mounts, "--allow", "github.com", "--allow", "api.github.com", "--allow", temporal.host, "--",
+        "env", f"{svc.app.config_env}={svc.config_path}", "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
+        f"{svc.app.proxy_env}=1", PY, "-m", svc.app.module, "worker",
+    )  # fmt: skip
+    new_window(svc.name, "worker", f"cd {shell(svc.state)} && {worker}; read -p 'worker exited; press enter'")
+    subprocess.run(schedule, env=env, check=True)
+    print(f"{svc.name}: started (attach: mia attach {svc.name}; logs: mia logs {svc.name} -f)")
+    return 0
