@@ -78,7 +78,7 @@ round summary count, so a short prefix approved earlier cannot approve a later h
    `private_key_path`. Step by step: [`docs/github-app.md`](../docs/github-app.md).
 5. **Branch protection / ruleset on `main`**: 1 approving review required, stale approvals dismissed on push,
    the App not in the bypass list. This is the real gate; autodev's own approval check is a pre-check.
-   Add `.github/CODEOWNERS` (inside `.github/`, so agents cannot edit it) covering `autodev/`, `scripts/` and
+   Add `.github/CODEOWNERS` (inside `.github/`, so agents cannot edit it) covering `autodev/`, `mia_ops/` and
    `.github/`, so changes to the gates need a named human.
 6. As the service account: `pixi run mia exec autodev init-labels`, `pixi run mia up`, then
    `pixi run mia exec autodev check`.

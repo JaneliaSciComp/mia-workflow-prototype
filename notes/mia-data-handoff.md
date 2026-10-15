@@ -69,7 +69,8 @@ on your behalf are listed at the end: read them, they are the decisions you did 
    `snippets` autodev deployment (write it from the plan's Task 22 list when you get there).
 
 ## Known gaps that can wait (from the reviews)
-- Runtime of the two up-scripts (tmux, sandbox mounts, server reuse) is unverified on a real host.
+- `pixi run mia up|ps|restart|down` (tmux, sandbox mounts, shared Temporal) was smoke-tested on a dev host on
+  2026-10-15, including the Temporal database migration; production with an external Temporal is untested.
 - The match agent's `--allowedTools` string in `claude -p` mode and the Claude Code login inside the csub job
   were not exercised.
 - `check_pr.py` static check is lint, not a sandbox: aliasing, `getattr`, `__builtins__` bypass it.

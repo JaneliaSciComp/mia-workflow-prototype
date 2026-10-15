@@ -44,7 +44,7 @@ Reuse from `main` (the Temporal branch of zarr-doctor):
 - labels and Projects v2 stage logic,
 - the `py-cluster-api` wrapper with idempotent submit and restart-safe `await_job`, which needs to move onto csub,
 - the poll workflow and schedule,
-- `scripts/replay_history.py` and the replay tests.
+- the replay test (`test_replay_recorded_history`, which replays a recorded run against current workflow code).
 
 ### The self-development risk, and how to contain it
 

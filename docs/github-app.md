@@ -120,7 +120,7 @@ Now that the bot is a separate account, protect `main`. Under **Settings → Rul
 autodev only merges after an approval from someone with write access, and GitHub enforces the same rule. Reviewers
 now click **Approve**. `/approve <sha>` comments still work, but they don't satisfy branch protection.
 
-Add `.github/CODEOWNERS` covering `autodev/`, `scripts/` and `.github/` so changes to the gates need a named human
+Add `.github/CODEOWNERS` covering `autodev/`, `mia_ops/` and `.github/` so changes to the gates need a named human
 (see the runbook).
 
 ## Maintenance and troubleshooting
