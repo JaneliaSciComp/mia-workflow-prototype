@@ -82,18 +82,18 @@ github:
   private_key_path: ~/.config/autodev/app.pem # step 2
 ```
 
-`token_env` and `token_file` are ignored when `auth: app`. `scripts/autodev-up.sh` binds the key read-only into
+`token_env` and `token_file` are ignored when `auth: app`. `mia up` binds the key read-only into
 the worker's sandbox. The worker signs a short-lived JWT with the key and exchanges it for an installation token,
 which it renews about once an hour.
 
 ## 5. Check it
 
 ```bash
-pixi run autodev check
+pixi run mia exec autodev check
 ```
 
 The `github identity` row should show `<app-slug>[bot]` and the `github repo` row should be `ok`. If the labels
-don't exist yet for this repo, run `pixi run autodev init-labels`.
+don't exist yet for this repo, run `pixi run mia exec autodev init-labels`.
 
 ## 6. Switch over
 
@@ -103,7 +103,7 @@ already handled, and repost its comments. Switch when nothing is in flight:
 
 1. Finish or close every issue labelled `<deployment>:working` or `<deployment>:review`, e.g.
    `gh issue list -R JaneliaSciComp/mia-workflow-prototype -l autodev:review`.
-2. `pixi run ad restart`.
+2. `pixi run mia restart autodev` (or the service name the App runs under).
 
 At startup the worker looks up the bot user's ID and sets the commit author on every agent workspace to
 `<app-slug>[bot] <ID+<app-slug>[bot]@users.noreply.github.com>`, which is how GitHub links commits to the bot.
@@ -125,7 +125,7 @@ Add `.github/CODEOWNERS` covering `autodev/`, `scripts/` and `.github/` so chang
 
 ## Maintenance and troubleshooting
 
-- **Rotate the key**: generate a new one on the App's page, replace `app.pem`, `pixi run ad restart`, then delete
+- **Rotate the key**: generate a new one on the App's page, replace `app.pem`, `pixi run mia restart autodev`, then delete
   the old key on GitHub.
 - **Adding permissions later**: after you change the App's permissions, an org owner has to accept the new
   permissions on the installation page before they take effect.

@@ -36,15 +36,17 @@ Trust boundaries:
    Contents, Pull requests and Issues read/write, and Checks and Commit statuses read), and set
    `github.token_file: ~/.config/autodev/token`. The sandboxed worker reads the token from this file (the sandbox
    masks `.env`); host-side commands like `autodev check` also accept `.env` / `$GITHUB_TOKEN`.
-4. `pixi run autodev check`: the `temporal` row is `BAD` until step 5 has started the dev server; fix any other
+4. `pixi run mia exec autodev check`: the `temporal` row is `BAD` until step 5 has started the dev server; fix any other
    `BAD` row first.
-5. `pixi run autodev init-labels`, then `scripts/autodev-up.sh`. It starts, in tmux, a Temporal dev server and the
-   pixi env's `csub-broker` (reading your `~/.config/csub/broker.toml` policy) on the host, and the worker inside
-   the sandbox. Re-run `pixi run autodev check`: now every row `ok`.
-6. Open a small issue ("add a `--version` flag"), add `autodev-<you>:go`, watch `tmux attach -t autodev-<you>`.
+5. `pixi run mia exec autodev init-labels`, then `pixi run mia up`. It starts, in tmux, a Temporal dev server
+   (session `temporal`) and the pixi env's `csub-broker` (reading your `~/.config/csub/broker.toml` policy) on the
+   host, and the worker inside the sandbox. Re-run `pixi run mia exec autodev check`: now every row `ok`.
+6. Open a small issue ("add a `--version` flag"), add `autodev-<you>:go`, watch `pixi run mia attach <service>`.
 
-Manage the deployment (name and paths come from `autodev.yaml`): `pixi run ad ps` (status), `ad logs [worker|temporal|broker]`
-(`-n N`, `-f` to follow), `ad attach`, `ad down`, `ad restart`, `ad up` (runs `scripts/autodev-up.sh`).
+Manage the services listed in `mia.yaml`: `pixi run mia ps`, `mia logs <service> [worker|broker]` (`-n N`, `-f` to
+follow), `mia logs temporal`, `mia attach <service>`, `mia down [<service>...]`, `mia restart [<service>...]`,
+`mia up [<service>...]`. Without a service name each command acts on everything, Temporal first on the way up and
+last on the way down.
 
 Files: host-only things (Temporal CLI binary, `temporal.db`, temporal/broker logs) live in `<state_dir>-host`,
 which the sandbox never binds; worker logs are in `<state_dir>/logs`.
@@ -63,7 +65,7 @@ round summary count, so a short prefix approved earlier cannot approve a later h
    `local`; a made-up name fails every submit with `No such queue`). Config rejects GitHub
    hosts in `agent.allow_hosts`, and `agent.extra_mounts` must be absolute and end in `:ro`.
 3. **Claude** for the service account: `claude auth login` as that account (a team seat).
-   `agent.api_key_env` is refused by `autodev-up.sh` for now.
+   `agent.api_key_env` is refused by `mia up` for now.
 4. **GitHub App** owned by the org, installed on the repo, permissions: Contents RW, Pull requests RW, Issues
    RW, Checks R, Commit statuses R, Metadata R. **Not** Workflows, **not** Administration. Private key at
    `~svc/.config/autodev/app.pem` (mode 600); `github.auth: app`, `app_id`, `installation_id`,
@@ -72,8 +74,8 @@ round summary count, so a short prefix approved earlier cannot approve a later h
    the App not in the bypass list. This is the real gate; autodev's own approval check is a pre-check.
    Add `.github/CODEOWNERS` (inside `.github/`, so agents cannot edit it) covering `autodev/`, `scripts/` and
    `.github/`, so changes to the gates need a named human.
-6. As the service account: `pixi run autodev init-labels`, `scripts/autodev-up.sh`, then `pixi run autodev check`
-   (the `temporal` row needs the dev server that `autodev-up.sh` starts).
+6. As the service account: `pixi run mia exec autodev init-labels`, `pixi run mia up`, then
+   `pixi run mia exec autodev check`.
 
 ## Known gaps (deliberate, for later)
 
@@ -97,7 +99,7 @@ Prerequisites P1-P4 ([plan](plans/2026-10-11-mia-crops-poc.md)): P1 repos `mia-w
 with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage_root` (all under `paths`) visible from compute
 nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes `"MIA_HARNESS_*"`;
 `allowed_roots` covers `harness.dir`, `work_root` and `storage_root`, none of them under `$HOME`, which csub never
-mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `md check`
+mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `mia exec mia-data check`
 names what is missing); P4 see the plan.
 
 1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
@@ -105,18 +107,20 @@ names what is missing); P4 see the plan.
    the issue comments link the round's workspace and the dataset's crops folder.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
    trees API, which answers 409 on an empty repo.
-2. `pixi run md check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness && pixi
-   install` was done in `harness.dir`). Run on the host, `md check` and `md test-pr` need the mia-data broker:
-   `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run md check`.
-3. `pixi run ad up` first (it owns the one shared Temporal dev server), then `pixi run md up` (runs
-   `scripts/mia-data-up.sh`): it ensures the `mia-data` namespace, starts its broker and sandboxed worker, and
-   applies the poll schedule. Re-running it while the tmux session exists only re-applies the schedule, so a run
-   that failed partway is repaired by running it again. It refuses to run when no Temporal is healthy. Uses
-   `temporal` from PATH (or `$TEMPORAL`); otherwise it downloads one into `<state_dir>-host/bin`. The shared
-   Temporal server lives in whichever tmux session started it, so `ad down` on that deployment stops it for
-   mia-data too. Manage it like autodev: `md ps`, `md logs [worker|broker]` (`-n N`, `-f`), `md attach`,
-   `md down`, `md restart` (needed after a config change; wait for running rounds to finish first).
-4. `pixi run md init-labels` creates the `data:*` labels; `pixi run md seed` seeds dataset issues from the catalog.
-5. `pixi run md test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
+2. `pixi run mia exec mia-data check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness
+   && pixi install` was done in `harness.dir`). Run on the host, `mia exec mia-data check` and
+   `mia exec mia-data test-pr` need the mia-data broker:
+   `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run mia exec mia-data check`.
+3. `pixi run mia up` starts Temporal (unless `mia.yaml` says `temporal.managed: false`, in which case it only
+   checks that the configured cluster answers), then each service: it ensures the service's namespace, starts
+   its broker and sandboxed worker, and applies the poll schedule. Re-running it while a session exists only
+   re-applies that service's schedule, so a run that failed partway is repaired by running it again. Uses
+   `temporal` from PATH; a managed server downloads one into `temporal.state_dir/bin` otherwise. Manage with
+   `mia ps`, `mia logs mia-data [worker|broker]` (`-n N`, `-f`), `mia attach mia-data`, `mia down mia-data`,
+   `mia restart mia-data` (needed after a config change; wait for running rounds to finish first). `mia down`
+   with no service stops everything, Temporal last; naming a service never touches Temporal.
+4. `pixi run mia exec mia-data init-labels` creates the `data:*` labels; `pixi run mia exec mia-data seed` seeds
+   dataset issues from the catalog.
+5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
 6. Labels on a dataset issue: `data:go` starts a run; `data:approve` approves the snippet PR / crops for publish.

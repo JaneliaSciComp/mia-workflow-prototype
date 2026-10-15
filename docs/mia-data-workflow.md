@@ -78,7 +78,7 @@ The pieces, and where they live:
 
 ### 1. Seed
 
-`pixi run md seed` reads the downloads state from mia-agentic-search and creates one issue per downloaded
+`pixi run mia exec mia-data seed` reads the downloads state from mia-agentic-search and creates one issue per downloaded
 dataset in mia-workflow-data, labelled `data:new` plus `modality:<family>`, `has-labels` and `maybe-small` as
 hints. A dataset whose licence is not in `crops.licences` is created as `data:ineligible` and
 `licence-excluded`. Re-running only adds what is new. Components: the `md` CLI and the GitHub client, no
@@ -158,11 +158,10 @@ Details: spec §9.
 ## Operating it
 
 ```
-pixi run md check       # repos, Temporal, csub policy, directories, harness pin
-pixi run ad up          # the shared Temporal dev server (autodev's)
-pixi run md up          # mia-data broker, sandboxed worker, poll schedule
-pixi run md ps | logs -f | attach | down | restart
-pixi run md seed --dry-run
+pixi run mia exec mia-data check    # repos, Temporal, csub policy, directories, harness pin
+pixi run mia up                     # Temporal, then every service in mia.yaml; or: mia up mia-data
+pixi run mia ps | logs mia-data -f | attach mia-data | down mia-data | restart mia-data
+pixi run mia exec mia-data seed --dry-run
 ```
 
 Config is `mia_data.yaml` (see `mia_data.yaml.example`). `paths.work_root` and `paths.storage_root` take a

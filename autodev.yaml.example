@@ -6,7 +6,7 @@ github:
   base_branch: main
   auth: token                # token: $GITHUB_TOKEN (run as yourself) | app: GitHub App (service account)
   token_env: GITHUB_TOKEN
-  token_file: null           # auth: token, when $GITHUB_TOKEN is unset; scripts/autodev-up.sh needs it
+  token_file: null           # auth: token, when $GITHUB_TOKEN is unset; `mia up` needs it
                              # (the sandbox masks .env): gh auth token > ~/.config/autodev/token; chmod 600 it
   app_id: null               # auth: app
   installation_id: null      # auth: app

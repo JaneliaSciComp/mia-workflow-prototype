@@ -13,14 +13,14 @@ on your behalf are listed at the end: read them, they are the decisions you did 
 - `autodev/jobs.py`: generic csub job runner split out of `agent.py` (submit-once by key, cwd reattach,
   `rw_mounts`). `autodev/github.py`: statuses, tree SHAs, raw files, issues/comments by marker, zarr-doctor's
   `ensure_branch`/`upsert_file` restored. `autodev/config.py`: `github.trusted_bots`, `github.required_checks`,
-  `agent.max_budget_usd`. `scripts/autodev-up.sh` reuses a running Temporal server and ensures its namespace.
+  `agent.max_budget_usd`. `mia up` reuses a running Temporal server and ensures each service's namespace.
 - `mia_data/`: config, models, catalog reader, seed, binding/host checks, status comments, galleries branch,
   idempotent publication, job specs + snippet snapshots + match prompt, activities, `MiaDataDataset` and
   `MiaDataPoll` (match → test → review → approve → crop → publish, and the develop path through autodev PRs),
   `crop_test.py` (shared judging), CLI.
-- CLI (`pixi run md …`): `check`, `init-labels`, `seed [--dry-run]`, `worker`, `schedule apply`,
+- CLI (`pixi run mia exec mia-data …`): `check`, `init-labels`, `seed [--dry-run]`, `worker`, `schedule apply`,
   `test-pr <pr> --binding <file> --record <id>`, `crops-by-snippet <name>`, `reindex [dataset]`.
-- `scripts/mia-data-up.sh`, `mia_data.yaml.example`, and a "mia-data" section in `notes/autodev-runbook.md`.
+- `mia_ops/` (`pixi run mia`, which replaced the up-scripts), `mia_data.yaml.example`, and a "mia-data" section in `notes/autodev-runbook.md`.
 
 **`<harness.dir>` (your mia-snippets checkout)** (`cd harness && pixi run test`: 122; `pixi run ci-test`: 14)
 - `SPEC.md`, `harness/` (`smoke`, `crop`, `verify`, `preview`; `io` with range reads, dataset cache, byte cap,
@@ -45,19 +45,20 @@ on your behalf are listed at the end: read them, they are the decisions you did 
 3. **Broker policy** (`~/.config/csub/broker.toml` of the service account): `allowed_roots` covering
    `harness.dir`, `work_root`, `storage_root`; `env_allow` with `MIA_HARNESS_*`; `[agents] claude = [...]`
    enabled; the data hosts and their redirect targets in `allowed_hosts`; CPU `[queues.<name>]` tables named after
-   real LSF queues (`bqueues`: `short`, `local`), never an invented name. `pixi run md check` prints exactly
+   real LSF queues (`bqueues`: `short`, `local`), never an invented name. `pixi run mia exec mia-data check` prints exactly
    what is missing. Run the redirect probe from the worker host (plan P3) and put the hops into
    `network.redirect_hosts`.
 4. **Config.** `cp mia_data.yaml.example mia_data.yaml`, fill it in, then run
-   `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run md check` until every row is `ok`
+   `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run mia exec mia-data check` until every row is `ok`
    (the broker must be running for the csub row: start it with step 5 first if needed).
-5. **Bring up.** `pixi run ad up` (Temporal dev server + autodev), then `pixi run md up` (broker, sandboxed
-   worker, schedule). If it exits with an error after the tmux windows are up, run it again: it then only
-   applies the poll schedule, and without that schedule labels are never read. Then `md ps`, `md logs -f`,
-   `md down`, `md restart` as for autodev. `pixi run md init-labels`; `pixi run md seed --dry-run`; `pixi run md seed`.
+5. **Bring up.** `pixi run mia up` (Temporal if `mia.yaml` manages it, then every service: broker, sandboxed
+   worker, poll schedule). If it exits with an error after the tmux windows are up, run it again: it then only
+   applies the poll schedule, and without that schedule labels are never read. Then `mia ps`, `mia logs mia-data -f`,
+   `mia down mia-data`, `mia restart mia-data`. `pixi run mia exec mia-data init-labels`;
+   `pixi run mia exec mia-data seed --dry-run`; `pixi run mia exec mia-data seed`.
 6. **First real check (optional).** Both snippets are already on `main`, so there is no snippet PR to test.
    To exercise `test-pr` anyway, open a throwaway PR that touches anything under `snippets/tiff-zip-member/`,
-   then `pixi run md test-pr <pr> --binding snippets/tiff-zip-member/examples/bbbc034-hipsc-nuclei-3d.yaml --record bbbc034-hipsc-nuclei-3d`.
+   then `pixi run mia exec mia-data test-pr <pr> --binding snippets/tiff-zip-member/examples/bbbc034-hipsc-nuclei-3d.yaml --record bbbc034-hipsc-nuclei-3d`.
    The PR comment should show four crops with nucleus overlays inline. This is also the first check that
    `?raw=true` images render in the private repo, as zarr-doctor's did. Otherwise skip to step 7, which runs the
    same crop test through the issue path.
@@ -115,4 +116,4 @@ on your behalf are listed at the end: read them, they are the decisions you did 
     commit is tested. Cost: one extra crop test when a human merges a different head than the last tested one.
 17. On the final review's Critical finding, jobs now invoke the harness environment's entry point directly
     instead of `pixi run` (which cannot take its install lock on a read-only mount). Cost: `pixi install` must
-    have been run in `harness.dir` before the first job; `md check` verifies it.
+    have been run in `harness.dir` before the first job; `mia exec mia-data check` verifies it.
