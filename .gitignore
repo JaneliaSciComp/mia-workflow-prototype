@@ -6,3 +6,4 @@ __pycache__/
 autodev*.yaml
 !autodev.yaml.example
 mia_data.yaml
+mia.yaml
