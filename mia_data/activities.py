@@ -711,16 +711,26 @@ class Activities:
 
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
-    async def open_snippet_issue(self, issue: int, round_id: str, draft: dict) -> int:
-        """Open the mia-snippets issue asking autodev for a new snippet, or find it again by its first-line
-        marker on a retry. Returns the issue number."""
+    async def open_snippet_issue(self, issue: int, round_id: str, draft: dict, snippet_issue: int | None = None) -> int:
+        """Open the mia-snippets issue asking autodev for a new snippet, or find it again: the one the workflow
+        remembers as `snippet_issue` from an earlier round, while it is still open, else by this round's
+        first-line marker on a retry. Returns the issue number."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
-        # ponytail: lists every issue; one call per round. Filter by author here: an outsider can copy the marker.
+
+        def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
+            return (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
+                prefix
+            )
+
+        if snippet_issue:  # any round's marker for this data issue will do: the round id is new on a re-trigger
+            remembered = await gh.get_issue(int(snippet_issue))
+            any_round = self.cfg.marker(f"issue={int(issue)} round=").removesuffix(" -->")
+            if remembered.get("state") != "closed" and ours(remembered, any_round):
+                return remembered["number"]
+        # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
-            if (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
-                marker
-            ):
+            if ours(existing, marker):
                 return existing["number"]
         record = self._record(round_id)
         urls = record_urls(record)

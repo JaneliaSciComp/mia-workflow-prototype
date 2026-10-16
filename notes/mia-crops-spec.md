@@ -142,7 +142,9 @@ any stage ──> data:needs-human (comment says why) · data:ineligible (no pla
   the round that is under review: its label event must be newer than the round's test result. Anywhere else
   it is removed with an "ignored" comment.
 - **Re-trigger.** A new `data:go` on a `done`, `needs-human` or `ineligible` issue starts a new round from
-  matching, with a new seed. Rounds never overlap:
+  matching, with a new seed. One exception: a `needs-human` round that was following a snippet PR (§7.3) which
+  is still open resumes that PR instead, under the new round id and pins, and re-tests its current head; its
+  snippets issue is remembered so no second one is opened. Rounds never overlap:
   - a `go` that arrives while a round is running is acknowledged with a "busy, ignored" comment and dropped
   - a new round starts only after every job from the previous one is terminal (§8.2)
 
@@ -583,7 +585,9 @@ evidence for any axis override or transform.
      snippet and its example binding, so no `data:approve` is needed.
    - **Different:** §7.4 runs again on the merge SHA, and only a pass admits `cropping`.
 6. If the PR is closed without merging, or the issue gets `snippets:needs-human`, the data issue moves to
-   `needs-human` with a link.
+   `needs-human` with a link. A `needs-human` for a reason of our own (a lost job, a failed status write) is
+   recovered with `data:go`: while the PR is open, the new round resumes it from step 3 (§4, re-trigger); once
+   it is closed or merged, the new round matches as usual, and a `needs_snippet` reuses the open snippets issue.
 
 ### 7.4 Test crops (plain jobs)
 

@@ -111,8 +111,11 @@ the draft binding and what failed. A second autodev deployment, `snippets`, turn
 `snippets/<name>/` and an example binding. The data issue sits in `data:developing` and wakes up whenever the
 PR changes. Every new PR head gets test crops (step 5) and a required `mia-data/crops` commit status on that
 exact commit. A human reviews and merges the PR; after the merge, a tree-hash comparison confirms the merged
-snippet is the one that was tested, or the merge commit is tested again. Components: autodev (its own
-namespace; the two workflows interact only through GitHub), mia-snippets CI, the GitHub client.
+snippet is the one that was tested, or the merge commit is tested again. If the round ends in `data:needs-human`
+while the PR is still open (a lost job, a failed status write), a new `data:go` resumes that PR: the current head
+is tested again under a new round, and no second snippets issue is opened. A PR closed or merged by then means a
+new match. Components: autodev (its own namespace; the two workflows interact only through GitHub), mia-snippets
+CI, the GitHub client.
 
 ### 5. Test crops and review
 
@@ -144,7 +147,8 @@ is `data:needs-human` with the reason.
 Every stage change posts a new comment, never an edit: the stage, what it produced, and the folders to look at.
 Labels show the current stage, exactly one `data:*` at a time, set only by the worker. Anything the system
 cannot handle ends in `data:needs-human` with a comment saying why and what to change; a `data:go` afterwards
-retries from the start with a new seed.
+retries from the start with a new seed, or, when the round was following a snippet PR that is still open, picks
+that PR up again.
 
 ## Trust boundaries in one paragraph
 
