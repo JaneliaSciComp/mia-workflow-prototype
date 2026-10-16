@@ -220,6 +220,22 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     )
 
 
+async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp_path):
+    t = _setup(tmp_path)
+    for event_id in ("99", "100", "101"):
+        await t.a.admit(1, event_id)
+    draft = {"draft_binding": BINDING, "what_fails": "no reader", "tried": []}
+    n = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert await t.a.open_snippet_issue(1, "i1-e100", draft, n) == n and len(t.snip.created) == 1  # a re-trigger
+    t.snip.issues[n]["state"] = "closed"  # autodev is done with it: the new round gets a new one
+    m = await t.a.open_snippet_issue(1, "i1-e100", draft, n)
+    assert m != n and t.snip.created[1][1].startswith("<!-- mia-data: issue=1 round=i1-e100 -->")
+    other = (await t.snip.create_issue("other", "<!-- mia-data: issue=2 round=i2-e5 -->", []))["number"]
+    assert await t.a.open_snippet_issue(1, "i1-e101", draft, other) not in (n, m, other)  # another dataset's
+    t.snip.issues[m]["user"]["login"] = "mallory"
+    assert await t.a.open_snippet_issue(1, "i1-e101", draft, m) not in (n, m, other)  # not ours
+
+
 def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/examples/rec-1.yaml")):
     d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "new-snip"  # the PR head's snapshot
     d.mkdir()

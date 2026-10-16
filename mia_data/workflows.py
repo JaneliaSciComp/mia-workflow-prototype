@@ -301,13 +301,21 @@ class MiaDataDataset:
     # --- the round -------------------------------------------------------------------------
 
     async def _round(self, event: LabelEvent) -> None:
-        """One round from a `go`: admit, match, smoke, test crops, then wait for review."""
+        """One round from a `go`: admit, match, smoke, test crops, then wait for review.
+
+        After a develop round ended in needs-human, the `go` resumes its snippet PR instead when that PR is still
+        open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
         state = self.state
+        snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
+        if state.stage == "needs-human" and state.snippet_issue and workflow.patched("resume-snippet-pr"):
+            snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending = [], {}, []
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
         self.limits = await self._act("limits", result_type=RoundLimits)
+        if snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
+            return
         await self._stage("matching")
 
         # Match: the agent picks a snippet and writes a binding, then the worker smoke-tests that binding itself.
@@ -318,7 +326,7 @@ class MiaDataDataset:
             return await self._finish("needs-human", describe_failure("match", job))
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
         if match.outcome == "needs_snippet":
-            return await self._develop(match)
+            return await self._develop(match, snippet_issue)
         if match.outcome not in ("matched", "ineligible"):
             return await self._finish("needs-human", f"match blocked: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
@@ -434,11 +442,20 @@ class MiaDataDataset:
 
     # --- the development path ---------------------------------------------------------------
 
-    async def _develop(self, match: MatchResult) -> None:
-        """No snippet fits: open the mia-snippets issue (autodev writes the snippet), then follow its PR."""
+    async def _develop(self, match: MatchResult, snippet_issue: int | None = None) -> None:
+        """No snippet fits: open the mia-snippets issue (autodev writes the snippet), then follow its PR.
+
+        `snippet_issue` is the issue an earlier round opened for this dataset, when the workflow still knows it:
+        the activity reuses it while it is open rather than asking autodev for the same snippet twice."""
         state = self.state
         state.snippet_issue = await self._act(
-            "open_snippet_issue", state.issue, state.round_id, match.draft or {}, seconds=300, result_type=int
+            "open_snippet_issue",
+            state.issue,
+            state.round_id,
+            match.draft or {},
+            *([snippet_issue] if snippet_issue else []),  # the extra argument only when it carries something
+            seconds=300,
+            result_type=int,
         )
         await self._stage(
             "developing",
@@ -446,6 +463,25 @@ class MiaDataDataset:
             "each PR head gets test crops",
         )
         await self._follow_pr()
+
+    async def _resume_pr(self, snippet_issue: int, pr_number: int) -> bool:
+        """A `go` after a develop round ended in needs-human: pick its snippet PR up again if it is still open,
+        and test the current head afresh under the new round and pins (spec §7.4, "comment and re-trigger").
+
+        Returns False when the PR was merged or closed meanwhile, or is not this snippets issue's: the round
+        then matches as usual (a merged snippet is on main now)."""
+        state = self.state
+        pr = await self._act("pr_state", pr_number, result_type=PrUpdate)
+        if pr.state != "open" or pr.snippet_issue != snippet_issue:
+            return False
+        state.snippet_issue, state.pr = snippet_issue, pr_number
+        await self._stage(
+            "testing",
+            f"resuming snippet PR {pr.url or f'#{pr.pr}'} from the previous round; its current head gets test crops again",
+        )
+        if not await self._on_pr(pr_number, pr):
+            await self._follow_pr()
+        return True
 
     async def _follow_pr(self) -> None:
         """Wake on pr_update until the round ends, refusing labels meanwhile (busy). Rolls over only here, idle."""
@@ -462,12 +498,13 @@ class MiaDataDataset:
                 if await self._on_pr(state.pending.pop(0).pr):
                     return
 
-    async def _on_pr(self, pr_number: int) -> bool:
+    async def _on_pr(self, pr_number: int, pr: PrUpdate | None = None) -> bool:
         """Act on the PR as it is now (never on the signal's copy) until nothing is left to do.
 
-        Returns True when the round ended (merged, closed, needs-human), False when waiting for a new head."""
+        `pr` is the PR as the caller just read it; otherwise it is read here. Returns True when the round ended
+        (merged, closed, needs-human), False when waiting for a new head."""
         state = self.state
-        pr = await self._act("pr_state", pr_number, result_type=PrUpdate)
+        pr = pr or await self._act("pr_state", pr_number, result_type=PrUpdate)
         while pr.snippet_issue == state.snippet_issue:  # else another round's PR
             state.pr = pr.pr
             where = f"snippet PR {pr.url or f'#{pr.pr}'}"

@@ -170,8 +170,8 @@ class Mocks:
             return {"published": [c["crop_id"] for c in verified], "already": [], "total": len(verified)}
 
         @activity.defn(name="open_snippet_issue")
-        async def open_snippet_issue(issue: int, round_id: str, draft: dict) -> int:
-            rec("open_snippet_issue", round_id)
+        async def open_snippet_issue(issue: int, round_id: str, draft: dict, snippet_issue: int | None = None) -> int:
+            rec("open_snippet_issue", round_id, snippet_issue)
             return 100
 
         @activity.defn(name="pr_state")
@@ -636,6 +636,53 @@ async def test_merge_signal_before_test_finishes(env):
         (MC, True),
     ]  # h1's test carried the merge
     assert m.names().index("tree_sha") > m.names().index("read_verify")
+
+
+async def to_needs_human_in_develop(h, m):
+    """needs_snippet → snippets issue → h1's crop job is lost (an infrastructure failure) → needs-human."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await idle(h, m, "needs-human")
+
+
+async def test_go_after_needs_human_resumes_the_snippet_pr(env):
+    """A develop round that failed for an infrastructure reason: `go` re-tests the same PR under a new round and
+    pins, and opens no second snippets issue (spec §7.4, comment and re-trigger)."""
+    m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)}, trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await to_needs_human_in_develop(h, m)
+        m.states = {}  # the infrastructure is fixed
+        await h.signal(MiaDataDataset.go, ev("go", "12"))
+        await idle(h, m, "pr-ready")
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "pr-ready", "cropping", "done"]
+    assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify", "crop", "verify"]  # no second match
+    keys = [a[0] for a in m.of("submit")]
+    assert len(keys) == len(set(keys)) and keys[2].startswith("mia-7-i7-e12-crop-")  # the retest is the new round's
+    assert statuses(m) == [(H1, "pending"), (H1, "error"), (H1, "pending"), (H1, "success")]
+    resumed = m.of("set_stage")[4]
+    assert resumed[0] == "testing" and "resuming" in resumed[1] and PR_URL in resumed[1]
+    assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, 5) and not m.of("refuse_label")
+    assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}"]
+
+
+@pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])
+async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
+    """The PR is gone by the time `go` arrives: a new match, which hands the snippets issue back for reuse."""
+    m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m) as h:
+        await to_needs_human_in_develop(h, m)
+        m.pr_now = now
+        await h.signal(MiaDataDataset.go, ev("go", "12"))
+        await idle(h, m, "developing")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "needs-human", "matching", "developing"]
+    assert m.of("pr_state") == [(5,), (5,)] and [a[1] for a in m.of("submit")] == ["match", "crop", "match"]
+    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", 100)]
+    assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, None) and not m.of("refuse_label")
 
 
 # --- the poll activity -------------------------------------------------------------------------
