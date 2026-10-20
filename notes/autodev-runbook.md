@@ -63,6 +63,9 @@ round summary count, so a short prefix approved earlier cannot approve a later h
 
 ## Run it as the group service
 
+This is the per-account checklist. Where the pieces run in production (Temporal in Kubernetes, workers under
+systemd on a cluster-attached host) is [`docs/deployment.md`](../docs/deployment.md).
+
 1. **Service account** on the cluster with rootless podman / bwrap set up (agentic-sandbox README), a csub
    broker installed for it (csub `deploy/INSTALL.md`), and an LSF billing group in its broker policy.
 2. **Broker policy** (`~svc/.config/csub/broker.toml`): `[agents] claude = ["api.anthropic.com", "claude.ai", "platform.claude.com"]`;
