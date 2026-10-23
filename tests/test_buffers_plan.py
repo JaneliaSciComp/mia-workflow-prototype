@@ -141,3 +141,35 @@ def test_record_without_technical_is_a_row_not_a_crash(spec_2d):
     assert (
         row.rule == "admitted" and row.fit == Fit(False, "no array shape", (1024, 1024), False) and row.positions == 0
     )
+
+
+def _record(**overrides) -> dict:
+    base = yaml.safe_load((CATALOG / "datasets/2D/TEM/synthetic-em-2d-1ch.yaml").read_text())
+    base.update(overrides)
+    return base
+
+
+def test_markdown_escapes_record_text(spec_2d_mixed):
+    evil = _record(id="evil | pool | admitted", doi=None, license={"spdx": "x\ny|z", "url": None})
+    text = build_plan(spec_2d_mixed, "h", None, [*records(), ("datasets/2D/TEM/zz-evil.yaml", evil)]).render_markdown()
+    assert "| evil \\| pool \\| admitted | out | license x y\\|z not in allowed |" in text
+    assert "\n| pool |" not in text
+
+
+def test_malformed_record_is_a_row_not_a_crash(spec_2d_mixed):
+    bad = _record(id="bad-arrays", doi=None, technical={"arrays": ["nope"]})
+    unreadable = {"id": "bad-yaml", "_unreadable": "ParserError: while parsing"}
+    plan = build_plan(
+        spec_2d_mixed,
+        "h",
+        None,
+        [*records(), ("datasets/2D/TEM/zz-bad.yaml", bad), ("datasets/2D/TEM/zz-yaml.yaml", unreadable)],
+    )
+    assert plan.rows_by_id["bad-arrays"].rule.startswith("record unreadable: AttributeError")
+    assert plan.rows_by_id["bad-yaml"].rule == "record unreadable: ParserError: while parsing"
+    assert plan.valid is False or plan.valid is True  # the plan was built either way
+    assert len(plan.rows) == len(records()) + 2
+
+
+def test_positions_counts_depth_for_3d(spec):
+    assert positions(F[HEMIBRAIN], spec) == 1 * (41394 // 32) * (39725 // 1024) * (34427 // 1024)

@@ -79,3 +79,12 @@ def test_plan_errors_exit_2(tmp_path, capsys):
     path = write_spec(tmp_path, **{"select.where.annotations.source": "any"})
     assert main(["plan", str(path), "--catalog-dir", str(CATALOG), "--allow-ref-mismatch"]) == 2
     assert "## Errors" in capsys.readouterr().out
+
+
+def test_unreadable_yaml_becomes_a_record(tmp_path):
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "datasets" / "broken.yaml").write_text("id: [unclosed\n")
+    (tmp_path / "datasets" / "scalar.yaml").write_text("42\n")
+    loaded = dict(load_records(tmp_path))
+    assert loaded["datasets/broken.yaml"]["id"] == "broken" and "_unreadable" in loaded["datasets/broken.yaml"]
+    assert loaded["datasets/scalar.yaml"]["_unreadable"].startswith("not a mapping")

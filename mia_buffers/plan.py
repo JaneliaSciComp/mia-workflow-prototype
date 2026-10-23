@@ -14,6 +14,14 @@ from .spec import Spec
 from .specmap import Facts, facts
 
 MANUAL_DROP_NOTE = "download_method other: needs a manual drop (spec v0.4 §3)"
+UNREADABLE = "_unreadable"  # set by cli.load_records on a file that is not a YAML mapping
+
+
+def _cell(text: object) -> str:
+    """Record and spec text is untrusted: no cell may add a column or a row to the table."""
+    return str(text).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 CONTENT_HASH_WARNING = "dedup.by content_hash is not available; doi used"
 
 
@@ -76,9 +84,9 @@ class Plan:
             "",
         ]
         if self.errors:
-            lines += ["## Errors", "", *(f"- {error}" for error in self.errors), ""]
+            lines += ["## Errors", "", *(f"- {_cell(error)}" for error in self.errors), ""]
         if self.warnings:
-            lines += ["## Warnings", "", *(f"- {warning}" for warning in self.warnings), ""]
+            lines += ["## Warnings", "", *(f"- {_cell(warning)}" for warning in self.warnings), ""]
         pool = [row for row in self.rows if row.in_pool]
         lines += [f"## Records ({len(pool)} in the pool, {len(self.rows)} seen)", ""]
         lines += [
@@ -91,10 +99,15 @@ class Plan:
                 rule += "; " + "; ".join(row.notes)
             splits = " / ".join(f"{name} {count}" for name, count in row.splits.items()) if row.in_pool else ""
             weight = f"{row.weight:.3f}" if row.in_pool else ""
-            lines.append(
-                f"| {row.id} | {'pool' if row.in_pool else 'out'} | {rule} | {row.dims or ''} | {row.modality_group or ''} "
-                f"| {row.channels if row.channels is not None else ''} | {row.positions or ''} | {weight} | {splits} |"
-            )
+            cells: list[object] = [
+                row.id,
+                "pool" if row.in_pool else "out",
+                rule,
+                row.dims or "",
+                row.modality_group or "",
+            ]
+            cells += [row.channels if row.channels is not None else "", row.positions or "", weight, splits]
+            lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
         return "\n".join(lines) + "\n"
 
 
@@ -138,8 +151,16 @@ def positions(f: Facts, spec: Spec) -> int:
     scale = max(spec.sampling.levels)
     total = 0
     for array in f.raw_arrays:
-        if array.extent_y and array.extent_x:
-            total += f.n_items * (array.extent_y // (patch["y"] * scale)) * (array.extent_x // (patch["x"] * scale))
+        if not (array.extent_y and array.extent_x):
+            continue
+        tiles = (array.extent_y // (patch["y"] * scale)) * (array.extent_x // (patch["x"] * scale))
+        if "z" in patch:
+            depth = (array.extent_z or 0) // patch["z"]  # 3D: how many patch-deep slabs the volume holds
+        else:
+            # ponytail: a 2D record counts items or planes, whichever the enricher filled in (U937: 25 fields as
+            # n_items and as t), never both; a record with both > 1 undercounts until the stage job reports planes.
+            depth = max(f.n_items, array.planes) // f.n_items if array.planes > 1 else 1
+        total += f.n_items * depth * tiles
     return total
 
 
@@ -204,10 +225,24 @@ def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
     return errors
 
 
+def _unreadable_row(path: str, record: dict, error: str) -> Row:
+    raw_id = record.get("id")
+    record_id = raw_id if isinstance(raw_id, str) else path.rsplit("/", 1)[-1].removesuffix(".yaml")
+    return Row(record_id, path, None, None, None, None, None, 0, False, f"record unreadable: {error}")
+
+
 def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: list[tuple[str, dict]]) -> Plan:
-    all_facts = sorted((facts(path, record) for path, record in records), key=lambda f: f.path)
-    decisions: list[Decision] = decide_all(all_facts, spec.select)
+    all_facts: list[Facts] = []
     rows: list[Row] = []
+    for path, record in sorted(records, key=lambda item: item[0]):
+        if UNREADABLE in record:
+            rows.append(_unreadable_row(path, record, str(record[UNREADABLE])))
+            continue
+        try:
+            all_facts.append(facts(path, record))
+        except Exception as error:  # one malformed record is a row with a reason, never a failed plan
+            rows.append(_unreadable_row(path, record, f"{type(error).__name__}: {error}"))
+    decisions: list[Decision] = decide_all(all_facts, spec.select)
     for f, decision in zip(all_facts, decisions, strict=True):
         largest = f.largest_raw
         row = Row(
@@ -229,14 +264,15 @@ def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: lis
             if f.download_method == "other":
                 row.notes.append(MANUAL_DROP_NOTE)
         rows.append(row)
+    rows.sort(key=lambda row: row.path)
     pool = [row for row in rows if row.in_pool]
     errors = _policy_errors(pool, spec)
     if pool:
         weighting = spec.sampling.weighting
         temperature = {"uniform_over": 0.0, "proportional": 1.0}.get(weighting.scheme, weighting.temperature)
+        pool_by_id = {row.id: row for row in pool}
         for row_id, weight in weights(pool, weighting.over, temperature).items():
-            rows_by_id = {row.id: row for row in pool}
-            rows_by_id[row_id].weight = weight
+            pool_by_id[row_id].weight = weight
         for row in pool:
             if row.id in spec.splits.holdout_ids:
                 row.splits = {name: (row.n_items if name == "test" else 0) for name in spec.splits.fractions}

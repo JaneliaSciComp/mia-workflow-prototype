@@ -36,6 +36,8 @@ def _merge(base: dict, edit: dict) -> dict:
         ({"splits": {"fractions": {"train": 0.8, "val": 0.1, "test": 0.3}}}, "fractions"),
         ({"catalog": {"ref": "main"}}, "ref"),
         ({"select": {"where": {"sample_type": {"in": ["tissue"]}}}}, "sample_type"),
+        ({"sampling": {"patch": {"2D": {"y": 256, "xx": 256}}}}, "xx"),
+        ({"sampling": {"patch": {"2D": {"y": 0, "x": 256}}}}, "y"),
     ],
 )
 def test_refused(tmp_path, edit, needle):

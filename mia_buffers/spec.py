@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, field_validator, model_validator
 
 
 class SpecError(ValueError):
@@ -98,13 +98,22 @@ class Select(_Strict):
     dedup: Dedup = Dedup()
 
 
+class PatchSize(_Strict):
+    """Patch edge per axis in pixels; z and t only for the dimensionalities that have them."""
+
+    y: PositiveInt
+    x: PositiveInt
+    z: PositiveInt | None = None
+    t: PositiveInt | None = None
+
+
 class Patch(_Strict):
     """Patch sizes per dimensionality; `c` is the channel policy (all, or one channel count per crop)."""
 
-    two_d: dict[str, int] = Field(alias="2D")
-    two_d_t: dict[str, int] | None = Field(default=None, alias="2D+t")
-    three_d: dict[str, int] | None = Field(default=None, alias="3D")
-    three_d_t: dict[str, int] | None = Field(default=None, alias="3D+t")
+    two_d: PatchSize = Field(alias="2D")
+    two_d_t: PatchSize | None = Field(default=None, alias="2D+t")
+    three_d: PatchSize | None = Field(default=None, alias="3D")
+    three_d_t: PatchSize | None = Field(default=None, alias="3D+t")
     c: Literal["all"] | int = "all"
 
     @field_validator("c")
@@ -206,13 +215,10 @@ class Spec(_Strict):
         return self
 
     def patch_for(self, dims: str) -> dict[str, int] | None:
-        """The patch block for a dimensionality, or None when the spec has none for it."""
-        return {
-            "2D": self.sampling.patch.two_d,
-            "2D+t": self.sampling.patch.two_d_t,
-            "3D": self.sampling.patch.three_d,
-            "3D+t": self.sampling.patch.three_d_t,
-        }.get(dims)
+        """The patch edges for a dimensionality as {axis: pixels}, or None when the spec has none for it."""
+        patch = self.sampling.patch
+        block = {"2D": patch.two_d, "2D+t": patch.two_d_t, "3D": patch.three_d, "3D+t": patch.three_d_t}.get(dims)
+        return None if block is None else block.model_dump(exclude_none=True)
 
 
 def load_spec(path: Path) -> Spec:

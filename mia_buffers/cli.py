@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from .plan import build_plan
+from .plan import UNREADABLE, build_plan
 from .spec import SpecError, load_spec, spec_hash
 
 
@@ -18,9 +18,14 @@ def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
     """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: safe_load only."""
     records = []
     for path in sorted((catalog_dir / "datasets").rglob("*.yaml")):
-        record = yaml.safe_load(path.read_text())
-        if isinstance(record, dict):
-            records.append((str(path.relative_to(catalog_dir)), record))
+        try:
+            record = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as error:
+            record = {UNREADABLE: f"{type(error).__name__}: {str(error).splitlines()[0]}"}
+        if not isinstance(record, dict):
+            record = {UNREADABLE: f"not a mapping: {type(record).__name__}"}
+        record.setdefault("id", path.stem)
+        records.append((str(path.relative_to(catalog_dir)), record))
     return records
 
 
