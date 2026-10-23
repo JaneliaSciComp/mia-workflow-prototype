@@ -1,0 +1,190 @@
+schema_version: '1.2'
+id: janelia-hemibrain-v1-2-fib-sem-connectome
+title: 'Hemibrain: FIB-SEM connectome of the adult Drosophila central brain (v1.2)'
+short_name: Drosophila hemibrain connectome (FIB-SEM)
+description: 8 nm isotropic FIB-SEM volume (26 teravoxels, 8-bit) of roughly half of the central brain of an adult
+  female Drosophila melanogaster, 13 consecutive 20 um hot-knife slabs imaged on two customised FIB-SEM systems,
+  with flood-filling-network segmentation, extensive proofreading (about 25,000 neurons), automatic T-bar and postsynaptic
+  density detections, mitochondria segmentation (v1.2) and brain-region masks. Released by HHMI Janelia FlyEM and
+  Google (v1.0 Jan 2020, v1.2 Dec 2020).
+landing_url: https://www.janelia.org/project-team/flyem/hemibrain
+doi: 10.25378/janelia.11676099.v2
+repository: LabWebsite
+accession: hemibrain:v1.2
+authors:
+- Louis K Scheffer
+- C Shan Xu
+- Michal Januszewski
+- Zhiyuan Lu
+- Shin-ya Takemura
+- Kenneth J Hayworth
+- Gary B Huang
+- Kazunori Shinomiya
+- Jeremy Maitlin-Shepard
+- Stuart Berg
+publications:
+- title: A connectome and analysis of the adult Drosophila central brain
+  doi: 10.7554/eLife.57443
+  url: https://doi.org/10.7554/eLife.57443
+date_published: '2020-12-23'
+imaging:
+  modality:
+  - FIB-SEM
+  dimensionality: 3D
+  voxel_size_nm:
+    x: 8.0
+    y: 8.0
+    z: 8.0
+  channels: 1
+  organism:
+  - Drosophila melanogaster
+  sample: Central brain (hemibrain, about 250 x 250 x 250 um) of an adult female fly, 20 um hot-knife slabs, stained
+    and resin embedded
+  labels_stains: []
+data:
+  formats:
+  - precomputed
+  size_bytes: 26000000000000
+  n_items: 1
+  access: open
+  download_url: null
+  download_method: other
+annotations:
+  present: true
+  types:
+  - instance-segmentation
+  - synapse
+  - organelle
+  coverage: dense
+  format: Neuroglancer precomputed volumes (neuron segmentation v1.2, mito-objects, ROIs, synapse annotations),
+    neuPrint database and DVID server, connection-matrix CSV exports
+  source: proofread
+ml:
+  tasks:
+  - segmentation
+  - detection
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: null
+license:
+  spdx: CC-BY-4.0
+  url: https://creativecommons.org/licenses/by/4.0/
+provenance:
+  discovered_by: harvest-websearch
+  discovered_at: '2026-10-16T11:55:00Z'
+  evidence_urls:
+  - https://www.janelia.org/project-team/flyem/hemibrain
+  - https://storage.googleapis.com/flyem-views/hemibrain/v1.2/base.json
+  - https://www.ebi.ac.uk/europepmc/webservices/rest/PMC7546738/fullTextXML
+  confidence: 0.75
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-16T12:15:00Z'
+notes: 'Read: the Janelia hemibrain page (CC BY 4.0; v1.0 to v1.2; neuPrint, DVID, connection-matrix CSVs), the
+  public Neuroglancer layer file (8 nm voxels; EM, segmentation v1.2, mito-objects, synapses, ROIs as precomputed
+  volumes) and the eLife paper (26 teravoxels of 8-bit data, 13 slabs, FFN segmentation, 122 dense synapse-annotated
+  cubes, data via neuprint.janelia.org, DOI 10.25378/janelia.11676099.v2). size_bytes is 26 teravoxels at 8 bits,
+  not a measured bucket size. The data are served through Neuroglancer precomputed volumes, neuPrint and DVID rather
+  than one archive, so no single download URL. The record covers the central-brain volume, separate from the MANC
+  and whole-CNS records.'
+technical:
+  method: header
+  size_source: paper
+  layout:
+    tree: 'Neuroglancer precomputed stores (public GCS), from flyem-views/hemibrain/v1.2/base.json:
+
+      gs://neuroglancer-janelia-flyem-hemibrain/emdata/clahe_yz/jpeg   EM, 9 scales
+
+      gs://neuroglancer-janelia-flyem-hemibrain/v1.2/segmentation   neurons v1.2 (+ meshes, properties)
+
+      gs://neuroglancer-janelia-flyem-hemibrain/v1.2/{mito-objects,mito-objects-grouped,mito-classes,rois}
+
+      gs://neuroglancer-janelia-flyem-hemibrain/v1.2/synapses   annotation layer
+
+      gs://neuroglancer-janelia-flyem-hemibrain/mask_normalized_round6   voxel classes
+
+      gs://flyem-ng-layers/hemibrain/all_brain_roi   brain mask'
+    n_files: null
+    listing_complete: false
+  sample:
+    urls:
+    - https://storage.googleapis.com/neuroglancer-janelia-flyem-hemibrain/emdata/clahe_yz/jpeg
+    - https://storage.googleapis.com/neuroglancer-janelia-flyem-hemibrain/v1.2/segmentation
+    size_bytes: null
+    description: 'Chunked stores read remotely: the CLAHE jpeg EM and the v1.2 neuron segmentation (8 nm, same origin);
+      a crop must be cut from them.'
+  arrays:
+  - role: raw
+    path_pattern: neuroglancer-janelia-flyem-hemibrain/emdata/clahe_yz/jpeg
+    format: precomputed
+    axes: zyx
+    shape:
+    - 41394
+    - 39725
+    - 34427
+    shape_varies: false
+    dtype: uint8
+    compression: jpeg
+    lossy: true
+    chunks:
+    - 64
+    - 64
+    - 64
+    value_range: null
+    normalization: contrast-stretched
+    alignment: not-applicable
+    alignment_notes: Image layer "em" of the public v1.2 layer file; 8 nm isotropic, 9 scales. CLAHE contrast adjustment
+      per the store path name (clahe_yz).
+  - role: label
+    path_pattern: neuroglancer-janelia-flyem-hemibrain/v1.2/segmentation
+    format: precomputed
+    axes: zyx
+    shape:
+    - 41408
+    - 39552
+    - 34432
+    shape_varies: false
+    dtype: uint64
+    compression: compressed-segmentation
+    lossy: false
+    chunks:
+    - 64
+    - 64
+    - 64
+    value_range: null
+    encoding: instance-ids
+    classes: null
+    alignment: same-grid
+    alignment_notes: Proofread neuron segmentation v1.2 (body IDs). Same 8 nm grid and origin as the EM (no voxel_offset
+      in either info; one coordinate space in the layer file); extents differ slightly (EM x,y,z = 34427, 39725,
+      41394; seg 34432, 39552, 41408).
+  - role: label
+    path_pattern: neuroglancer-janelia-flyem-hemibrain/v1.2/mito-objects
+    format: precomputed
+    axes: zyx
+    shape:
+    - 41344
+    - 37888
+    - 34368
+    shape_varies: false
+    dtype: uint64
+    compression: compressed-segmentation
+    lossy: false
+    chunks:
+    - 64
+    - 64
+    - 64
+    value_range: null
+    encoding: instance-ids
+    classes: null
+    alignment: same-grid
+    alignment_notes: Mitochondrion instance segmentation (layer "mito-segments"); same 8 nm grid, slightly smaller
+      extent.
+  notes: 'Headers only: precomputed info files of the EM, neuron and mito stores (probe.py), no voxels downloaded.
+    Synapses are a precomputed annotation layer; ROIs, mito classes, voxel classes and the brain mask are further
+    segmentation stores (not described as arrays). size_bytes is the paper''s 26 teravoxels of 8-bit data (size_source
+    paper); the EM store''s bounding box is larger (34427 x 39725 x 41394 voxels) because it includes empty space.
+    No direct download: chunked GCS stores read remotely, plus neuPrint/DVID and CSV exports. Voxel size 8 nm confirmed
+    by all three info files.'
