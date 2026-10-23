@@ -36,8 +36,9 @@ happen", §8, §10 milestone 0, §11). Buffer spec grammar: the catalog's `examp
 - `label_axis` is accepted and ignored with a warning (v0.4 §8.5).
 - Weighting group for `over: modality` is the record's first `imaging.modality` value (§2); the family is reported
   beside it.
-- Measure for weighting: `positions = n_items × ⌊extent_y / (patch.y × L)⌋ × ⌊extent_x / (patch.x × L)⌋` summed over
-  raw arrays, with `L = max(levels)`. Temperature `T`: sibling weights ∝ `positions ** T`, normalised per parent,
+- Measure for weighting: `positions = items × depth × ⌊extent_y / (patch.y × L)⌋ × ⌊extent_x / (patch.x × L)⌋` summed
+  over raw arrays, with `L = max(levels)`; `depth = ⌊extent_z / patch.z⌋` for 3D, and for 2D `items` is the larger of
+  `n_items` and the array's plane count, never their product (review ruling, see the ledger). Temperature `T`: sibling weights ∝ `positions ** T`, normalised per parent,
   applied down the `over` hierarchy; a dataset's weight is the product along its path.
 - Split preview: keys = `n_items` per dataset (default split key is the volume); counts by largest remainder of
   `splits.fractions` in the spec's order; `holdout_ids` put the whole dataset in `test`.

@@ -278,7 +278,7 @@ never taken from the spec.
 
 | # | milestone | done when |
 |---|---|---|
-| 0 | `specmap` + `select` + fit offline over a catalog snapshot | the example spec yields a record table with a rule per record; CEM-MitoLab is rejected for the demo's levels with the footprint reason and admitted for patch 64 at levels 1,2; schema violations refused with the validator's message |
+| 0 | `specmap` + `select` + fit offline over a catalog snapshot | the example spec yields a record table with a rule per record; CEM-MitoLab is rejected for the demo's levels with the footprint reason and, at patch 64 and levels 1,2, for its unknown voxel size (§8.2); schema violations refused with the validator's message |
 | 1 | harness API, `stage`, OME-Zarr pyramid reader, `tensorize`, the `muvit-2d` tensorizer | the U937 and BCSS records stage from their raw files; the lead's existing crop links; `tensorize` on a descriptor yields a sample that passes `MuViTDataset._sanity_check` and matches the notebook's `img` and `bbox` for the same centre and levels; a tensorizer output mismatching `describe()` fails the harness |
 | 2 | `buffer-api` + local-mode `BufferDataset` against hand-registered volumes | the demo notebook's training cells run on the two staged datasets with the spec's weights; val is identical across epochs; two consumers share one distribution; a killed consumer costs a delay only |
 | 3 | `MiaBuffer`/`MiaBufferPoll`: go → plan → approve → sourcing (download or manual drop, stage, register) → ready, with datasets already `data:done` | an issue reaches `buffer:ready` progressively as datasets become servable; BCSS waits in the manual-drop sub-state and joins after the drop; a redelivered `go` does nothing |
