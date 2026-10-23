@@ -1,0 +1,74 @@
+"""The `mia-buffers` command line. Milestone 0: `plan`, the offline planner over a catalog checkout."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+from .plan import build_plan
+from .spec import SpecError, load_spec, spec_hash
+
+
+def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
+    """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: safe_load only."""
+    records = []
+    for path in sorted((catalog_dir / "datasets").rglob("*.yaml")):
+        record = yaml.safe_load(path.read_text())
+        if isinstance(record, dict):
+            records.append((str(path.relative_to(catalog_dir)), record))
+    return records
+
+
+def catalog_head(catalog_dir: Path) -> str | None:
+    """The checkout's HEAD commit, or None when the directory is not a git checkout."""
+    result = subprocess.run(["git", "-C", str(catalog_dir), "rev-parse", "HEAD"], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _plan(args: argparse.Namespace) -> int:
+    try:
+        spec = load_spec(args.spec)
+    except SpecError as error:
+        print(f"spec refused: {error}", file=sys.stderr)
+        return 1
+    head = catalog_head(args.catalog_dir)
+    if head != spec.catalog.ref and not args.allow_ref_mismatch:
+        print(
+            f"catalog checkout is at {head or 'no commit'} but the spec pins {spec.catalog.ref}; "
+            "check out that commit or pass --allow-ref-mismatch",
+            file=sys.stderr,
+        )
+        return 1
+    plan = build_plan(
+        spec, spec_hash(args.spec), head if head == spec.catalog.ref else None, load_records(args.catalog_dir)
+    )
+    if args.json:
+        args.json.write_text(json.dumps(plan.to_dict(), indent=1))
+    print(plan.render_markdown(), end="")
+    return 0 if plan.valid else 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mia-buffers")
+    sub = parser.add_subparsers(dest="command", required=True)
+    plan = sub.add_parser("plan", help="turn a buffer spec and a catalog checkout into a plan (markdown on stdout)")
+    plan.add_argument("spec", type=Path)
+    plan.add_argument(
+        "--catalog-dir", type=Path, required=True, help="a checkout of the catalog repo at the spec's ref"
+    )
+    plan.add_argument("--json", type=Path, help="also write plan.json here")
+    plan.add_argument(
+        "--allow-ref-mismatch", action="store_true", help="plan even when the checkout is not at catalog.ref"
+    )
+    plan.set_defaults(func=_plan)
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
