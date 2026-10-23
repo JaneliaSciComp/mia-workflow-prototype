@@ -272,7 +272,6 @@ def test_channel_policy():  # same spec without the exclusion: 1-channel and 3-c
 def test_mitolab_small_patch_still_needs_voxel_size():  # spec v0.4 §10 milestone 0 says patch 64 at levels 1,2 admits it; §8.2 wins
     assert fit(F["empiar-11037-cem-mitolab-mitochondria"], spec_with(spec, patch_2d={"y": 64, "x": 64}, levels=[1, 2])).reason == "voxel size unknown"
 
-```python
 def test_markdown_has_one_row_per_record_and_errors_first(): ...  # every fixture id appears once; errors section precedes the table when present
 def test_record_without_technical_is_a_row_not_a_crash(): ...
 ```
