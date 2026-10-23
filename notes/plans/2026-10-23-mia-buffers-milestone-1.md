@@ -243,8 +243,8 @@ def test_stage_verification_catches_corruption(tmp_path, io, monkeypatch): ...  
 def test_stack_is_co_centred_and_bbox_is_in_nm(staged):
     d = {"plane": {"z": 1}, "centre_nm": [3000.0, 3500.0], "levels": [1, 2, 4], "patch": 64, "channel": None}
     s = read_stack(staged / "v0.zarr", d)
-    assert [l.start_px for l in s.levels] == [(268, 318), (134, 159), (67, 79)]   # round(centre/scale − translation/scale − 32)
-    np.testing.assert_allclose(bbox_of(s.levels[1], 64), [[134*20+5, 159*20+5], [(134+63)*20+5, (159+63)*20+5]])
+    assert [l.start_px for l in s.levels] == [(268, 318), (118, 143), (43, 55)]   # round((centre − translation)/scale − 32)
+    np.testing.assert_allclose(bbox_of(s.levels[1], 64), [[118*20+5, 143*20+5], [(118+63)*20+5, (143+63)*20+5]])
     assert s.levels[0].img.shape == (1, 64, 64) and s.levels[0].labels["gt"].shape == (64, 64)
 
 def test_edge_centre_clamps(staged): ...  # centre_nm [0, 0] → start (0, 0) at every level; centre beyond the far edge → start n_L − 64
