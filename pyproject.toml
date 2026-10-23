@@ -15,13 +15,14 @@ dependencies = [
 autodev = "autodev.cli:main"
 mia-data = "mia_data.cli:main"
 mia = "mia_ops.cli:main"
+mia-buffers = "mia_buffers.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["autodev", "mia_data", "mia_ops"]
+packages = ["autodev", "mia_data", "mia_ops", "mia_buffers"]
 include = ["mia_data/prompts/*.md"]  # already in by default; named so it stays
 
 [tool.pytest.ini_options]
@@ -62,7 +63,7 @@ default = { features = ["test"], solve-group = "default" }
 test = "pytest tests/"
 lint = "ruff check . && ruff format --check ."
 fmt = "ruff format . && ruff check --fix ."
-typecheck = "mypy autodev mia_data mia_ops"
+typecheck = "mypy autodev mia_data mia_ops mia_buffers"
 mia = "mia"
 
 [tool.ruff]

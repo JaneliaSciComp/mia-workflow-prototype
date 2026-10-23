@@ -1,0 +1,77 @@
+schema_version: 1
+name: microscopy-foundation-pretrain
+
+catalog:
+  repo: AI-HHMI/mia-agentic-search
+  ref: ab6a013d5da39c80651ddc845915d034b2eae82a   # pin a commit; never "main" for real runs
+
+# Grammar for `where` fields: a filter object ({in: [...]}, {contains: ...}, {range: [lo, hi]})
+# or the bare keyword `any`. Omitting a field is the same as `any`.
+select:
+  paths: ["datasets/**"]                # take every dimensionality; filter on `dims` instead of folder
+  where:
+    dims:      {in: [2D, 2D+t, 3D, 3D+t]}
+    modality:  any                      # e.g. TEM, SEM, FIB-SEM, cryo-ET, confocal, lightsheet, spinning-disk, widefield, STED, SIM
+    organism:  any                      # e.g. mouse, human, drosophila, zebrafish, c-elegans, arabidopsis, synthetic
+    sample_type: any                    # tissue, cell-culture, organoid, whole-organism, in-vitro
+    license:
+      in: [CC0-1.0, CC-BY-3.0, CC-BY-4.0, MIT, BSD-3-Clause]
+      allow_unknown: false              # drop records with missing or unparseable license
+    annotations:
+      required: false                   # foundation model: unlabeled data is in scope
+      types:    any                     # none | semantic-segmentation | instance-segmentation | panoptic-segmentation | point | bbox | skeleton
+      encoding: any                     # instance-ids | binary | polygon | skeleton | keypoints
+      source:   {in: [manual, proofread, auto-predict]}
+    min_size_voxels: 1.0e6              # skip tiny thumbnails / previews
+  exclude:
+    paths: []
+    ids: []                             # catalog record ids
+    reasons: {}                         # id -> free text, kept for provenance
+  dedup:
+    by: [content_hash, doi]             # same volume mirrored across repos counts once
+    keep: first
+
+sampling:
+  patch:                                # per-dimensionality so 2D data isn't forced through z/t
+    2D:   {y: 256, x: 256}
+    2D+t: {t: 12, y: 256, x: 256}
+    3D:   {z: 32, y: 256, x: 256}
+    3D+t: {t: 12, z: 32, y: 256, x: 256}
+    c: all                              # all | int | [channel names]
+  levels: [1, 2, 4]                     # pyramid levels per crop (MuViT); y and x only
+  output_axes: tczyx                    # canonical order; see missing_axes
+  missing_axes: singleton               # singleton | drop
+  label_axis: l                         # prepended only when the record has annotations
+  resample:
+    target_voxel_size: null             # null = native; or {z: 40, y: 8, x: 8}
+    unit: nm
+    image_interp: linear
+    label_interp: nearest
+  weighting:                            # replaces `strategy`
+    scheme: temperature                 # uniform_over | proportional | temperature
+    over: [modality, dataset]           # patch | dataset | organism | modality | dims (list = hierarchical)
+    temperature: 0.5                    # 1.0 = proportional, 0 = uniform
+  emit:
+    bbox: {enabled: true, unit: um}     # nm | um | mm
+    voxel_size: true
+    metadata: [dataset_id, modality, organism, dims, license]
+  dtype: float32                        # uint8 | uint16 | bfloat16 | float16 | float32
+  normalize:
+    method: percentile                  # percentile | zscore | minmax | none
+    range: [1, 99]
+    scope: patch                        # patch | volume | dataset
+    clip: true
+  seed: 0
+
+splits:
+  fractions: {train: 0.8, val: 0.1, test: 0.1}
+  stratify_by: [modality, dims]
+  holdout_ids: []                       # whole datasets reserved for OOD eval
+  seed: 0
+
+cache:
+  dir: /scratch/mia-cache
+  format: zarr
+  disk_gb: 100
+  prefetch_patches: 128
+  num_workers: 16
