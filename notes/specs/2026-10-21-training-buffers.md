@@ -1,17 +1,23 @@
-# MIA training buffers: spec → datasets → raw cache → crops served on demand — Spec
+# MIA training buffers: spec → datasets → raw cache → multi-resolution crops served on demand — Spec
 
-**Status:** draft v0.3 · 2026-10-23 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
-shards into a disk window; v0.2 (uncommitted, superseded) emitted miao configs over an OME-Zarr corpus. v0.3 follows
-the ML lead's flow: download raw data, serve crops on demand straight from it where its chunking allows, stage to
-OME-Zarr only where it does not, and let one service choose every crop by the spec's rules. The v0.1 diagrams at
-[MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ9EWApz6oj) are stale except figures 1, 2 and 6 in
-outline.
+**Status:** draft v0.4 · 2026-10-23 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
+shards into a disk window; v0.2 (superseded) emitted miao configs over an OME-Zarr corpus; v0.3 (commit `79e6cb8`)
+followed the ML lead's flow: download raw data, serve crops directly from it where chunking allows, stage to
+OME-Zarr where it does not, one service chooses every crop. v0.4 validates v0.3 against the lead's MuViT demo
+notebook and three diverse 2D datasets (§11): a crop becomes a multi-resolution stack with world-coordinate boxes,
+staging to an NGFF pyramid becomes the one serving path for v1, and the batch contract follows MuViT, not miao. The
+v0.1 diagrams at [MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ9EWApz6oj) are stale except
+figures 1, 2 and 6 in outline.
 **Inputs:** the spec instance
 [`examples/spec-microscopy-pretrain.yaml`](https://github.com/AI-HHMI/mia-agentic-search/blob/main/examples/spec-microscopy-pretrain.yaml);
-[AI-HHMI/miao](https://github.com/AI-HHMI/miao) as a reference for resampling, normalisation and the batch contract
-(not used as-is); the catalog record schema (`technical.arrays[]` with formats, axes, shapes, chunking);
-mia-data's snippet interface (crops-spec §5.2), whose `Array.access ∈ {chunk, plane, file}` is the decision this
-design turns on.
+the consumer contract:
+[`examples/muvit-2D-demo.ipynb`](https://github.com/AI-HHMI/mia-agentic-search/blob/main/examples/muvit-2D-demo.ipynb),
+[weigertlab/muvit](https://github.com/weigertlab/muvit) `MuViTDataset` and the paper
+[arXiv:2602.24222](https://arxiv.org/abs/2602.24222); three catalog records chosen by the lead for diversity of
+storage and metadata (§11); [AI-HHMI/miao](https://github.com/AI-HHMI/miao) as a reference for resampling and
+normalisation only; the catalog record schema (`technical.arrays[]` with formats, axes, shapes, compression);
+mia-data's snippet interface (crops-spec §5.2), whose `Array.access ∈ {chunk, plane, file}` drives the stage job's
+read strategy.
 **Repos:** this repo (new package `mia_buffers/`, new service `buffer-api`, client library), a buffer issue repo
 (working name `JaneliaSciComp/mia-workflow-buffers`), `JaneliaSciComp/mia-workflow-data` (dataset issues → approved
 reader bindings), `JaneliaSciComp/mia-snippets` (reader snippets, harness), `AI-HHMI/mia-agentic-search` (catalog,
@@ -20,32 +26,32 @@ read-only).
 ## 0. Summary
 
 A buffer specification filed as an issue becomes a **data pool** (the datasets it draws from, chosen by plain-code
-filtering over the catalog at a pinned commit), then a **raw data cache** of those datasets' original files on
-shared storage, then a **buffer service** that hands out crops to training clients, chosen according to the
-spec's weighting, splits and no-repeat rules. Each crop is read either **directly from the raw files**, when their
-layout lets a box be read cheaply, or from a **staged OME-Zarr copy** written once by a conversion job for data
-whose layout does not. After staging, the two paths are the same path. Two kinds of **snippet** are pluggable,
-**readers** (format → array) and **tensorizers** (array window → GPU-ready tensors), and fixed, human-owned
-**harnesses** compose them: `tensorize` runs a reader and a tensorizer with parameters and yields a tensor;
-`stage` runs a reader and writes OME-Zarr. The `tensorize` harness runs either in the service (remote tensors) or
-in the client (local tensors from a crop descriptor). Both delivery modes are built; the service is required in
-either, because it owns crop selection.
+filtering over the catalog at a pinned commit, each checked to fit the spec's crop geometry), then a **raw data
+cache** of those datasets' original files on shared storage, then one **staged NGFF pyramid per volume** written
+once by a stage job, then a **buffer service** that hands out crops to training clients, chosen according to the
+spec's weighting, splits and sampling rules. A crop is a **multi-resolution stack**: the same patch size read at
+each of the spec's pyramid levels around one world point, with each level's physical box, which is what MuViT
+consumes. Every volume is read through the same built-in OME-Zarr reader after staging; datasets already published
+as NGFF pyramids with the spec's levels are linked instead of converted (the only form of the v0.3 "direct" path
+that survives). Two kinds of **snippet** are pluggable, **readers** (format → array, from mia-data) and
+**tensorizers** (level stack → tensors), and fixed, human-owned **harnesses** compose them: `stage` runs a reader
+and writes the pyramid; `tensorize` reads a descriptor's stack from the pyramid and runs a tensorizer. `tensorize`
+runs in the client (local mode, the default and the first milestone) or in the service (remote mode, later). The
+service is required in either, because it owns crop selection.
 
 ```mermaid
 flowchart LR
-  I[buffer issue<br/>spec YAML] -->|buffer:go| P[plan: select · exclude · dedup<br/>plain code @ pinned catalog]
+  I[buffer issue<br/>spec YAML] -->|buffer:go| P[plan: select · exclude · dedup · fit<br/>plain code @ pinned catalog]
   P -->|plan comment| H{buffer:approve}
   H --> B[binding per dataset<br/>mia-data data:go if none]
-  H --> D[download jobs →<br/>raw cache]
-  B --> A{open via binding:<br/>access?}
-  D --> A
-  A -->|chunk| S[(servable:<br/>raw files)]
-  A -->|plane · file| C[stage job: convert →<br/>OME-Zarr chunked to the box]
-  C --> S2[(servable:<br/>staged zarr)]
-  S --> V[buffer-api: weights, splits,<br/>box ledger, consumers · next]
-  S2 --> V
-  V -->|crop descriptor| L[client: tensorize harness<br/>reader + tensorizer, locally]
-  V -->|fetch: tensors| R[service crop workers:<br/>tensorize harness, remotely]
+  H --> D[download jobs → raw cache<br/>or human drop + verify]
+  B --> C[stage job: reader snippet →<br/>NGFF pyramid, spec levels]
+  D --> C
+  C --> S[(servable:<br/>staged pyramids)]
+  N[(already NGFF<br/>with the levels)] -->|link| S
+  S --> V[buffer-api: weights, split keys,<br/>frozen val lists, consumers · next]
+  V -->|descriptor: volume, centre,<br/>plane, levels, recipe| L[client: MuViTDataset<br/>tensorize harness, locally]
+  V -->|fetch: tensors| R[service crop workers<br/>remote, later]
   L --> G[GPU]
   R --> G
 ```
@@ -58,12 +64,12 @@ One `buffer:*` label at a time, set by the worker. Humans add `buffer:go`, `buff
 | stage | what runs | leaves when |
 |---|---|---|
 | `new` | | `buffer:go` |
-| `planning` | resolve: `select`/`exclude`/`dedup` over catalog records at `catalog.ref`; availability of a reader binding per dataset and of a tensorizer for the spec's `sampling` block; bytes to download; weighting preview; split assignment | plan comment → `plan-review`; invalid spec → `needs-human` |
+| `planning` | resolve: `select`/`exclude`/`dedup` over catalog records at `catalog.ref`; **fit**: per array, `patch × max(levels) ≤ min(y, x)`, voxel size known, channel count admissible (§2); availability of a reader binding per dataset and of a tensorizer for the spec's `sampling` block; bytes to download; download feasibility (host allowlisted or manual); weighting preview; split-key preview | plan comment → `plan-review`; invalid spec → `needs-human` |
 | `plan-review` | | `buffer:approve` → `sourcing`; spec edited + `buffer:go` → `planning` |
-| `sourcing` | once per buffer: `snippets:go` in mia-snippets if no tensorizer matches, wait for the merge. Per dataset, in parallel: `data:go` on its mia-data issue if no approved binding; download job into the raw cache; path decision; stage job if needed; recipe written. Each dataset becomes **servable** independently | servable fraction per weighting group ≥ `ready.min_fraction` (default 1.0; a spec may lower it) → `ready`; a group with no servable dataset after `sourcing.dataset_timeout_days` → `needs-human` |
+| `sourcing` | once per buffer: `snippets:go` in mia-snippets if no tensorizer matches, wait for the merge. Per dataset, in parallel: `data:go` on its mia-data issue if no approved binding; download job into the raw cache, or a `needs-human` sub-state asking a human to drop the files (§3); stage job per volume; recipe written. Each dataset becomes **servable** independently | servable fraction per weighting group ≥ `ready.min_fraction` (default 1.0; a spec may lower it) → `ready`; a group with no servable dataset after `sourcing.dataset_timeout_days` → `needs-human` |
 | `ready` | service serves; remaining datasets keep sourcing and join when servable; weights renormalise over the servable set | no consumer for `idle.hours` → `idle` |
 | `idle` | nothing | `buffer:keep` → `ready`; `retire_after_days` or `buffer:retire` → `retired` (announced on the issue first) |
-| `retired` | staged zarr deleted; raw cache entries released (deleted when no live buffer references them) | `buffer:go` starts a new round |
+| `retired` | staged pyramids deleted; raw cache entries released (deleted when no live buffer references them) | `buffer:go` starts a new round |
 | `needs-human` | the comment says why | `buffer:go` |
 
 Signal dedup, submit-once-by-key jobs, continue-as-new, the poller and the record-vs-live-view split are v0.1 §9
@@ -73,45 +79,53 @@ state and consumers.
 ## 2. The four questions
 
 **Where does dataset filtering happen?** At two times, in two places, both plain code.
-- *Plan time, worker:* `select.where`, `exclude` and `dedup` over catalog records at the pinned commit decide the
-  **data pool**: the datasets this buffer draws from. Every record appears in `plan.json` with the rule that admitted
-  or excluded it, and the plan comment shows that table. No agent.
-- *Serving time, `buffer-api`:* the spec's `weighting` (temperature over the `over` hierarchy), `splits`
-  (a consumer declares its split; volumes are assigned once from the seed) and the no-repeat rule (a ledger of boxes
-  drawn per volume, with the overlap limit) decide **each crop**. The service is the only sampler, so two
-  consumers of one buffer see one distribution and one ledger. Weights renormalise over servable volumes as
-  datasets arrive, and the `next` response says which groups are under-represented so far.
+- *Plan time, worker:* `select.where`, `exclude`, `dedup` and **fit** over catalog records at the pinned commit
+  decide the **data pool**. Fit uses `technical.arrays[]`: the coarsest level's footprint (`patch × max(levels)`)
+  must fit the array's `shape` (its smallest reported shape when `shape_varies`); `imaging.voxel_size_nm` must be
+  known, because the box is in physical units; with `patch.c: all` every raw array in the pool must have the same
+  channel count, with `patch.c: 1` one channel is drawn per crop (the crops-spec rule) and mixed pools are fine. A
+  record with several `modality` values is grouped under its first for weighting and the plan comment says so.
+  Every record appears in `plan.json` with the rule that admitted or excluded it. No agent.
+- *Serving time, `buffer-api`:* the spec's `weighting` (temperature over the `over` hierarchy) chooses the volume;
+  the centre is uniform where the coarsest level fits; the plane (z, or the field index of a 2D stack) is uniform.
+  `splits` are assigned once from the seed over **split keys**, not volumes: the recipe names the key (default the
+  volume; a dataset can declare a regex over file paths, such as the TCGA case id or the source folder, or the plane
+  index), so one file holding 25 fields splits 20/2/3 instead of all-or-nothing. **Train is a stream**: fresh
+  centres every call, overlap allowed, because MAE pretraining redraws every epoch and the coarse footprint makes
+  non-overlap impossible on small volumes (§11). The ledger records what was served, for reproduction, and reports
+  coverage per volume; the overlap cap of v0.3 is gone. **Val and test are frozen lists**: generated once per split
+  from the seed, served in index order, identical every epoch. The service is the only sampler, so two consumers of
+  one buffer see one distribution.
 
-**Where does reading happen?** In whoever tensorises: the service's crop workers (remote mode) or the client
-library (local mode). Both read from shared storage through the same harness code and one of two readers:
-- *Direct:* the dataset's approved **reader snippet** with its binding opens the raw files in the cache and reads
-  the box (`Array.read(region)`). Used when the opened array reports `access: chunk` and the stored chunk is not
-  much larger than the box (`direct.max_chunk_to_box_ratio`); also for `plane` when the spec's box is planar.
-- *Staged:* a built-in OME-Zarr reader opens the staged copy. Any volume whose array reports `plane` or `file`
-  access, or whose chunks are too coarse, is converted once by a **stage job** (reader snippet → OME-NGFF
-  multiscale zarr, chunked to the spec's box, label layers alongside), after which it is read like any other
-  chunked source. Staging is a property of (volume, spec box), decided by code, re-decided per round.
-Datasets published as zarr, n5, chunked HDF5 or tiled TIFF mostly take the direct path; zips of PNG slices, MRC
-stacks and single huge TIFFs take the staged one.
+**Where does reading happen?** In whoever tensorises: the client library (local mode) or the service's crop
+workers (remote mode). Both read the **staged pyramid** of the descriptor's volume with the built-in OME-Zarr
+reader. v0.3's direct path (reading raw files through the dataset's reader snippet at serving time) is dropped for
+v1: MuViT needs every level of the pyramid, and none of the lead's three example datasets stores one, so direct
+reading would serve one level and compute the rest on every crop. A dataset already published as an NGFF pyramid
+holding the spec's levels is **linked** into `staged_root` rather than converted; that is the whole direct path.
+Reader snippets are used by the stage job only, exactly as mia-data uses them today.
 
 **Where is raw data cached?** `raw_root/<record-id>/` on large shared storage: the original files, downloaded by
 plain jobs from the record's URLs (or the binding's file list), checksummed against the record's validators,
-resumable, byte-capped. Shared across buffers and reference-counted; a dataset is downloaded once however many
-specs want it. `staged_root/<record-id>/<volume>-<box-key>.zarr` sits beside it for the staged path. Both are
-regenerable, so neither needs backup; `state_dir` (specs, plans, ledgers, service database) does. The spec's
-`cache` block (node-local disk, prefetch depth, workers) is the client library's local prefetch of crops it has
-been promised by `next`; it is in scope for the local-mode client, not for the service.
+resumable, byte-capped; or dropped there by a human when the host is not reachable from a job (§3). Shared across
+buffers and reference-counted; a dataset is downloaded once however many specs want it.
+`staged_root/<record-id>/<volume>.zarr` holds the pyramid; it depends on the spec's levels and patch, so its name
+carries a `<levels-key>`. Both are regenerable, so neither needs backup; `state_dir` (specs, plans, ledgers,
+service database) does. The spec's `cache` block (node-local disk, prefetch depth, workers) is the client library's
+local prefetch of crops it has been promised by `next`.
 
 **What needs code snippets?** Two kinds, composed by harnesses (§4).
-- **Reader snippets**, one per format and layout: `open_array(src, io) → Array` with lazy `read(region)`. Both
-  paths use them: the direct path reads boxes through them, the stage job reads whole arrays through them. They
-  come from mia-data exactly as today (match, develop via autodev, human approval of preview crops, `data:done`
-  binding). The built-in OME-Zarr reader is a reader snippet like any other, so a staged volume composes identically.
-- **Tensorizer snippets**, one per output convention: `tensorize(patch, params) → Tensors`, pure, declared shapes
-  and dtypes, no I/O. They implement the spec's `sampling` vocabulary (resample, normalise, cast, axis order, label
-  encoding, emitted metadata); a spec whose tensor demands no existing tensorizer describes goes through the
-  develop path (a `snippets:go` issue that autodev turns into a `tensorizers/<name>/` PR, tested on real patches,
-  merged by a human), exactly as readers do.
+- **Reader snippets**, one per format and layout: `open_array(src, io) → Array` with lazy `read(region)` and
+  `access`. The stage job reads whole arrays through them, honouring `access` (`chunk`: read by box; `plane`: by
+  plane; `file`: fetch once, iterate members). They come from mia-data exactly as today (match, develop via autodev,
+  human approval of preview crops, `data:done` binding).
+- **Tensorizer snippets**, one per output convention: `tensorize(stack, params) → Sample`, pure, declared shapes
+  and dtypes, no I/O. The first one is `muvit-2d`: normalise each level (`normalize` block; percentile, not `/255`,
+  because the pool mixes uint8 and uint16), cast to `dtype`, stack to `img` (L, C, Y, X), compute `bbox` (L, 2, 2)
+  in nm from the level's scale and translation, with the max corner at the last pixel as the notebook does,
+  nearest-sampled `label` (L, Y, X) when a label layer is present, plus `pixel_size` and `meta`. A spec whose
+  tensor demands no existing tensorizer describes goes through the develop path (a `snippets:go` issue that autodev
+  turns into a `tensorizers/<name>/` PR, tested on real stacks, merged by a human), exactly as readers do.
 Harnesses, samplers and the service are not pluggable: they are the human-owned code every crop goes through.
 
 ## 3. Sourcing a dataset
@@ -124,45 +138,55 @@ For each dataset in the data pool, three independent activities run under the on
 2. **Download.** A plain job fetches the binding's files into `raw_root/<record-id>/` with the harness `io` (hosts
    limited to the dataset's, validators recorded, CRCs checked, resumable per file). The job writes
    `files.json`: url, path, size, validators. Large datasets stream to the cache over several jobs under
-   `limits.job_bytes`.
-3. **Path decision and staging.** `harness probe <binding> --box <spec box>` opens every array through the snippet
-   with the cache mounted read-only and reports per volume: axes, shape, dtype, voxel size, `access`, chunk shape,
-   decision `direct` or `stage` with the reason. Volumes decided `stage` get a stage job each: `harness stage` reads
-   the array through the snippet and writes OME-NGFF zarr at `staged_root/…`, chunked to the box, with a
-   verification pass (shape, dtype, checksum of a sample of chunks against a fresh read through the snippet). The
-   stage job runs reviewed code only and mounts the raw cache read-only; it writes to `staged_root` only.
+   `limits.job_bytes`. When the plan found the host not allowlisted or the record offers no fetchable archive (a
+   Google Drive folder, for instance), the dataset enters a `needs-human` sub-state whose comment lists the files
+   to place under `raw_root/<record-id>/incoming/`; the worker verifies them against the binding's file list and
+   sizes, moves them into place and writes the same `files.json` with `source: manual`.
+3. **Staging.** `harness stage <binding> --levels <spec levels> --patch <patch>` opens every array through the
+   snippet with the cache mounted read-only and writes one NGFF pyramid per volume at `staged_root/…`:
+   zarr v3, NGFF 0.5 (`ome` attributes key, the layout the demo notebook reads), a `raw` group and one `label/<name>`
+   group per label layer, every level the spec names (mean downsampling for raw, nearest for labels), scale and
+   translation in nm from the record's voxel size, chunks equal to the patch, a 2D stack's field axis kept as a
+   plane axis so one volume holds its fields. A verification pass re-reads a sample of level-0 chunks through the
+   snippet and checks each coarser level against a fresh downsample. The job runs reviewed code only, mounts the raw
+   cache read-only and writes to `staged_root` only. A dataset already in this layout with the levels present is
+   linked, not copied, after the same verification. Axis order of the written arrays follows the NGFF
+   recommendation (`t c z y x` subset); the lead's existing `x y z` crops are read by the same reader with an axis
+   map, so the client never sees the difference.
 
-The sourcing step also writes the dataset's **recipe** (§4): binding, the tensorizer matched to the spec's
-`sampling` block with its params, and the harness pin. A volume is **servable** when it has a recipe and either
-(`direct` and its files are downloaded) or (`stage` and its zarr is verified). The worker registers servable
-volumes with the service (`PUT volumes`), with their weights and split, and the service begins drawing from them.
+The sourcing step also writes the dataset's **recipe** (§4): binding, split key, the tensorizer matched to the
+spec's `sampling` block with its params, statistics for `normalize.scope: volume|dataset`, and the harness pin. A
+volume is **servable** when it has a recipe and a verified pyramid. The worker registers servable volumes with the
+service (`PUT volumes`), with their weights, split-key values and plane count, and the service begins drawing from
+them.
 
 ## 4. Snippets and harnesses: composition
 
 Snippets are small, immutable, independently approved units; harnesses are the fixed programs that compose them.
-Every harness takes a **recipe**: the frozen tuple (reader binding, tensorizer name + params, harness pin) written
-per (dataset, spec) at sourcing time and referenced by every crop descriptor.
+Every harness takes a **recipe**: the frozen tuple (reader binding, split key, tensorizer name + params, harness
+pin) written per (dataset, spec) at sourcing time and referenced by every crop descriptor.
+
+A **crop descriptor** is `(buffer, seq, volume, plane, centre_nm, levels, recipe_id)`. It is the unit the service
+hands out, the ledger stores and a run replays. The `tensorize` harness turns it into a sample: for each level it
+derives the pixel box of `patch` around the centre at that level's scale, clamped inside the array as the notebook
+does, reads it from the pyramid, and passes the stack of (array, scale, translation, box) to the tensorizer.
 
 | harness | composes | in → out | runs in |
 |---|---|---|---|
-| `probe` | reader | binding + spec box → per-volume axes, shape, dtype, voxel size, `access`, chunking, `direct`/`stage` decision | sourcing job |
-| `stage` | reader → writer | binding → OME-Zarr multiscale chunked to the box, label layers alongside, verified by re-reading a sample of chunks through the reader | stage job |
-| `tensorize` | reader + tensorizer | recipe + crop descriptor (volume, box) → `Tensors` in the batch contract (`img`, `label`, `bbox`, `pixel_size`, `meta`) | service crop worker (remote) or client library (local) |
+| `stage` | reader → writer | binding + levels + patch → NGFF pyramid per volume, label layers alongside, verified | stage job |
+| `tensorize` | OME-Zarr reader + tensorizer | recipe + descriptor → `Sample` (`img` (L, C, Y, X), `bbox` (L, 2, 2) nm, optional `label` (L, Y, X), `pixel_size`, `meta`) | client library (local) or service crop worker (remote) |
 | `crop` | reader → PNG preview | mia-data's existing test crops for human review of a binding | mia-data jobs, unchanged |
-| `test-tensorizer` | reader + tensorizer on a PR head | real patches from an approved dataset → pass/fail against `describe()` | autodev test job, private cache |
+| `test-tensorizer` | OME-Zarr reader + tensorizer on a PR head | real stacks from a staged volume → pass/fail against `describe()` | autodev test job, private cache |
 
-The tensorizer owns everything between the array window and the GPU: resample to `target_voxel_size` (linear
-images, nearest labels), normalise (`scope: patch` from the window; `scope: volume|dataset` from statistics the
-sourcing step computed once and stored with the volume), cast to `dtype`, order to `output_axes` with
-`missing_axes`, prepend the label axis when a label layer is present, emit `bbox`, `voxel_size` and the `metadata`
-fields the recipe carries. The harness owns the window read (box plus the tensorizer's declared margin), the
-contract check (shapes and dtypes exactly as `describe()` declared) and provenance. miao's resampling and
-normalisation code is the reference to borrow from for the first tensorizers; its batch contract is the one to
-match so mia-train's wrapper needs little change.
+v0.3's `probe` harness is folded into `stage`, which reports the same per-volume facts (axes, shape, dtype, voxel
+size, `access`) before writing. The tensorizer owns everything between the stack and the GPU; the harness owns the
+reads, the contract check (shapes and dtypes exactly as `describe()` declared, and MuViT's own sanity check on the
+first sample) and provenance. The contract is MuViT's: `img` and `bbox` are mandatory, labels are a separate key, L
+is the level axis. v0.3's `label_axis: l` is dropped (§8). miao's resampling and normalisation code remains the
+reference to borrow from.
 
 Composition is by data, not by import: a tensorizer never imports a reader, a reader never imports a tensorizer,
-neither imports the harness beyond its API module. The same `tensorize` harness runs in both delivery modes; the
-only difference is who calls it.
+neither imports the harness beyond its API module.
 
 ## 5. The buffer service and the client
 
@@ -171,23 +195,23 @@ only difference is who calls it.
 
 | call | who | effect |
 |---|---|---|
-| `PUT buffers/<id>` | worker | spec hash, weighting rules, split assignment, seed, ready threshold |
-| `PUT buffers/<id>/volumes/<vol>` | worker | a servable volume: reader (`direct` binding ref or `staged` zarr path), shape, voxel size, label layers, weight, split, statistics |
-| `POST buffers/<id>/consumers` | client | register `{name, host, pid, split, mode}` → `consumer_id`; heartbeat every `consumers.heartbeat_s` |
-| `GET buffers/<id>/next?n=` | client | the next `n` **crop descriptors** for this consumer's split: volume, box, recipe id, seq. Drawn by weight over servable volumes, box uniform in the volume, overlap ≤ limit against the ledger, recorded in the ledger before returning. `204` + `Retry-After` when nothing is servable yet |
-| `GET crops/<seq>` | client, remote mode | the tensors for a descriptor (safetensors body), produced by a service crop worker running the `tensorize` harness |
-| `GET buffers/<id>/status` | anyone | servable fraction per group, draws per group vs target, consumers, underrun |
+| `PUT buffers/<id>` | worker | spec hash, levels, patch, weighting rules, split fractions, seed, ready threshold |
+| `PUT buffers/<id>/volumes/<vol>` | worker | a servable volume: pyramid path, shape and scale per level, plane count, label layers, weight, split-key values, statistics |
+| `POST buffers/<id>/consumers` | client | register `{name, host, pid, rank, split, mode}` → `consumer_id`; heartbeat every `consumers.heartbeat_s` |
+| `GET buffers/<id>/next?n=` | client, train | the next `n` **crop descriptors**: volume by weight over servable volumes of this split, plane and centre uniform, recorded in the ledger before returning. `204` + `Retry-After` when nothing is servable yet |
+| `GET buffers/<id>/split/<name>?from=&n=` | client, val and test | descriptors `from..from+n` of the frozen list, generated on first request from the seed and stored |
+| `GET crops/<seq>` | client, remote mode | the tensors for a descriptor (safetensors body), produced by a service crop worker |
+| `GET buffers/<id>/status` | anyone | servable fraction per group, draws per group vs target, coverage per volume, consumers, underrun |
 
-**Local mode:** the client library reads the descriptor's box itself from shared storage (direct through the
-snippet's reviewed code at the pinned commit, or staged through the zarr reader), tensorises, and prefetches the
-next descriptors into the spec's node-local cache. No bytes cross the service. **Remote mode:** the client only
-calls `next` and `crops`; the service's crop workers (a pool on the service host, or csub jobs it drives) do the
-reading. Remote mode is for clients that cannot mount the caches or run the harness environment; local mode is the
-default for cluster training jobs. The descriptor is the same object either way, so a run can be reproduced from
-the ledger alone.
-
-`BufferDataset(url, buffer, split, mode)` is an iterable torch dataset: registers, heartbeats, pulls descriptors,
-yields samples in miao's batch contract. One consumer per process; rank-aware by registering per rank.
+**Client.** `BufferDataset(url, buffer, split, n_samples, mode)` subclasses `muvit.data.MuViTDataset`: `ndim`,
+`levels` and `n_channels` come from the buffer; `__len__` is `n_samples` for train (a virtual epoch, as in the
+notebook) and the frozen list's length for val and test; `__getitem__(idx)` for train ignores `idx` and takes the
+next prefetched descriptor, for val and test it indexes the frozen list, so `shuffle=True` and multiple DataLoader
+workers behave. Each worker process registers its own consumer lazily. The sample is the `tensorize` harness's
+`Sample`, so the demo notebook's training cells run unchanged against it. **Local mode** (default): the client
+reads the pyramid from shared storage, tensorises, and prefetches into the spec's node-local cache; no bytes cross
+the service. **Remote mode**: the client only calls `next` and `crops`. The descriptor is the same object either
+way, so a run can be reproduced from the ledger alone.
 
 ## 6. Changes to existing code
 
@@ -195,58 +219,96 @@ yields samples in miao's batch contract. One consumer per process; rank-aware by
    manifest (wire-format rule: new field with a default). Buffers read bindings from there, never from comments.
 2. **mia-data trusts the buffer bot** for `data:go`.
 3. **mia-snippets** gains `tensorizers/<name>/` (same CI rules as `snippets/`: one new directory per PR, no
-   edits), the harness API types `Patch`, `TensorSpec`, `Tensors`, the harnesses `probe`, `stage`, `tensorize`,
-   `test-tensorizer` (§4), and a built-in OME-Zarr reader satisfying the `Array` protocol. Reader snippets are
+   edits), the harness API types `Stack`, `TensorSpec`, `Sample`, the harnesses `stage`, `tensorize`,
+   `test-tensorizer` (§4), and a built-in OME-Zarr pyramid reader with an axis map. Reader snippets are
    unchanged. autodev's `snippets` deployment accepts tensorizer issues: its prompt names both directories and
    `required_checks` gains `mia-buffers/tensors`.
-4. **`mia_buffers/`**: `specmap`, `select`, `plan` (weights, splits), activities (binding, download, probe, stage,
-   register volumes, service calls), `MiaBuffer`, `MiaBufferPoll`, CLI (`mia-buffers plan <spec>` offline;
-   `mia-buffers source <dataset>` drives one dataset by hand), the `buffer-api` service, the client library.
+4. **`mia_buffers/`**: `specmap`, `select`, `plan` (fit, weights, split keys), activities (binding, download or
+   manual verify, stage, register volumes, service calls), `MiaBuffer`, `MiaBufferPoll`, CLI (`mia-buffers plan
+   <spec>` offline; `mia-buffers source <dataset>` drives one dataset by hand), the `buffer-api` service, the
+   client library.
 5. **`mia_ops`**: app kinds `mia-buffers` (worker + broker; caches read-write) and `buffer-api` (listening
    service; caches read-only).
 
 ## 7. Trust boundaries
 
-Crops-spec §9 and v0.1 §10 hold. Downloaded files are untrusted bytes read only by reviewed snippet code in
-sandboxes or by the built-in zarr reader. The stage job and the service's crop workers run reviewed code at pinned
-commits; the match agent and PR-head test jobs never see the shared raw cache read-write. Consumers are untrusted:
-they can register, heartbeat, pull descriptors and fetch tensors for descriptors they were given; they cannot
-influence selection beyond declaring a split. The spec is untrusted text, safe-loaded and schema-validated;
-every record id and URL in the plan is re-read from the catalog, never taken from the spec.
+Crops-spec §9 and v0.1 §10 hold. Downloaded or human-dropped files are untrusted bytes read only by reviewed
+snippet code in the stage job; everything after staging is read by the built-in zarr reader. The stage job and the
+service's crop workers run reviewed code at pinned commits; the match agent and PR-head test jobs never see the
+shared raw cache read-write. Consumers are untrusted: they can register, heartbeat, pull descriptors and fetch
+tensors for descriptors they were given; they cannot influence selection beyond declaring a split. The spec is
+untrusted text, safe-loaded and schema-validated; every record id and URL in the plan is re-read from the catalog,
+never taken from the spec.
 
 ## 8. Flags for the ML side
 
 1. **Fields the record schema lacks** for `select.where`: `sample_type`, `content_hash` for `dedup`,
-   `annotations.encoding` (lives in `technical.arrays[]`), `auto-predict` vs the schema's `automatic`,
-   `min_size_voxels` (derived). Grow the schema or let `specmap` document the approximation in the plan comment.
-2. **Chunking is the hinge.** The path decision needs `technical.arrays[].chunks` (or a probe) per volume; the
-   enricher should record chunk shape for chunked formats so the plan can estimate staging volume before download.
-3. **Normalise `modality` to families** (the catalog's `tools/readiness.py` `FAMILIES`) for `weighting.over` and
-   `normalize.scope: dataset`; reuse that mapping.
-4. **`label_axis: l`** and miao's `l` (scale levels) collide if the contract is kept miao-shaped. Pick a letter.
-5. **Remote vs local tensorisation** is both here; decide which the first training runs use so the first
-   milestone builds the right half first (§10 assumes local).
+   `annotations.encoding` (lives in `technical.arrays[]`), `auto-predict` vs the schema's `automatic`.
+   `min_size_voxels` is now the per-array fit rule and should be stated per array, not per record.
+2. **Voxel size must be known** for a world-coordinate bbox. CEM-MitoLab has `voxel_size_nm: null`, so it cannot
+   be served to MuViT in nm. Either the enricher recovers pixel sizes per source, or the spec admits pixel-unit
+   bboxes flagged in `meta` (a different model input; your call).
+3. **Channels.** MuViT fixes `in_channels` per model; the three example datasets are 1-channel EM, RGB H&E and
+   3-channel fluorescence. The spec needs `patch.c: 1` (one channel per crop) for a mixed pool, or one buffer per
+   channel count. Say which.
+4. **bbox unit is model-relevant** (rotary embeddings run on it). The demo uses nm; the example spec says um. The
+   default here is nm.
+5. **`label_axis: l`** is dropped: L is MuViT's level axis and labels are a separate `label` key. Remove the field
+   from the spec grammar or document it as ignored.
+6. **Normalise `modality` to families** (the catalog's `tools/readiness.py` `FAMILIES`) for `weighting.over` and
+   `normalize.scope: dataset`; and decide how a multi-valued `modality` is grouped (first value here).
+7. **Local mode is first**, as the demo implies. Remote mode is the last milestone.
 
 ## 9. Open questions (defaults in bold)
 
 1. **Where buffer issues live:** **new repo**, or a label family in mia-workflow-data.
-2. **Direct-path threshold:** **chunk volume ≤ 8× box volume**, else stage; tune after measuring read amplification
-   on real zarr/n5/tiled TIFF datasets.
+2. **Train overlap:** **unlimited, coverage reported**; a least-recently-covered preference at level 0 if a run
+   shows it matters.
 3. **Service placement and crop workers for remote mode:** **service host pool, cluster-internal, self-identified
    consumers**; csub-driven workers and SSO if remote mode becomes the norm or leaves one group.
 4. **Raw cache retention:** **reference-counted by live buffers, deleted on last retire**, with a root quota that
    queues sourcing (v0.1's admission rule) when exceeded.
 5. **Reproducibility of a run:** **the ledger is the record** (seq → descriptor); replaying a run means replaying
    descriptors, not re-sampling.
+6. **Staged axis order:** **NGFF canonical, axis map in the reader**, or match the lead's existing `x y z` crops.
+7. **Direct serving from pyramidal raw formats** (OME-Zarr, N5 multiscale, pyramidal TIFF): **link when the levels
+   match, otherwise stage**; a snippet-backed direct path returns only if staging volume becomes the bottleneck.
 
 ## 10. Build order
 
 | # | milestone | done when |
 |---|---|---|
-| 0 | `specmap` + `select` offline over a catalog snapshot | the example spec yields a record table with a rule per record; schema violations refused with the validator's message |
-| 1 | harness API + `probe`, `stage`, `tensorize`, OME-Zarr reader; two hand-written tensorizers; one `direct` dataset (zarr/n5) and one `stage` dataset (tiff zip) | both volumes yield identical tensors for the same recipe and descriptor through both readers; stage output verifies; a tensorizer's output mismatching `describe()` fails the harness |
-| 2 | `buffer-api` + local-mode client against hand-registered volumes | a one-GPU smoke job trains on crops from both datasets with the spec's weights; two consumers share one ledger; a killed consumer costs a delay only |
-| 3 | `MiaBuffer`/`MiaBufferPoll`: go → plan → approve → sourcing (download, probe, stage, register) → ready, with datasets already `data:done` | an issue reaches `buffer:ready` progressively as datasets become servable; a redelivered `go` does nothing |
+| 0 | `specmap` + `select` + fit offline over a catalog snapshot | the example spec yields a record table with a rule per record; CEM-MitoLab is rejected for the demo's levels with the footprint reason and admitted for patch 64 at levels 1,2; schema violations refused with the validator's message |
+| 1 | harness API, `stage`, OME-Zarr pyramid reader, `tensorize`, the `muvit-2d` tensorizer | the U937 and BCSS records stage from their raw files; the lead's existing crop links; `tensorize` on a descriptor yields a sample that passes `MuViTDataset._sanity_check` and matches the notebook's `img` and `bbox` for the same centre and levels; a tensorizer output mismatching `describe()` fails the harness |
+| 2 | `buffer-api` + local-mode `BufferDataset` against hand-registered volumes | the demo notebook's training cells run on the two staged datasets with the spec's weights; val is identical across epochs; two consumers share one distribution; a killed consumer costs a delay only |
+| 3 | `MiaBuffer`/`MiaBufferPoll`: go → plan → approve → sourcing (download or manual drop, stage, register) → ready, with datasets already `data:done` | an issue reaches `buffer:ready` progressively as datasets become servable; BCSS waits in the manual-drop sub-state and joins after the drop; a redelivered `go` does nothing |
 | 4 | sourcing through mia-data (`data:go`), binding publication, statistics for `normalize.scope: volume/dataset` | a spec naming an unmatched dataset reaches ready after the human approval on the dataset issue |
-| 5 | remote mode: service crop workers, `GET crops/<seq>` | a client with no cache mount trains from tensors over HTTP |
-| 6 | retire, reference-counted caches, root quota, operations (`status`, `check`) | an idle buffer is retired with notice; a shared dataset survives; a full root queues sourcing with a comment |
+| 5 | retire, reference-counted caches, root quota, operations (`status`, `check`) | an idle buffer is retired with notice; a shared dataset survives; a full root queues sourcing with a comment |
+| 6 | remote mode: service crop workers, `GET crops/<seq>` | a client with no cache mount trains from tensors over HTTP |
+
+## 11. Validation against the MuViT demo and three datasets
+
+The lead's notebook defines a dataset over one NGFF pyramid: for each sample it draws a centre where the coarsest
+level fits and a plane, reads `patch_size` pixels at every level around that centre, and returns `img` (L, C, Y, X)
+scaled to [0, 1] and `bbox` (L, 2, 2) in nm from the level's scale and translation. Train draws fresh crops every
+epoch with a virtual length; val fixes crops by seed; the split is a plane range within the volume. `MuViTDataset`
+checks `img` and `bbox` shapes on construction, is map-style, and fixes `n_channels` per dataset. The three records
+the lead named, against the v0.3 design:
+
+| | CEM-MitoLab (EMPIAR-11037) | BCSS (GitHub) | U937 confocal (Zenodo 20797339) |
+|---|---|---|---|
+| raw layout | ~43k uint8 TIFF pairs in one 3 GB zip | 151 deflate PNG pairs, RGB | one uncompressed ImageJ TIFF, `tcyx`, plus three mask stacks |
+| snippet `access` | `file` | `file` | `chunk` |
+| pyramid in the raw | no | no | no |
+| fits 256 at levels 1,2,4 | no: patches are 224 or smaller | yes (2467 × 3394) | yes (2048 × 2048) |
+| voxel size | unknown | 250 nm | 45 nm |
+| channels, dtype | 1, uint8 | 3, uint8 | 3, uint16 up to 41630 |
+| download | https zip | Google Drive folder, not allowlisted, no archive | four direct URLs |
+| split key | source folder | TCGA case id in the file name | field index `t` |
+
+What changed in v0.4 because of this: the multi-resolution descriptor and MuViT batch contract (§4, §5), staging
+as the one path (§2), the plan-time fit rule and channel policy (§1, §2), split keys and frozen val lists (§2, §5),
+unlimited train overlap (§2, §9), the manual-drop download path (§3), the staged layout pinned to zarr v3 and NGFF
+0.5 (§3), nm as the bbox unit (§8), and the build order starting from staging and the local client (§10). The spec
+was already ahead of the notebook in one place: the notebook divides by 255, which is wrong for the uint16 confocal
+stack; the percentile tensorizer handles both dtypes.
