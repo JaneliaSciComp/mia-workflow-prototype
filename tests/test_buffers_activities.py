@@ -324,3 +324,31 @@ async def test_admit_accepts_crlf_bodies(acts):
     pins = await admitted(acts)
     assert (acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml").read_text() == spec_text()
     assert pins.catalog_ref == REF
+
+
+async def test_register_dataset_refuses_malformed_volumes(acts, server):  # noqa: F811
+    acts.cfg.service.url = server
+    await acts.plan(7, ROUND, await admitted(acts))
+    staged = write_stage_json(staged_dir(acts, U937))
+    report = json.loads((staged / "stage.json").read_text())
+    good = report["volumes"][0]
+    escaped = {**good, "path": "../../elsewhere.zarr"}
+    broken = {"path": "v2.zarr", "axes": "czyx"}  # no shape, no levels
+    (staged / "stage.json").write_text(json.dumps({**report, "volumes": [escaped, broken, good]}))
+    await acts.create_buffer(ROUND, ROUND)
+    result = await acts.register_dataset(ROUND, U937, ROUND)
+    assert result.registered == [f"{U937}/v0.zarr"]
+    assert set(result.refused) == {f"{U937}/../../elsewhere.zarr", f"{U937}/v2.zarr"}
+    assert "path" in result.refused[f"{U937}/../../elsewhere.zarr"]
+
+
+def test_response_error_text_survives_non_json_bodies():
+    from mia_buffers.activities import _response_error
+
+    class Response:
+        text = "<html>502 Bad Gateway</html>"
+
+        def json(self):
+            raise ValueError("not json")
+
+    assert _response_error(Response()) == "<html>502 Bad Gateway</html>"

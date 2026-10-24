@@ -18,7 +18,7 @@ import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -90,6 +90,7 @@ class Activities:
         self.jobs, self.bot, self.client = jobs, bot, client
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
         self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
+        self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
 
     @property
     def gh_data(self) -> GitHub:
@@ -508,8 +509,10 @@ class Activities:
         report = _job_json(staged, "stage.json")
         if not isinstance(report, dict):
             return RegisterResult(refused={record: "stage.json is missing, unreadable or not a JSON object"})
-        bodies = volume_bodies(self._row(round_id, record), staged, self._spec(round_id), report=report)
         result = RegisterResult()
+        bodies = volume_bodies(
+            self._row(round_id, record), staged, self._spec(round_id), report=report, refused=result.refused
+        )
         async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
             for volume_id, body in bodies:
                 response = await client.put(
@@ -518,5 +521,14 @@ class Activities:
                 if response.status_code == 200:
                     result.registered.append(volume_id)
                 else:
-                    result.refused[volume_id] = _text(response.json().get("error", response.text), 500)
+                    result.refused[volume_id] = _response_error(response)
         return result
+
+
+def _response_error(response: Any) -> str:
+    """buffer-api's `error` field, or the raw body when the answer is not JSON (a proxy's HTML page)."""
+    try:
+        body = response.json()
+    except ValueError:
+        return _text(response.text, 500)
+    return _text(body.get("error", response.text) if isinstance(body, dict) else response.text, 500)

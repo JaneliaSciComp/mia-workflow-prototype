@@ -3,7 +3,8 @@
 - a `buffer:go` / `buffer:approve` label on a buffer issue becomes a signal (mia-data's `deliver_label`, which
   starts the workflow if needed and removes the label only once the signal is accepted);
 - for issues in `buffer:sourcing` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
-  directory holds a file gets a `dropped` signal, once per change of that directory.
+  directory holds a file gets a `dropped` signal once that directory's listing has been stable for a whole poll
+  interval (a file still being copied grows between passes), and once per change of it.
 
 Runs as the `poll` activity and uses the activity object's clients and helpers.
 """
@@ -80,10 +81,14 @@ async def notice_drops(activities: Activities, number: int) -> list[str]:
     for dataset in state.datasets:
         if dataset.status != "waiting-drop":
             continue
+        key = (number, dataset.record)
         signature = _incoming_signature(cfg.paths.raw_root / dataset.record / "incoming")
-        if signature is None or activities._dropped.get((number, dataset.record)) == signature:
+        if signature is None or activities._dropped.get(key) == signature:
             continue
-        await handle.signal("dropped", dataset.record)
-        activities._dropped[(number, dataset.record)] = signature
+        if activities._seen_listing.get(key) != signature:  # first sight, or still changing: a copy in progress
+            activities._seen_listing[key] = signature
+            continue
+        await handle.signal("dropped", dataset.record)  # unchanged for a whole poll interval: stable
+        activities._dropped[key] = signature
         done.append(f"dropped #{number} {dataset.record}")
     return done

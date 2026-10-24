@@ -67,7 +67,13 @@ def render_drop_comment(
     lines += [
         f"- `incoming/{safe_text(name)}` ← {safe_text(url)}" for url, name in files if wanted is None or name in wanted
     ]
-    lines += ["", "The poller notices the files on its next pass and the worker verifies and stages them.", ""]
+    lines += [
+        "",
+        "Copy each file to a temporary name first and `mv` it into `incoming/` when the copy is complete: the poller "
+        "acts once the directory has been unchanged for a whole poll interval. Plain files only (no symlinks); the "
+        "worker verifies and stages them.",
+        "",
+    ]
     return "\n".join(lines) + render_links({"Incoming": incoming_link})
 
 

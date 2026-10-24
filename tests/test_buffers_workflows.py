@@ -12,6 +12,7 @@ import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHistory
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from test_buffers_config import make_cfg
@@ -158,6 +159,8 @@ class Mocks:
         @activity.defn(name="register_dataset")
         async def register_dataset(round_id: str, record: str, buffer_id: str) -> RegisterResult:
             rec("register_dataset", record, buffer_id)
+            if self.refuse.get(record) == "__raise__":
+                raise ApplicationError("boom: buffer-api answered 502 with an HTML page", non_retryable=True)
             if record in self.refuse:
                 return RegisterResult(refused={f"{record}/v0.zarr": self.refuse[record]})
             return RegisterResult([f"{record}/v0.zarr"])
@@ -340,10 +343,10 @@ async def test_go_while_sourcing_is_refused_busy(env):
         await until(lambda: m.of("await"))
         await h.signal(MiaBuffer.go, ev("go", "13"))  # "12" is the approve's event id: a reused id is a redelivery
         m.gate.set()
-        await h.signal(MiaBuffer.dropped, "b")
+        await h.signal(MiaBuffer.dropped, "b")  # both datasets finish: the round ends and the go was busy
         await until(lambda: m.of("refuse_label"), m=m)
     ((label, reason, eid),) = m.of("refuse_label")
-    assert (label, eid) == ("buffer:go", "13") and "busy" in reason
+    assert (label, eid) == ("buffer:go", "13") and "busy" in reason and len(m.of("admit")) == 1
 
 
 async def test_stage_report_not_ok_fails_dataset_without_registering(env):
@@ -518,15 +521,16 @@ async def test_poll_delivers_labels_and_drops(tmp_path):
     (cfg.paths.raw_root / "bcss" / "incoming").mkdir(parents=True)
     (cfg.paths.raw_root / "bcss" / "incoming" / "a.zip").write_bytes(b"z")
     (cfg.paths.raw_root / "x" / "incoming").mkdir(parents=True)  # empty: nothing to signal
-    done = await run_poll(acts)
-    assert done == ["go #1", "dropped #2 bcss"]
+    assert await run_poll(acts) == ["go #1"]  # the drop is not signalled on first sight (a copy may be running)
+    assert await run_poll(acts) == ["dropped #2 bcss"]
     ((wf, state, kw),) = client.started
     assert wf == "MiaBuffer" and state == BufferState(1) and kw["start_signal"] == "go"
     assert kw["start_signal_args"] == [LabelEvent("go", "501", "alice", at)] and kw["id"] == cfg.workflow_id(1)
     assert gh.removed == [(1, "buffer:go")] and client.signals == [(cfg.workflow_id(2), "dropped", "bcss")]
     assert await run_poll(acts) == []  # nothing new: the drop was signalled once
     (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
-    assert await run_poll(acts) == ["dropped #2 bcss"]  # a new file: once more
+    assert await run_poll(acts) == []  # a new file: seen, not yet stable
+    assert await run_poll(acts) == ["dropped #2 bcss"]  # once more
 
 
 async def test_poll_refuses_go_from_a_reader(tmp_path):
@@ -563,3 +567,50 @@ async def test_replay_buffer_history(env):
             HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-recorded", HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+# --- review fix pass -----------------------------------------------------------------------------
+
+
+async def test_activity_failure_fails_only_that_dataset(env):
+    m = Mocks(plan=ONE_GROUP, refuse={"a": "__raise__"})  # register_dataset raises a non-retryable error for a
+    async with started(env, m) as h:
+        await approve(h, m)
+        await h.signal(MiaBuffer.dropped, "b")
+        await idle(h, m, "ready")  # b alone is half the group
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "a").status == "failed" and "boom" in dataset(state, "a").reason
+    assert dataset(state, "b").status == "servable" and "needs-human" not in m.stages
+
+
+async def test_go_after_ready_with_a_straggler_starts_a_new_round(env):
+    m = Mocks(plan=ONE_GROUP)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")  # a servable, b waiting for its drop
+        await h.signal(MiaBuffer.approve, ev("approve", "14"))
+        await until(lambda: m.of("refuse_label"), m=m)
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await until(lambda: len(m.of("admit")) == 2, m=m)
+        await idle(h, m, "plan-review")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("refuse_label")[0][0] == "buffer:approve" and "plan-review" in m.of("refuse_label")[0][1]
+    assert m.stages[-3:] == ["ready", "planning", "plan-review"] and state.round_id == "i7-e15"
+    assert not m.of("verify_drop")  # the straggler was abandoned, not dropped
+
+
+async def test_poll_signals_only_a_stable_listing(tmp_path):
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
+    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
+    waiting.datasets = [workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop")]
+    client = FakeClient({cfg.workflow_id(2): waiting})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+    incoming = cfg.paths.raw_root / "bcss" / "incoming"
+    incoming.mkdir(parents=True)
+    (incoming / "a.zip").write_bytes(b"part")
+    assert await run_poll(acts) == []  # first sight: the file may still be copying
+    (incoming / "a.zip").write_bytes(b"part two")  # grew: still copying
+    assert await run_poll(acts) == []
+    assert await run_poll(acts) == ["dropped #2 bcss"]  # unchanged for a whole pass: stable
+    assert await run_poll(acts) == []

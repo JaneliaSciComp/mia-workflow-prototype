@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -53,12 +54,46 @@ def _split_planes(volume_id: str, planes: int, spec: Spec) -> dict[str, list[int
     return out
 
 
-def volume_bodies(row: dict, staged: Path, spec: Spec, report: dict | None = None) -> list[tuple[str, dict]]:
-    """(volume id, `PUT volumes/<vol>` body) for every raw volume in the record's stage.json (or in `report`, the
-    same JSON already read by the caller, e.g. through read_untrusted)."""
+VOLUME_PATH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a plain directory name under the record's staged dir
+
+
+def check_volume(volume: object) -> str | None:
+    """Why a stage.json volume entry cannot be registered, or None. The stage job is reviewed code, but its output
+    is still a job's file: the path must stay inside the staged directory and the keys the body needs must exist."""
+    if not isinstance(volume, dict):
+        return "volume entry is not an object"
+    path = volume.get("path")
+    if not (isinstance(path, str) and VOLUME_PATH_RE.fullmatch(path) and path != ".."):
+        return f"path {path!r} is not a plain directory name"
+    try:
+        axes, shape = volume["axes"], volume["shape"]
+        if not (isinstance(axes, str) and isinstance(shape, list) and len(axes) == len(shape)):
+            return "axes and shape disagree"
+        for level in volume["levels"]:
+            for key in ("factor", "shape", "scale_nm", "translation_nm"):
+                level[key]
+    except (KeyError, TypeError) as error:
+        return f"missing or malformed field: {type(error).__name__}: {error}"
+    return None
+
+
+def volume_bodies(
+    row: dict, staged: Path, spec: Spec, report: dict | None = None, refused: dict[str, str] | None = None
+) -> list[tuple[str, dict]]:
+    """(volume id, `PUT volumes/<vol>` body) for every well-formed raw volume in the record's stage.json (or in
+    `report`, the same JSON already read by the caller, e.g. through read_untrusted). Malformed entries go to
+    `refused` (volume id -> reason) when a dict is given, else raise ValueError."""
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
-    volumes = report.get("volumes") or []
+    volumes = []
+    for index, volume in enumerate(report.get("volumes") or []):
+        if (why := check_volume(volume)) is None:
+            volumes.append(volume)
+        elif refused is not None:
+            path = volume.get("path") if isinstance(volume, dict) else None
+            refused[f"{row['id']}/{path if isinstance(path, str) else index}"] = why
+        else:
+            raise ValueError(f"{row['id']}: volume {index}: {why}")
     total_planes = sum(_planes(volume) for volume in volumes) or 1
     out = []
     for volume in volumes:
@@ -114,10 +149,13 @@ def register(
             if not (staged / "stage.json").is_file():
                 out["skipped"][row["id"]] = "not staged"
                 continue
-            for volume_id, body in volume_bodies(row, staged, spec):
+            for volume_id, body in volume_bodies(row, staged, spec, refused=out["refused"]):
                 response = client.put(f"/buffers/{buffer}/volumes/{quote(volume_id, safe='')}", json=body)
                 if response.status_code == 200:
                     out["registered"].append(volume_id)
                 else:
-                    out["refused"][volume_id] = response.json().get("error", response.text)
+                    try:
+                        out["refused"][volume_id] = response.json().get("error", response.text)
+                    except ValueError:  # not JSON: a proxy page
+                        out["refused"][volume_id] = response.text[:500]
     return out

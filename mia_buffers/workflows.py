@@ -272,11 +272,44 @@ class MiaBuffer:
                 )
         if self._ready_now():
             await self._announce_ready(limits)
-        await asyncio.gather(*tasks)  # the rest join as they finish
+            if not await self._await_stragglers(tasks):
+                return  # a new go: the main loop plans again
+        await asyncio.gather(*tasks, return_exceptions=True)  # every task handles its own failure (_source)
         if not state.ready:
             reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in state.datasets if d.status != "servable")
             return await self._finish("needs-human", f"no weighting group reached ready.min_fraction: {reasons}")
         await self._refuse_queued()  # labels that arrived while sourcing ran were busy, as in mia-data
+
+    async def _await_stragglers(self, tasks: list[asyncio.Task]) -> bool:
+        """After ready: wait for the remaining datasets, answering labels meanwhile. An approve is refused (nothing
+        is under review); a go abandons the stragglers that are waiting for a drop and ends the round (False) so it
+        can be planned again, but only once no stage job is in flight (a new round would write the same staged
+        directories)."""
+
+        pairs = list(zip(tasks, self.state.datasets, strict=True))
+
+        def abandonable() -> bool:
+            """Every unfinished task is only waiting for a human's drop (no job, no registration in flight)."""
+            pending = [dataset for task, dataset in pairs if not task.done()]
+            return bool(pending) and all(dataset.status == "waiting-drop" for dataset in pending)
+
+        while not all(task.done() for task in tasks):
+            await workflow.wait_condition(
+                lambda: (
+                    all(task.done() for task in tasks)
+                    or bool(self.approve_events)
+                    or bool(self.go_events and abandonable())
+                )
+            )
+            await self._refuse_queued(gos=False)
+            self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
+            if self.go_events and abandonable():
+                for task, dataset in pairs:
+                    if not task.done():
+                        task.cancel()
+                        dataset.status, dataset.reason = "failed", "abandoned: a new buffer:go started another round"
+                return False
+        return True
 
     async def _announce_ready(self, limits: SourcingLimits) -> None:
         state = self.state
@@ -285,7 +318,17 @@ class MiaBuffer:
         await self._stage("ready", extra=render_ready(state.buffer_id or "", limits.service_url, servable))
 
     async def _source(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
-        """Binding → (drop) → stage job → register; the dataset's status records the outcome."""
+        """Binding → (drop) → stage job → register; the dataset's status records the outcome. An activity that
+        gives up fails this dataset alone, never the round."""
+        try:
+            await self._source_steps(dataset, semaphore)
+        except ActivityError as error:
+            if dataset.status == "servable":  # only the "servable" comment failed; the volumes are registered
+                workflow.logger.warning("issue #%d: %s: %s", self.state.issue, dataset.record, error_message(error))
+                return
+            await self._fail(dataset, error_message(error))
+
+    async def _source_steps(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
         state = self.state
         assert state.round_id and state.pins and state.buffer_id
         round_id, record = state.round_id, dataset.record
@@ -341,7 +384,14 @@ class MiaBuffer:
     async def _fail(self, dataset: DatasetStatus, reason: str) -> None:
         state = self.state
         dataset.status, dataset.reason = "failed", reason
-        await self._comment(f"`{dataset.record}` failed: {reason}", f"dataset {state.round_id} {dataset.record} failed")
+        try:
+            await self._comment(
+                f"`{dataset.record}` failed: {reason}", f"dataset {state.round_id} {dataset.record} failed"
+            )
+        except ActivityError as error:  # best effort: the status carries the reason either way
+            workflow.logger.warning(
+                "issue #%d: could not post %s's failure: %s", state.issue, dataset.record, error_message(error)
+            )
 
     async def _job(self, record: str, workspace: str, hosts: list[str]) -> JobDone:
         """Submit the stage job (at most once per key) and wait for it on the await queue."""
