@@ -12,6 +12,7 @@ v0.1 diagrams at [MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ
 figures 1, 2 and 6 in outline.
 **Inputs:** the spec instance
 [`examples/spec-microscopy-pretrain.yaml`](https://github.com/AI-HHMI/mia-agentic-search/blob/main/examples/spec-microscopy-pretrain.yaml);
+and the reduced example this repo plans from, [`buffer-2d-gray.example.yaml`](buffer-2d-gray.example.yaml);
 the consumer contract:
 [`examples/muvit-2D-demo.ipynb`](https://github.com/AI-HHMI/mia-agentic-search/blob/main/examples/muvit-2D-demo.ipynb),
 [weigertlab/muvit](https://github.com/weigertlab/muvit) `MuViTDataset` and the paper
@@ -86,7 +87,8 @@ state and consumers.
   must fit the array's `shape` (its smallest reported shape when `shape_varies`); the box is in physical units, so
   `imaging.voxel_size_nm` is used where the record has it and **assumed** per missing axis from a table of catalog
   medians by modality (`mia_buffers/assume.py`; the plan row names the assumed axes;
-  `sampling.assume_voxel_size: false` rejects such records instead). Channel policy: with `patch.c: all` every raw
+  `sampling.assume_voxel_size: false` rejects such records instead). Channel policy: `patch.c` defaults to **1**
+  (one channel per crop, the lead's initial experiments); with `patch.c: all` every raw
   array in the pool must have the same channel count; `patch.c: 1` and `patch.c: 3` always resolve, through a
   per-record **channel recipe** chosen from the array's channel count and modality (gray: `channel 0` | `mean` |
   `luminance`; rgb: `replicate` | `rgb` | `additive`) that the tensorizer applies; any other count needs at least

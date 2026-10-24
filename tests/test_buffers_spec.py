@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mia_buffers.spec import SpecError, load_spec, spec_hash
+from mia_buffers.spec import Spec, SpecError, load_spec, spec_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
 
@@ -14,6 +14,12 @@ def test_example_spec_loads():
     spec = load_spec(FIXTURES / "spec.yaml")
     assert spec.name == "microscopy-foundation-pretrain" and spec.sampling.levels == [1, 2, 4]
     assert spec.patch_for("2D") == {"y": 256, "x": 256} and spec.sampling.patch.c == "all"
+    assert (
+        Spec.model_validate(
+            {**spec.model_dump(by_alias=True, exclude={"warnings"}), "sampling": {"patch": {"2D": {"y": 8, "x": 8}}}}
+        ).sampling.patch.c
+        == 1
+    )
     assert spec.select.where.license.in_ == ["CC0-1.0", "CC-BY-3.0", "CC-BY-4.0", "MIT", "BSD-3-Clause"]
     assert spec.sampling.weighting.temperature == 0.5
     assert spec.splits.fractions == {"train": 0.8, "val": 0.1, "test": 0.1}

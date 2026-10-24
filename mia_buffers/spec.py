@@ -108,13 +108,13 @@ class PatchSize(_Strict):
 
 
 class Patch(_Strict):
-    """Patch sizes per dimensionality; `c` is the channel policy (all, or one channel count per crop)."""
+    """Patch sizes per dimensionality; `c` is the channel policy (a channel count per crop, default 1, or all)."""
 
     two_d: PatchSize = Field(alias="2D")
     two_d_t: PatchSize | None = Field(default=None, alias="2D+t")
     three_d: PatchSize | None = Field(default=None, alias="3D")
     three_d_t: PatchSize | None = Field(default=None, alias="3D+t")
-    c: Literal["all"] | int = "all"
+    c: Literal["all"] | int = 1  # one channel per crop (the lead's initial experiments); 3 = RGB; all = as stored
 
     @field_validator("c")
     @classmethod
