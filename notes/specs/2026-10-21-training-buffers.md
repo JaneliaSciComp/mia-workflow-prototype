@@ -1,11 +1,13 @@
 # MIA training buffers: spec → datasets → raw cache → multi-resolution crops served on demand — Spec
 
-**Status:** draft v0.4 · 2026-10-23 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
+**Status:** draft v0.5 · 2026-10-23 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
 shards into a disk window; v0.2 (superseded) emitted miao configs over an OME-Zarr corpus; v0.3 (commit `79e6cb8`)
 followed the ML lead's flow: download raw data, serve crops directly from it where chunking allows, stage to
 OME-Zarr where it does not, one service chooses every crop. v0.4 validates v0.3 against the lead's MuViT demo
 notebook and three diverse 2D datasets (§11): a crop becomes a multi-resolution stack with world-coordinate boxes,
-staging to an NGFF pyramid becomes the one serving path for v1, and the batch contract follows MuViT, not miao. The
+staging to an NGFF pyramid becomes the one serving path for v1, and the batch contract follows MuViT, not miao. v0.5
+takes the lead's answers to §8.2 and §8.3: missing metadata is guessed, for now by baked-in tables (§2, §9.8), later
+by an ingestion agent. The v0.4 diagrams are at [MIA training buffers v0.4](https://claude.ai/artifact/Nqk7xz3jQajtPAFqw1296i). The
 v0.1 diagrams at [MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ9EWApz6oj) are stale except
 figures 1, 2 and 6 in outline.
 **Inputs:** the spec instance
@@ -81,9 +83,14 @@ state and consumers.
 **Where does dataset filtering happen?** At two times, in two places, both plain code.
 - *Plan time, worker:* `select.where`, `exclude`, `dedup` and **fit** over catalog records at the pinned commit
   decide the **data pool**. Fit uses `technical.arrays[]`: the coarsest level's footprint (`patch × max(levels)`)
-  must fit the array's `shape` (its smallest reported shape when `shape_varies`); `imaging.voxel_size_nm` must be
-  known, because the box is in physical units; with `patch.c: all` every raw array in the pool must have the same
-  channel count, with `patch.c: 1` one channel is drawn per crop (the crops-spec rule) and mixed pools are fine. A
+  must fit the array's `shape` (its smallest reported shape when `shape_varies`); the box is in physical units, so
+  `imaging.voxel_size_nm` is used where the record has it and **assumed** per missing axis from a table of catalog
+  medians by modality (`mia_buffers/assume.py`; the plan row names the assumed axes;
+  `sampling.assume_voxel_size: false` rejects such records instead). Channel policy: with `patch.c: all` every raw
+  array in the pool must have the same channel count; `patch.c: 1` and `patch.c: 3` always resolve, through a
+  per-record **channel recipe** chosen from the array's channel count and modality (gray: `channel 0` | `mean` |
+  `luminance`; rgb: `replicate` | `rgb` | `additive`) that the tensorizer applies; any other count needs at least
+  that many channels and takes the first ones. Both tables are the static stand-in for the ingestion agent (§9.8). A
   record with several `modality` values is grouped under its first for weighting and the plan comment says so.
   Every record appears in `plan.json` with the rule that admitted or excluded it. No agent.
 - *Serving time, `buffer-api`:* the spec's `weighting` (temperature over the `over` hierarchy) chooses the volume;
@@ -245,12 +252,14 @@ never taken from the spec.
 1. **Fields the record schema lacks** for `select.where`: `sample_type`, `content_hash` for `dedup`,
    `annotations.encoding` (lives in `technical.arrays[]`), `auto-predict` vs the schema's `automatic`.
    `min_size_voxels` is now the per-array fit rule and should be stated per array, not per record.
-2. **Voxel size must be known** for a world-coordinate bbox. CEM-MitoLab has `voxel_size_nm: null`, so it cannot
-   be served to MuViT in nm. Either the enricher recovers pixel sizes per source, or the spec admits pixel-unit
-   bboxes flagged in `meta` (a different model input; your call).
-3. **Channels.** MuViT fixes `in_channels` per model; the three example datasets are 1-channel EM, RGB H&E and
-   3-channel fluorescence. The spec needs `patch.c: 1` (one channel per crop) for a mixed pool, or one buffer per
-   channel count. Say which.
+2. **Voxel size must be known** for a world-coordinate bbox. *Resolved (lead, v0.5):* guess it. The harvesting agent
+   infers a plausible value, with a range, from what it knows (membrane thickness, mitochondrion size, modality) and
+   checks it against the pixels (xz cross-sections for the z step). Until then a table of catalog medians by
+   modality fills missing axes and the plan marks them assumed (§2, §9.8). CEM-MitoLab is served at an assumed 8 nm.
+3. **Channels.** *Resolved (lead, v0.5):* the ingestion agent answers, per dataset, "how is a single raw sample made
+   from this data" and "how is an RGB sample made" (take a channel, mix, use the RGB planes, replicate gray), and
+   the index grows as the list of questions grows. Until then the recipe comes from channel count and modality
+   (§2); `patch.c: 1` or `3` is therefore always satisfiable and a mixed pool is fine.
 4. **bbox unit is model-relevant** (rotary embeddings run on it). The demo uses nm; the example spec says um. The
    default here is nm.
 5. **`label_axis: l`** is dropped: L is MuViT's level axis and labels are a separate `label` key. Remove the field
@@ -273,6 +282,26 @@ never taken from the spec.
 6. **Staged axis order:** **NGFF canonical, axis map in the reader**, or match the lead's existing `x y z` crops.
 7. **Direct serving from pyramidal raw formats** (OME-Zarr, N5 multiscale, pyramidal TIFF): **link when the levels
    match, otherwise stage**; a snippet-backed direct path returns only if staging volume becomes the bottleneck.
+8. **Metadata gaps and the ingestion agent (follow-up).** The pipeline needs a fixed list of facts per raw array;
+   the catalog answers some and the rest are guessed. Today the guesses are baked-in tables (`mia_buffers/assume.py`,
+   medians over the records that document the fact at `ab6a013d`). The lead's direction is an agent that runs when a
+   dataset is indexed: it lists what is missing, infers each item from context and simple detective work, states a
+   range or confidence, and checks inferences against the pixels; the index is updated as the question list grows.
+   The natural host is the per-record match step mia-data already runs (it has the record, the file headers and a
+   sandbox), writing an `evaluation` block beside the binding. **Replace the tables with that step; keep the tables
+   as its fallback.** Gap list at `ab6a013d` (1,940 records):
+
+   | fact | catalog source | missing | static stand-in now | agent later |
+   |---|---|---|---|---|
+   | dimensionality | `imaging.dimensionality` | 0 | — | — |
+   | array axes and shape | `technical.arrays[]` | 259 | rejected: "no array shape" | read the files |
+   | voxel size y, x | `imaging.voxel_size_nm` | 1,161 | median by modality (table) | infer from content, range, pixel check |
+   | voxel size z (3D records) | `imaging.voxel_size_nm.z` | 260 of 655 | median z step by modality | xz cross-section check |
+   | channel count | `technical.arrays[].axes` c or s | 259 | treated as 1 | read the files |
+   | channel meaning (which stain, RGB or not) | not in the schema | all 761 multi-channel | recipe by count and modality | per-dataset gray and rgb recipes |
+   | intensity range | `technical.arrays[].dtype` + per-crop percentiles | 0 | percentile normalisation | per-dataset normalisation |
+   | label encoding | `technical.arrays[].encoding` | sparse | pass-through int32 | per-layer encoding |
+   | licence | `license.spdx` | 3 | gated by `allow_unknown` | — |
 
 ## 10. Build order
 
