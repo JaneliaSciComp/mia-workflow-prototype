@@ -1,13 +1,14 @@
 # MIA training buffers: spec → datasets → raw cache → multi-resolution crops served on demand — Spec
 
-**Status:** draft v0.5 · 2026-10-23 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
+**Status:** draft v0.6 · 2026-10-24 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
 shards into a disk window; v0.2 (superseded) emitted miao configs over an OME-Zarr corpus; v0.3 (commit `79e6cb8`)
 followed the ML lead's flow: download raw data, serve crops directly from it where chunking allows, stage to
 OME-Zarr where it does not, one service chooses every crop. v0.4 validates v0.3 against the lead's MuViT demo
 notebook and three diverse 2D datasets (§11): a crop becomes a multi-resolution stack with world-coordinate boxes,
 staging to an NGFF pyramid becomes the one serving path for v1, and the batch contract follows MuViT, not miao. v0.5
 takes the lead's answers to §8.2 and §8.3: missing metadata is guessed, for now by baked-in tables (§2, §9.8), later
-by an ingestion agent. The v0.4 diagrams are at [MIA training buffers v0.4](https://claude.ai/artifact/Nqk7xz3jQajtPAFqw1296i). The
+by an ingestion agent. v0.6 records milestone 3 as built (§3: download inside the stage job, the manual drop through
+`files.json`; §9.1: the issue repo). The v0.4 diagrams are at [MIA training buffers v0.4](https://claude.ai/artifact/Nqk7xz3jQajtPAFqw1296i). The
 v0.1 diagrams at [MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ9EWApz6oj) are stale except
 figures 1, 2 and 6 in outline.
 **Inputs:** the spec instance
@@ -21,8 +22,8 @@ storage and metadata (§11); [AI-HHMI/miao](https://github.com/AI-HHMI/miao) as 
 normalisation only; the catalog record schema (`technical.arrays[]` with formats, axes, shapes, compression);
 mia-data's snippet interface (crops-spec §5.2), whose `Array.access ∈ {chunk, plane, file}` drives the stage job's
 read strategy.
-**Repos:** this repo (new package `mia_buffers/`, new service `buffer-api`, client library), a buffer issue repo
-(working name `JaneliaSciComp/mia-workflow-buffers`), `JaneliaSciComp/mia-workflow-data` (dataset issues → approved
+**Repos:** this repo (new package `mia_buffers/`, new service `buffer-api`, client library), the buffer issue repo
+`JaneliaSciComp/mia-buffers` (one issue per buffer spec), `JaneliaSciComp/mia-workflow-data` (dataset issues → approved
 reader bindings), `JaneliaSciComp/mia-snippets` (reader snippets, harness), `AI-HHMI/mia-agentic-search` (catalog,
 read-only).
 
@@ -75,8 +76,9 @@ One `buffer:*` label at a time, set by the worker. Humans add `buffer:go`, `buff
 | `retired` | staged pyramids deleted; raw cache entries released (deleted when no live buffer references them) | `buffer:go` starts a new round |
 | `needs-human` | the comment says why | `buffer:go` |
 
-Signal dedup, submit-once-by-key jobs, continue-as-new, the poller and the record-vs-live-view split are v0.1 §9
-unchanged: Temporal holds the lifecycle and job ids, the filesystem holds the caches, the service holds sampling
+`ready.min_fraction` and `sourcing.dataset_timeout_days` are spec fields with those defaults; the servable fraction of a
+group counts datasets. Signal dedup, submit-once-by-key jobs, continue-as-new, the poller and the record-vs-live-view
+split are v0.1 §9 unchanged: Temporal holds the lifecycle and job ids, the filesystem holds the caches, the service holds sampling
 state and consumers.
 
 ## 2. The four questions
@@ -151,6 +153,15 @@ For each dataset in the data pool, three independent activities run under the on
    Google Drive folder, for instance), the dataset enters a `needs-human` sub-state whose comment lists the files
    to place under `raw_root/<record-id>/incoming/`; the worker verifies them against the binding's file list and
    sizes, moves them into place and writes the same `files.json` with `source: manual`.
+   *As built in milestone 3 (2026-10-24):* download runs inside the stage job, which has the binding's hosts and the
+   raw cache read-write (the reader snippets are reviewed code, as in mia-data's trusted crop job); a separate
+   download job returns when datasets must stream over several jobs. A dataset is sent to the drop path when a URL's
+   host is not in the csub policy or the binding uses `manual://<record>/<name>` URLs; the comment lists
+   `incoming/<name>` ← url pairs (the name is the URL's file name when it is unique and plain, else `file-<i>`); the
+   worker accepts regular, non-empty files, records `{size, sha256}` as the validators, keys the file as the
+   harness does and lists it in `files.json`; the harness resolves a URL through `files.json` whenever its host is
+   not allowed to the job, so the stage job of a dropped dataset runs with no network at all. The binding's own file
+   sizes are not checked (bindings carry none).
 3. **Staging.** `harness stage <binding> --levels <spec levels> --patch <patch>` opens every array through the
    snippet with the cache mounted read-only and writes one NGFF pyramid per volume at `staged_root/…`:
    zarr v3, NGFF 0.5 (`ome` attributes key, the layout the demo notebook reads), a `raw` group and one `label/<name>`
@@ -232,10 +243,12 @@ way, so a run can be reproduced from the ledger alone.
    `test-tensorizer` (§4), and a built-in OME-Zarr pyramid reader with an axis map. Reader snippets are
    unchanged. autodev's `snippets` deployment accepts tensorizer issues: its prompt names both directories and
    `required_checks` gains `mia-buffers/tensors`.
-4. **`mia_buffers/`**: `specmap`, `select`, `plan` (fit, weights, split keys), activities (binding, download or
-   manual verify, stage, register volumes, service calls), `MiaBuffer`, `MiaBufferPoll`, CLI (`mia-buffers plan
-   <spec>` offline; `mia-buffers source <dataset>` drives one dataset by hand), the `buffer-api` service, the
-   client library.
+4. **`mia_buffers/`**: `specmap`, `select`, `plan` (fit, weights, split keys), `config` (mia_buffers.yaml: mia-data's
+   sections plus `raw_root`, `staged_root`, `service`, `sourcing`), `models`, `jobspec` (the stage job, the catalog
+   snapshot), `drop` (manual-drop names, the cache key, `files.json`), `activities` (admit, plan, bindings, stage
+   job, drop verification, registration, comments), `poll`, `workflows` (`MiaBuffer`, `MiaBufferPoll`), `status`
+   (comments), CLI (`mia-buffers plan <spec>` offline; `serve`, `register`; `worker`, `schedule`, `init-labels`),
+   the `buffer-api` service, the client library. `mia-buffers source <dataset>` (one dataset by hand) is not built.
 5. **`mia_ops`**: app kinds `mia-buffers` (worker + broker; caches read-write) and `buffer-api` (listening
    service; caches read-only).
 
@@ -272,7 +285,7 @@ never taken from the spec.
 
 ## 9. Open questions (defaults in bold)
 
-1. **Where buffer issues live:** **new repo**, or a label family in mia-workflow-data.
+1. **Where buffer issues live:** resolved 2026-10-24: the new repo `JaneliaSciComp/mia-buffers`.
 2. **Train overlap:** **unlimited, coverage reported**; a least-recently-covered preference at level 0 if a run
    shows it matters.
 3. **Service placement and crop workers for remote mode:** **service host pool, cluster-internal, self-identified

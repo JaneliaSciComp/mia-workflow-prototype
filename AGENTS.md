@@ -2,7 +2,7 @@
 
 Three Python packages: `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
 both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
-buffers: offline planner, the buffer-api service and its client dataset). `mia_data` imports from `autodev`, `mia_buffers` from both, never the reverse. Full guide: [`docs/development.md`](docs/development.md).
+buffers: the `MiaBuffer` workflow, the offline planner, the buffer-api service and its client dataset). `mia_data` imports from `autodev`, `mia_buffers` from both, never the reverse. Full guide: [`docs/development.md`](docs/development.md).
 
 ## Before you push
 

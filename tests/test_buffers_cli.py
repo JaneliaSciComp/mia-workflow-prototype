@@ -88,3 +88,41 @@ def test_unreadable_yaml_becomes_a_record(tmp_path):
     loaded = dict(load_records(tmp_path))
     assert loaded["datasets/broken.yaml"]["id"] == "broken" and "_unreadable" in loaded["datasets/broken.yaml"]
     assert loaded["datasets/scalar.yaml"]["_unreadable"].startswith("not a mapping")
+
+
+def test_help_lists_commands(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+    out = capsys.readouterr().out
+    for command in ("plan", "serve", "register", "worker", "schedule", "init-labels"):
+        assert command in out
+
+
+def test_init_labels_creates_buffer_labels(tmp_path, monkeypatch, capsys):
+    from test_buffers_config import make_cfg
+
+    from mia_buffers import cli
+
+    created = []
+
+    class FakeGitHub:
+        def __init__(self, repo):
+            self.repo = repo
+
+        async def ensure_label(self, name, color, description=""):
+            created.append((self.repo, name, color))
+            return True
+
+        async def aclose(self):
+            pass
+
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda path=None: cfg)
+    monkeypatch.setattr(cli, "_gh", lambda cfg_, repo, tokens=None: FakeGitHub(repo))
+    assert main(["init-labels"]) == 0
+    names = [name for _, name, _ in created]
+    assert len(names) == 10 and {"buffer:new", "buffer:ready", "buffer:go", "buffer:approve"} <= set(names)
+    assert all(repo == "o/buffers" for repo, _, _ in created) and "created buffer:go" in capsys.readouterr().out

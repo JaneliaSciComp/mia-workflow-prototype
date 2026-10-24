@@ -17,7 +17,7 @@ Run all of these before pushing. CI runs the last three in this order on every p
 |---|---|
 | `pixi run fmt` | formats with ruff and applies its safe autofixes |
 | `pixi run lint` | `ruff check` plus a formatting check; fails on drift |
-| `pixi run typecheck` | mypy over `autodev/` and `mia_data/` with `check_untyped_defs` |
+| `pixi run typecheck` | mypy over `autodev/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
 Configuration for all four is in `pyproject.toml`. Keep them clean rather than suppressing: there are no
@@ -29,7 +29,7 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 |---|---|
 | `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
-| `mia_buffers/` | training buffers: `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `notes/specs/2026-10-21-training-buffers.md`; serving walkthrough below |
+| `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `notes/specs/2026-10-21-training-buffers.md`; walkthroughs below |
 | `tests/` | one `test_<package>_<module>.py` per module; `autodev_helpers.py` and `mia_helpers.py` build configs and fake repos; `fixtures/` holds recorded workflow histories and sample catalog data |
 | `docs/` | setup guides, the mia-data workflow overview, this page |
 | `notes/` | design: `mia-crops-spec.md` (the mia-data spec), `autodev-runbook.md` (operations and known gaps), `agentic-dev-infrastructure.md` (why), `specs/` and `plans/` (dated, historical; they describe the code as it was when written) |
@@ -91,7 +91,7 @@ them on deploy. The autodev bot opens PRs here too; review them like any other.
 
 ## Serving a buffer (milestone 2, local mode)
 
-Everything here is hand-driven; the worker of milestone 3 will run the same steps from a buffer issue.
+Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the same steps from a buffer issue.
 
 1. **Plan.** `mia-buffers plan notes/specs/buffer-2d-gray.example.yaml --catalog-dir <catalog checkout> --json plan.json`
    writes the data pool with a weight, a voxel size (documented or assumed) and a channel recipe per record.
@@ -118,3 +118,39 @@ Everything here is hand-driven; the worker of milestone 3 will run the same step
    unchanged. Train is a stream of fresh crops (`idx` is ignored, `len` is `n_samples`); val and test replay a
    frozen list that is identical every epoch. Each DataLoader worker registers its own consumer.
    `GET /buffers/<id>/status` shows servable volumes per split, draws per volume and consumers.
+
+## Running a buffer from an issue (milestone 3)
+
+The deployment reads `mia_buffers.yaml` (copy the example; `buffers_repo` is the issue repo, `storage_root` is
+mia-data's, `raw_root` may be mia-data's `<work_root>/_cache` so downloads are shared). `mia.yaml` lists it as
+`app: mia-buffers`; by hand: `mia-buffers init-labels`, `mia-buffers serve`, `mia-buffers worker`,
+`mia-buffers schedule apply`.
+
+1. **The issue.** Its body holds the spec in exactly one ```` ```yaml ```` fence; the title is free. A human adds
+   `buffer:go`. The poller (every `temporal.poll_minutes`) turns the label into a signal and removes it; only a
+   person with write access counts.
+2. **Planning.** The worker pins the round (`state_dir/rounds/<round>/`: `spec.yaml`, `pins.json`), archives the
+   catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan; `plan.md` and `plan.json` land
+   in the round directory and in the browsable `work_root/issue-<n>/<round>/`. The plan is posted (pool table,
+   cut at 60k characters) and the issue moves to `buffer:plan-review`; an invalid plan, or no `tensorizers/<name>`
+   in the harness checkout, goes to `buffer:needs-human`.
+3. **Approval.** `buffer:approve` newer than the plan comment starts sourcing; an older one is refused with a
+   comment, and a new `buffer:go` (after editing the spec) plans again.
+4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<issue>-e<event>`). Per dataset, in
+   parallel (`sourcing.parallel` stage jobs at a time): the binding is read from
+   `<storage_root>/<dataset folder>/binding.yaml`; a stage job runs the harness's `stage` with the raw cache
+   `raw_root/<record>/` mounted read-write and the binding's hosts allowed, writing the pyramid to
+   `staged_root/<levels key>/<record>/` (`p256-l1-2-4` for patch 256, levels 1,2,4); then every volume is
+   registered. A dataset whose hosts are not allowed to jobs, or whose binding uses `manual://` URLs, waits
+   instead: the issue gets a comment listing `incoming/<name>` ← url pairs, a human places the files under
+   `raw_root/<record>/incoming/`, the poller notices and the worker verifies them (regular, non-empty files),
+   moves them into the cache under the harness's key and lists them in `raw_root/<record>/files.json`, which the
+   harness reads instead of a HEAD request. Each dataset ends `servable` or `failed`, with a comment.
+5. **Ready.** When every weighting group's servable share reaches the spec's `ready.min_fraction` (default 1.0),
+   the issue moves to `buffer:ready` with the buffer id and the `BufferDataset` cell to paste; the remaining
+   datasets keep sourcing and join as they finish. If the threshold is not met after
+   `sourcing.dataset_timeout_days` (default 14) the issue goes `buffer:needs-human` naming the groups below it.
+
+Not in milestone 3: bindings are placed by hand under `storage_root` until mia-data publishes them (milestone 4,
+with `data:go` for unmatched datasets); no tensorizer develop path; `idle` and `retired` are labels only
+(milestone 5).
