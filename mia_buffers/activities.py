@@ -195,7 +195,7 @@ class Activities:
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return self._pins(round_dir.name)
-        body = (await self.gh_issues.get_issue(issue)).get("body") or ""
+        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
         fences = SPEC_FENCE.findall(body)
         if len(fences) != 1:
             raise ValueError(

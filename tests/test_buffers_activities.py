@@ -317,3 +317,10 @@ async def test_refuse_label_removes_and_explains(acts):
 async def test_limits_come_from_config(acts):
     limits = await acts.limits()
     assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")
+
+
+async def test_admit_accepts_crlf_bodies(acts):
+    acts.gh.issues[7]["body"] = issue_body().replace("\n", "\r\n")  # GitHub's web editor saves CRLF
+    pins = await admitted(acts)
+    assert (acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml").read_text() == spec_text()
+    assert pins.catalog_ref == REF
