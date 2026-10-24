@@ -1,0 +1,565 @@
+"""MiaBuffer on Temporal's time-skipping server with every activity mocked, the poller, and a replay test."""
+
+import asyncio
+import contextlib
+import json
+import os
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+from temporalio import activity
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import WorkflowHistory
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+from test_buffers_config import make_cfg
+
+from mia_buffers import workflows
+from mia_buffers.activities import Activities
+from mia_buffers.models import (
+    BindingInfo,
+    BufferPins,
+    BufferState,
+    DatasetPlan,
+    DropResult,
+    PlanResult,
+    RegisterResult,
+    SourcingLimits,
+    StageJobArgs,
+    StageResult,
+)
+from mia_buffers.poll import run_poll
+from mia_buffers.workflows import MiaBuffer
+from mia_data.models import JobDone, LabelEvent
+
+PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
+PLAN = PlanResult(
+    True,
+    [],
+    [DatasetPlan("u937", "confocal", 0.6, False), DatasetPlan("bcss", "histology-WSI", 0.4, True)],
+    10,
+    levels=[1, 2, 4],
+    patch=256,
+)
+ONE_GROUP = PlanResult(
+    True,
+    [],
+    [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "TEM", 0.5, True)],
+    10,
+    min_fraction=0.5,
+    levels=[1, 2, 4],
+    patch=256,
+)
+
+
+@pytest.fixture(scope="session")
+async def env():
+    e = await WorkflowEnvironment.start_time_skipping()
+    yield e
+    await e.shutdown()
+
+
+def ev(kind, eid, at="2026-01-01T00:00:00Z"):
+    return LabelEvent(kind, eid, "alice", at)
+
+
+def shift(iso, seconds):
+    return (datetime.fromisoformat(iso) + timedelta(seconds=seconds)).isoformat()
+
+
+class Mocks:
+    def __init__(
+        self, plan=PLAN, bindings=None, stage=None, drops=None, states=None, refuse=None, gate=None, gate_on=""
+    ):
+        self.calls: list[tuple[str, tuple]] = []
+        self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
+        self.drops, self.states, self.refuse = drops or {}, states or {}, refuse or {}
+        self.gate, self.gate_on = gate, gate_on
+
+    def acts(self):
+        rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
+
+        @activity.defn(name="admit")
+        async def admit(issue: int, event_id: str) -> BufferPins:
+            rec("admit", event_id)
+            return PINS
+
+        @activity.defn(name="plan")
+        async def plan(issue: int, round_id: str, pins: BufferPins) -> PlanResult:
+            rec("plan", round_id)
+            return self.plan
+
+        @activity.defn(name="limits")
+        async def limits() -> SourcingLimits:
+            rec("limits")
+            return SourcingLimits(2, 120, "http://svc:8765")
+
+        @activity.defn(name="set_stage")
+        async def set_stage(
+            issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
+        ) -> None:
+            rec("set_stage", stage, detail, extra)
+
+        @activity.defn(name="comment")
+        async def comment(issue: int, body: str, marker: str) -> str | None:
+            rec("comment", body, marker)
+            return None
+
+        @activity.defn(name="comment_plan")
+        async def comment_plan(issue: int, round_id: str) -> None:
+            rec("comment_plan", round_id)
+
+        @activity.defn(name="comment_drop")
+        async def comment_drop(issue: int, round_id: str, record: str, missing: list[str]) -> None:
+            rec("comment_drop", record, missing)
+
+        @activity.defn(name="refuse_label")
+        async def refuse_label(issue: int, label: str, reason: str, event_id: str) -> None:
+            rec("refuse_label", label, reason, event_id)
+
+        @activity.defn(name="read_binding")
+        async def read_binding(round_id: str, record: str) -> BindingInfo:
+            rec("read_binding", record)
+            manual = next(d.manual for d in self.plan.pool if d.record == record)
+            default = (
+                BindingInfo(True, f"/s/{record}.yaml", "bh", [], [[f"manual://{record}/a.zip", "a.zip"]])
+                if manual
+                else BindingInfo(True, f"/s/{record}.yaml", "bh", ["zenodo.org"])
+            )
+            return self.bindings.get(record, default)
+
+        @activity.defn(name="prepare_stage")
+        async def prepare_stage(issue: int, round_id: str, record: str) -> str:
+            rec("prepare_stage", record)
+            return f"/w/{round_id}/stage-{record}"
+
+        @activity.defn(name="submit")
+        async def submit(key: str, args: StageJobArgs) -> str:
+            rec("submit", key, args)
+            return f"job-{key}"
+
+        @activity.defn(name="read_stage")
+        async def read_stage(round_id: str, record: str) -> StageResult:
+            rec("read_stage", record)
+            return self.stage.get(record, StageResult(True, 1))
+
+        @activity.defn(name="verify_drop")
+        async def verify_drop(round_id: str, record: str) -> DropResult:
+            rec("verify_drop", record)
+            queue = self.drops.get(record)
+            return queue.pop(0) if queue else DropResult(True, ["a.zip"])
+
+        @activity.defn(name="create_buffer")
+        async def create_buffer(round_id: str, buffer_id: str) -> None:
+            rec("create_buffer", buffer_id)
+
+        @activity.defn(name="register_dataset")
+        async def register_dataset(round_id: str, record: str, buffer_id: str) -> RegisterResult:
+            rec("register_dataset", record, buffer_id)
+            if record in self.refuse:
+                return RegisterResult(refused={f"{record}/v0.zarr": self.refuse[record]})
+            return RegisterResult([f"{record}/v0.zarr"])
+
+        return [
+            admit,
+            plan,
+            limits,
+            set_stage,
+            comment,
+            comment_plan,
+            comment_drop,
+            refuse_label,
+            read_binding,
+            prepare_stage,
+            submit,
+            read_stage,
+            verify_drop,
+            create_buffer,
+            register_dataset,
+        ]
+
+    def await_act(self):
+        @activity.defn(name="await_job")
+        async def await_job(job_id: str, ws: str) -> JobDone:
+            self.calls.append(("await", (job_id, ws)))
+            if self.gate and self.gate_on in ws:
+                await self.gate.wait()
+            state, code = self.states.get(ws.rsplit("/", 1)[1], ("DONE", 0))  # by stage-<record>
+            return JobDone(job_id, state, code)
+
+        return [await_job]
+
+    def names(self):
+        return [c[0] for c in self.calls]
+
+    def of(self, name):
+        return [c[1] for c in self.calls if c[0] == name]
+
+    @property
+    def stages(self):
+        return [a[0] for a in self.of("set_stage")]
+
+
+async def until(cond, timeout=10.0, m=None):
+    for _ in range(int(timeout / 0.02)):
+        if cond():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out; calls so far: {m.calls if m else '?'}")
+
+
+async def idle(h, m, stage):
+    """Wait until set_stage(stage) ran and the workflow is blocked again."""
+    await until(lambda: m.stages[-1:] == [stage])
+    for _ in range(500):
+        if (await h.fetch_history()).events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("workflow never went idle")
+
+
+@contextlib.asynccontextmanager
+async def started(env, m, first=None, runner=None):
+    tq = f"tq-{uuid.uuid4()}"
+    kw = {"workflow_runner": runner} if runner else {}
+    async with (
+        Worker(env.client, task_queue=tq, workflows=[MiaBuffer], activities=m.acts(), **kw),
+        Worker(env.client, task_queue=tq + "-await", activities=m.await_act()),
+    ):
+        h0 = await env.client.start_workflow(
+            MiaBuffer.run,
+            BufferState(7),
+            id=f"wf-{uuid.uuid4()}",
+            task_queue=tq,
+            start_signal="go",
+            start_signal_args=[first or ev("go", "11")],
+        )
+        h = env.client.get_workflow_handle(h0.id)  # follows continue-as-new
+        h.first_run_id = h0.run_id
+        try:
+            yield h
+        finally:
+            await h.terminate()
+
+
+async def approve(h, m, eid="12", dt=1):
+    await idle(h, m, "plan-review")
+    planned_at = (await h.query(MiaBuffer.status)).planned_at
+    await h.signal(MiaBuffer.approve, ev("approve", eid, shift(planned_at, dt)))
+
+
+def dataset(state, record):
+    return next(d for d in state.datasets if d.record == record)
+
+
+async def test_go_plan_approve_sourcing_ready(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("register_dataset") and m.of("comment_drop"))
+        state = await h.query(MiaBuffer.status)
+        assert dataset(state, "u937").status == "servable" and dataset(state, "bcss").status == "waiting-drop"
+        assert m.stages == ["planning", "plan-review", "sourcing"]  # bcss's group is empty: not ready yet
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
+    assert m.of("create_buffer") == [("i7-e11",)] and state.buffer_id == "i7-e11" and state.ready
+    assert sorted(a[0] for a in m.of("register_dataset")) == ["bcss", "u937"]
+    assert [a[0] for a in m.of("comment_drop")] == ["bcss"] and m.of("verify_drop") == [("bcss",)]
+    keys = sorted(a[0] for a in m.of("submit"))
+    assert len(keys) == 2 and all(k.startswith("buf-7-i7-e11-stage-") for k in keys)
+    args = m.of("submit")[0][1]
+    assert (args.levels, args.patch, args.pins) == ([1, 2, 4], 256, PINS) and args.out == ""
+    assert {d.record: d.status for d in state.datasets} == {"u937": "servable", "bcss": "servable"}
+    ready = m.of("set_stage")[-1]
+    assert "BufferDataset(" in ready[2] and "i7-e11" in ready[2] and "http://svc:8765" in ready[2]
+    assert not m.of("refuse_label")
+
+
+async def test_progressive_ready_with_lowered_fraction(env):
+    m = Mocks(plan=ONE_GROUP, gate=asyncio.Event(), gate_on="stage-b")
+    async with started(env, m) as h:
+        await approve(h, m)
+        await h.signal(MiaBuffer.dropped, "b")
+        await idle(h, m, "ready")  # a alone is half the group: ready
+        state = await h.query(MiaBuffer.status)
+        assert dataset(state, "b").status == "staging" and dataset(state, "a").status == "servable"
+        m.gate.set()
+        await until(lambda: len(m.of("register_dataset")) == 2)
+        await until(lambda: any("`b` is servable" in a[0] for a in m.of("comment")))
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
+    assert dataset(state, "b").status == "servable"
+
+
+async def test_invalid_plan_is_needs_human(env):
+    m = Mocks(plan=PlanResult(False, ["patch.c all: channel counts differ"], [], 10))
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.stages == ["planning", "needs-human"] and m.of("comment_plan") == [("i7-e11",)]
+    assert "channel counts differ" in m.of("set_stage")[-1][1] and not m.of("create_buffer")
+
+
+async def test_redelivered_go_is_ignored(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.go, ev("go", "11"))
+        await h.signal(MiaBuffer.go, ev("go", "12"))  # a new go: the spec was edited; plan again
+        await until(lambda: len(m.of("admit")) == 2)
+        await idle(h, m, "plan-review")
+    assert m.of("admit") == [("11",), ("12",)] and not m.of("refuse_label")
+
+
+async def test_stale_approve_is_refused(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve(h, m, eid="12", dt=-60)
+        await until(lambda: m.of("refuse_label"))
+        await idle(h, m, "plan-review")
+    ((label, reason, eid),) = m.of("refuse_label")
+    assert (label, eid) == ("buffer:approve", "12") and "older" in reason and m.stages[-1] == "plan-review"
+
+
+async def test_approve_outside_plan_review_is_refused(env):
+    m = Mocks(plan=PlanResult(False, ["bad"], [], 1))
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+        await h.signal(MiaBuffer.approve, ev("approve", "12"))
+        await until(lambda: m.of("refuse_label"))
+    assert "plan-review" in m.of("refuse_label")[0][1]
+
+
+async def test_go_while_sourcing_is_refused_busy(env):
+    m = Mocks(plan=ONE_GROUP, gate=asyncio.Event(), gate_on="stage-a")
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("await"))
+        await h.signal(MiaBuffer.go, ev("go", "13"))  # "12" is the approve's event id: a reused id is a redelivery
+        m.gate.set()
+        await h.signal(MiaBuffer.dropped, "b")
+        await until(lambda: m.of("refuse_label"), m=m)
+    ((label, reason, eid),) = m.of("refuse_label")
+    assert (label, eid) == ("buffer:go", "13") and "busy" in reason
+
+
+async def test_stage_report_not_ok_fails_dataset_without_registering(env):
+    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only, stage={"u937": StageResult(False, 0, ["raw 0: voxel size unknown"])})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert not m.of("register_dataset") and dataset(state, "u937").status == "failed"
+    assert "voxel size unknown" in dataset(state, "u937").reason
+    assert "no weighting group reached" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
+
+
+async def test_job_exit_failure_fails_dataset(env):
+    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only, states={"stage-u937": ("EXIT", 1)})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and "exit" in dataset(state, "u937").reason.lower()
+    assert not m.of("read_stage")
+
+
+async def test_missing_binding_fails_dataset(env):
+    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+    m = Mocks(
+        plan=only, bindings={"u937": BindingInfo(False, errors=["no binding at /x: the dataset is not data:done"])}
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and "not data:done" in dataset(state, "u937").reason
+    assert len([a for a in m.of("comment") if "u937" in a[0]]) == 1 and not m.of("prepare_stage")
+
+
+async def test_drop_with_missing_files_keeps_waiting(env):
+    only = PlanResult(True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only, drops={"bcss": [DropResult(False, [], ["a.zip"]), DropResult(True, ["a.zip"])]})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"))
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await until(lambda: len(m.of("comment_drop")) == 2)
+        state = await h.query(MiaBuffer.status)
+        assert dataset(state, "bcss").status == "waiting-drop" and m.of("comment_drop")[1] == ("bcss", ["a.zip"])
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+    assert m.of("verify_drop") == [("bcss",), ("bcss",)] and m.stages[-1] == "ready"
+
+
+async def test_timeout_without_ready_is_needs_human(env):
+    only = PlanResult(
+        True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64, timeout_days=14
+    )
+    m = Mocks(plan=only)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"))
+        await env.sleep(timedelta(days=15))  # the test server skips time only when asked
+        await idle(h, m, "needs-human")
+    detail = m.of("set_stage")[-1][1]
+    assert "14" in detail and "histology-WSI" in detail and not m.of("verify_drop")
+
+
+async def test_timeout_after_ready_changes_nothing(env):
+    m = Mocks(plan=ONE_GROUP)  # a and b share one group with min_fraction 0.5: a alone makes the buffer ready
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await env.sleep(timedelta(days=15))  # b is still waiting for its drop when the timer fires
+        await asyncio.sleep(0.5)
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready"] and state.ready
+    assert dataset(state, "b").status == "waiting-drop" and not m.of("verify_drop")
+
+
+async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
+    from temporalio import workflow
+
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: workflow.info().continued_run_id is None)  # once
+    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only)
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await until(lambda: m.stages[-1:] == ["plan-review"])
+        for _ in range(500):
+            if (await h.describe()).run_id != h.first_run_id:
+                break
+            await asyncio.sleep(0.02)
+        await approve(h, m)
+        await idle(h, m, "ready")
+    assert (await h.describe()).run_id != h.first_run_id
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready"] and len(m.of("admit")) == 1
+
+
+# --- the poller -------------------------------------------------------------------------------
+
+
+class PollGH:
+    def __init__(self, issues, events=None, perms=None):
+        self.issues, self.events, self.perms = issues, events or {}, perms or {}
+        self.comments, self.removed = {}, []
+
+    def tokens(self):
+        return "tok"
+
+    async def list_issues(self, labels=None, state=None, **_):
+        return [i for i in self.issues.values() if not labels or labels in {x["name"] for x in i["labels"]}]
+
+    async def label_event(self, n, label):
+        return self.events[(n, label)]
+
+    async def permission(self, login):
+        return self.perms.get(login, "none")
+
+    async def remove_label(self, n, name):
+        self.removed.append((n, name))
+        self.issues[n]["labels"] = [x for x in self.issues[n]["labels"] if x["name"] != name]
+
+    async def issue_comments(self, n):
+        return self.comments.get(n, [])
+
+    async def comment(self, n, body):
+        self.comments.setdefault(n, []).append({"body": body, "user": {"login": "bot"}, "html_url": "u"})
+        return self.comments[n][-1]
+
+
+class FakeClient:
+    def __init__(self, states):
+        self.states, self.started, self.signals = states, [], []
+
+    async def start_workflow(self, wf, arg, **kw):
+        self.started.append((wf, arg, kw))
+
+    def get_workflow_handle(self, wid):
+        client = self
+
+        class Handle:
+            async def signal(self, name, arg):
+                client.signals.append((wid, name, arg))
+
+            async def query(self, name, result_type=None):
+                return client.states[wid]
+
+        return Handle()
+
+
+def issue(n, *labels):
+    return {"number": n, "body": "", "labels": [{"name": x} for x in labels]}
+
+
+async def test_poll_delivers_labels_and_drops(tmp_path):
+    cfg = make_cfg(tmp_path)
+    at = "2026-10-24T10:00:00Z"
+    gh = PollGH(
+        issues={1: issue(1, "buffer:new", "buffer:go"), 2: issue(2, "buffer:sourcing"), 3: issue(3, "buffer:ready")},
+        events={(1, "buffer:go"): ("alice", "501", at)},
+        perms={"alice": "write"},
+    )
+    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
+    waiting.datasets = [
+        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop"),
+        workflows.DatasetStatus("u937", "confocal", False, "servable"),
+    ]
+    ready = BufferState(
+        3, round_id="i3-e1", stage="ready", datasets=[workflows.DatasetStatus("x", "g", True, "waiting-drop")]
+    )
+    client = FakeClient({cfg.workflow_id(2): waiting, cfg.workflow_id(3): ready})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+    (cfg.paths.raw_root / "bcss" / "incoming").mkdir(parents=True)
+    (cfg.paths.raw_root / "bcss" / "incoming" / "a.zip").write_bytes(b"z")
+    (cfg.paths.raw_root / "x" / "incoming").mkdir(parents=True)  # empty: nothing to signal
+    done = await run_poll(acts)
+    assert done == ["go #1", "dropped #2 bcss"]
+    ((wf, state, kw),) = client.started
+    assert wf == "MiaBuffer" and state == BufferState(1) and kw["start_signal"] == "go"
+    assert kw["start_signal_args"] == [LabelEvent("go", "501", "alice", at)] and kw["id"] == cfg.workflow_id(1)
+    assert gh.removed == [(1, "buffer:go")] and client.signals == [(cfg.workflow_id(2), "dropped", "bcss")]
+    assert await run_poll(acts) == []  # nothing new: the drop was signalled once
+    (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
+    assert await run_poll(acts) == ["dropped #2 bcss"]  # a new file: once more
+
+
+async def test_poll_refuses_go_from_a_reader(tmp_path):
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={1: issue(1, "buffer:go")}, events={(1, "buffer:go"): ("eve", "7", "2026-10-24T10:00:00Z")})
+    client = FakeClient({})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+    assert await run_poll(acts) == [] and not client.started and gh.removed == [(1, "buffer:go")]
+    assert "does not have write access" in gh.comments[1][0]["body"]
+
+
+# --- replay -------------------------------------------------------------------------------------
+
+HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
+
+
+def _scrub(obj):
+    if isinstance(obj, dict):
+        return {k: "test" if k == "identity" else _scrub(v) for k, v in obj.items()}
+    return [_scrub(v) for v in obj] if isinstance(obj, list) else obj
+
+
+async def test_replay_buffer_history(env):
+    """The recorded go → plan → approve → sourcing → ready run (with a manual drop) must replay on today's
+    MiaBuffer. Re-record after an intended change guarded by workflow.patched():
+    MIA_BUFFERS_RECORD_HISTORY=1 pytest tests/test_buffers_workflows.py -k replay"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve(h, m)
+            await until(lambda: m.of("comment_drop"))
+            await h.signal(MiaBuffer.dropped, "bcss")
+            await idle(h, m, "ready")
+            HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-recorded", HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from autodev.review import WRITE_PERMISSIONS
 
@@ -56,12 +57,28 @@ async def run_poll(activities: Activities) -> list[str]:
     return done
 
 
-async def deliver_label(activities: Activities, kind: str, label: str, issue: dict) -> bool:
-    """Turn one human label on a dataset issue into a signal, or remove it with a comment saying why not.
+def _licence_guard(kind: str, issue: dict) -> str | None:
+    """mia-data's refusal: `go` on a licence-excluded dataset."""
+    if kind == "go" and "licence-excluded" in {entry["name"] for entry in issue.get("labels", [])}:
+        return "the dataset's licence is not in `crops.licences` (`licence-excluded`)"
+    return None
 
-    Only a person with write access counts; `go` on a licence-excluded dataset is refused. The label is removed
+
+async def deliver_label(
+    activities: Any,
+    kind: str,
+    label: str,
+    issue: dict,
+    *,
+    workflow: str = "MiaDataDataset",
+    make_state: Callable[[int], Any] = DatasetState,
+    guard: Callable[[str, dict], str | None] | None = _licence_guard,
+) -> bool:
+    """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
+
+    Only a person with write access counts; `guard` may name a reason to refuse the label. The label is removed
     only once Temporal has accepted the signal, so a crash in between leaves it for the next poll. Returns True
-    when a signal was delivered."""
+    when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard."""
     cfg, gh_data, number = activities.cfg, activities.gh_data, issue["number"]
     actor, event_id, labeled_at = await gh_data.label_event(number, label)
     if not actor or await gh_data.permission(actor) not in WRITE_PERMISSIONS:
@@ -78,15 +95,13 @@ async def deliver_label(activities: Activities, kind: str, label: str, issue: di
     if not (event_id and labeled_at):
         log.warning("poll: #%s %s: label event has no id or time", number, label)
         return False
-    if kind == "go" and "licence-excluded" in {entry["name"] for entry in issue.get("labels", [])}:
-        await activities.refuse_label(
-            number, label, "the dataset's licence is not in `crops.licences` (`licence-excluded`)", event_id
-        )
+    if guard and (reason := guard(kind, issue)):
+        await activities.refuse_label(number, label, reason, event_id)
         return False
     # start_signal: starts the workflow if needed and delivers the label as a signal either way
     await activities.temporal.start_workflow(
-        "MiaDataDataset",
-        DatasetState(number),
+        workflow,
+        make_state(number),
         id=cfg.workflow_id(number),
         task_queue=cfg.task_queue,
         start_signal=kind,

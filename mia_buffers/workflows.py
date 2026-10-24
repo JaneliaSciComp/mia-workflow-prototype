@@ -1,0 +1,378 @@
+"""The Temporal workflows that take a buffer issue from `buffer:go` to a served buffer (spec §1).
+
+`MiaBuffer` lives as long as the issue does. Each `go` starts a round: the spec in the issue body is planned
+against the catalog, a human approves the plan, then every dataset of the pool is sourced in parallel (a stage
+job, or a manual drop first) and registered with buffer-api as it becomes servable; the issue is `ready` once
+every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining.
+
+Workflow code does no I/O: every GitHub, filesystem, cluster and service interaction is an activity called by
+name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
+
+with workflow.unsafe.imports_passed_through():
+    from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
+    from mia_data.models import JobDone, LabelEvent
+
+    from .models import (
+        BindingInfo,
+        BufferPins,
+        BufferState,
+        DatasetStatus,
+        DropResult,
+        PlanResult,
+        RegisterResult,
+        SourcingLimits,
+        StageJobArgs,
+        StageResult,
+        job_key,
+    )
+    from .status import render_ready
+
+GO, APPROVE = "buffer:go", "buffer:approve"
+BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
+NOT_REVIEW = "`buffer:approve` counts only while the issue is in `buffer:plan-review`, for the plan under review."
+MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
+
+
+class RoundFailed(Exception):
+    """A step of the round that ends it in needs-human (raised by workflow code, never by an activity)."""
+
+
+def _rollover_due() -> bool:
+    return workflow.info().is_continue_as_new_suggested()
+
+
+def _parse_time(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+@workflow.defn(name="MiaBuffer")
+class MiaBuffer:
+    """One buffer issue: go → planning → plan-review → (approve) → sourcing → ready, or needs-human."""
+
+    @workflow.init
+    def __init__(self, state: BufferState) -> None:
+        self.state = state
+        self.go_events: list[LabelEvent] = []
+        self.approve_events: list[LabelEvent] = []
+        self.drops: set[str] = set()  # records whose files a human dropped since we last looked
+        self.limits: SourcingLimits | None = None
+
+    @workflow.signal
+    def go(self, event: LabelEvent) -> None:
+        self.go_events.append(event)
+
+    @workflow.signal
+    def approve(self, event: LabelEvent) -> None:
+        self.approve_events.append(event)
+
+    @workflow.signal
+    def dropped(self, record: str) -> None:
+        self.drops.add(record)
+
+    @workflow.query
+    def status(self) -> BufferState:
+        return self.state
+
+    @workflow.run
+    async def run(self, state: BufferState) -> None:
+        rounds = 0
+        if state.stage == "plan-review":  # rolled over while waiting for an approve
+            await self._guard(self._from_review())
+        while True:
+            await workflow.wait_condition(lambda: bool(self.go_events or self.approve_events) or _rollover_due())
+            if not (self.go_events or self.approve_events):
+                workflow.continue_as_new(self.state)  # idle, nothing queued
+            await self._refuse_queued(gos=False)  # idle: an approve has no plan under review to apply to
+            if not self.go_events:
+                continue
+            event = self.go_events.pop(0)
+            if self._seen(event):  # redelivery
+                continue
+            rounds += 1
+            await self._guard(self._round(event))
+            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not (self.go_events or self.approve_events):
+                workflow.continue_as_new(self.state)
+
+    # --- helpers ---------------------------------------------------------------------------
+
+    async def _act(
+        self, name: str, *args: Any, seconds: int = 60, budget: timedelta = timedelta(hours=6), result_type: Any = None
+    ) -> Any:
+        """Run an activity with a per-attempt timeout and an overall retry budget."""
+        return await workflow.execute_activity(
+            name,
+            args=list(args),
+            start_to_close_timeout=timedelta(seconds=seconds),
+            schedule_to_close_timeout=budget,
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            result_type=result_type,
+        )
+
+    async def _limits(self) -> SourcingLimits:
+        if self.limits is None:
+            self.limits = await self._act("limits", result_type=SourcingLimits)
+        return self.limits
+
+    async def _guard(self, step: Awaitable[None]) -> None:
+        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow."""
+        try:
+            await step
+        except (ActivityError, RoundFailed) as error:
+            await self._finish("needs-human", error_message(error))
+
+    def _seen(self, event: LabelEvent) -> bool:
+        if event.event_id in self.state.handled:
+            return True
+        self.state.handled = (self.state.handled + [event.event_id])[-50:]
+        return False
+
+    async def _stage(
+        self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = ""
+    ) -> None:
+        self.state.stage = stage
+        await self._act("set_stage", self.state.issue, stage, self.state, detail, extra, budget=budget)
+
+    async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
+        queued = []
+        if approves:
+            queued, self.approve_events = [(APPROVE, NOT_REVIEW, event) for event in self.approve_events], []
+        if gos:
+            queued, self.go_events = queued + [(GO, BUSY, event) for event in self.go_events], []
+        for label, reason, event in queued:
+            if not self._seen(event):
+                await self._refuse(label, reason, event)
+
+    async def _refuse(self, label: str, reason: str, event: LabelEvent) -> None:
+        try:
+            await self._act("refuse_label", self.state.issue, label, reason, event.event_id)
+        except ActivityError as error:  # best effort: the event is handled either way
+            workflow.logger.warning(
+                "issue #%d: could not refuse %s %s: %s", self.state.issue, label, event.event_id, error_message(error)
+            )
+
+    async def _finish(self, stage: str, detail: str = "", extra: str = "") -> None:
+        """End the round in a buffer stage, then refuse whatever queued up while it ran. Never raises."""
+        try:
+            await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra)
+        except ActivityError as error:
+            workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
+        await self._refuse_queued()
+
+    async def _comment(self, body: str, marker: str) -> None:
+        await self._act("comment", self.state.issue, body, marker)
+
+    # --- the round -------------------------------------------------------------------------
+
+    async def _round(self, event: LabelEvent) -> None:
+        """Admit, plan, post the plan, wait for review; an approve continues into sourcing."""
+        state = self.state
+        state.round_id = f"i{state.issue}-e{event.event_id}"
+        state.pins = state.buffer_id = state.planned_at = None
+        state.datasets, state.ready = [], False
+        state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
+        await self._stage("planning")
+        plan = await self._act("plan", state.issue, state.round_id, state.pins, seconds=1800, result_type=PlanResult)
+        await self._act("comment_plan", state.issue, state.round_id, seconds=300)
+        if not plan.valid:
+            return await self._finish("needs-human", "the plan is invalid: " + "; ".join(plan.errors))
+        state.datasets = [DatasetStatus(dataset.record, dataset.group, dataset.manual) for dataset in plan.pool]
+        state.min_fraction, state.timeout_days = plan.min_fraction, plan.timeout_days
+        state.levels, state.patch = list(plan.levels), plan.patch
+        state.planned_at = workflow.now().isoformat()
+        await self._stage(
+            "plan-review", "approve the plan with `buffer:approve`, or edit the spec and add `buffer:go` again"
+        )
+        await self._refuse_queued(approves=False)  # gos that came while planning; approves are judged below
+        await self._from_review()
+
+    async def _from_review(self) -> None:
+        if await self._review():
+            await self._sourcing()  # else a new go came during review: the next round plans again
+
+    async def _review(self) -> bool:
+        """Wait for an approve newer than the plan (True), or a new go (False). Stale approves are refused."""
+        planned_at = _parse_time(self.state.planned_at) or workflow.now()
+        while True:
+            await workflow.wait_condition(lambda: bool(self.approve_events or self.go_events) or _rollover_due())
+            if not (self.approve_events or self.go_events):
+                workflow.continue_as_new(self.state)  # stage plan-review: the next run resumes here
+            while self.approve_events:
+                event = self.approve_events.pop(0)
+                if self._seen(event):
+                    continue
+                if (approved_at := _parse_time(event.at)) and approved_at > planned_at:
+                    return True
+                await self._refuse(APPROVE, "it is older than the plan under review; add it again to approve it", event)
+            self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
+            if self.go_events:
+                return False
+
+    # --- sourcing --------------------------------------------------------------------------
+
+    def _groups(self) -> dict[str, tuple[int, int]]:
+        """group -> (servable, total) over the pool."""
+        groups: dict[str, tuple[int, int]] = {}
+        for dataset in self.state.datasets:
+            servable, total = groups.get(dataset.group, (0, 0))
+            groups[dataset.group] = (servable + (dataset.status == "servable"), total + 1)
+        return groups
+
+    def _ready_now(self) -> bool:
+        groups = self._groups()
+        return bool(groups) and all(servable / total >= self.state.min_fraction for servable, total in groups.values())
+
+    async def _sourcing(self) -> None:
+        """Create the buffer, source every dataset in parallel, announce ready when the groups allow it."""
+        state = self.state
+        assert state.round_id
+        await self._stage("sourcing")
+        state.buffer_id = state.round_id
+        limits = await self._limits()
+        await self._act("create_buffer", state.round_id, state.buffer_id, seconds=300)
+        semaphore = asyncio.Semaphore(max(1, limits.parallel))
+        # ponytail: no continue-as-new during sourcing (the tasks live in this run); fine below ~2,000 datasets per
+        # buffer, beyond that persist per-dataset progress and resume from it
+        tasks = [asyncio.create_task(self._source(dataset, semaphore)) for dataset in state.datasets]
+        try:
+            await workflow.wait_condition(
+                lambda: self._ready_now() or all(task.done() for task in tasks),
+                timeout=timedelta(days=state.timeout_days),
+            )
+        except TimeoutError:
+            if not self._ready_now():
+                for task in tasks:
+                    task.cancel()
+                below = sorted(
+                    group
+                    for group, (servable, total) in self._groups().items()
+                    if servable / total < state.min_fraction
+                )
+                return await self._finish(
+                    "needs-human",
+                    f"after {state.timeout_days:g} days these weighting groups are below ready.min_fraction "
+                    f"{state.min_fraction:g}: {', '.join(below)}",
+                )
+        if self._ready_now():
+            await self._announce_ready(limits)
+        await asyncio.gather(*tasks)  # the rest join as they finish
+        if not state.ready:
+            reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in state.datasets if d.status != "servable")
+            return await self._finish("needs-human", f"no weighting group reached ready.min_fraction: {reasons}")
+        await self._refuse_queued()  # labels that arrived while sourcing ran were busy, as in mia-data
+
+    async def _announce_ready(self, limits: SourcingLimits) -> None:
+        state = self.state
+        state.ready = True
+        servable = [dataset.record for dataset in state.datasets if dataset.status == "servable"]
+        await self._stage("ready", extra=render_ready(state.buffer_id or "", limits.service_url, servable))
+
+    async def _source(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
+        """Binding → (drop) → stage job → register; the dataset's status records the outcome."""
+        state = self.state
+        assert state.round_id and state.pins and state.buffer_id
+        round_id, record = state.round_id, dataset.record
+        binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
+        if not binding.found:
+            return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
+        if binding.manual:
+            await self._await_drop(dataset)
+        async with semaphore:
+            dataset.status = "staging"
+            workspace = await self._act("prepare_stage", state.issue, round_id, record, seconds=300, result_type=str)
+            job = await self._job(record, workspace, binding.hosts)
+            if job.state not in ("DONE", "EXIT"):
+                return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
+            if job.state == "EXIT" and job.exit_code not in (0, None):
+                return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
+            staged = await self._act("read_stage", round_id, record, seconds=300, result_type=StageResult)
+        if not staged.ok:
+            why = "; ".join(staged.errors) or "no errors reported"
+            if staged.host_not_allowed:
+                why += f" (host not allowed: {staged.host_not_allowed})"
+            return await self._fail(dataset, f"stage failed: {why}")
+        registered = await self._act(
+            "register_dataset", round_id, record, state.buffer_id, seconds=300, result_type=RegisterResult
+        )
+        if not registered.registered:
+            refused = "; ".join(f"{volume}: {why}" for volume, why in registered.refused.items())
+            return await self._fail(dataset, f"buffer-api refused every volume: {refused or 'none staged'}")
+        dataset.status, dataset.volumes, dataset.reason = "servable", len(registered.registered), ""
+        await self._comment(
+            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.",
+            f"dataset {round_id} {record} servable",
+        )
+
+    async def _await_drop(self, dataset: DatasetStatus) -> None:
+        """Ask for the files and wait for the poller's `dropped` signal until the drop verifies."""
+        state = self.state
+        assert state.round_id
+        dataset.status = "waiting-drop"
+        await self._act("comment_drop", state.issue, state.round_id, dataset.record, [], seconds=300)
+        attempt = 0
+        while True:
+            await workflow.wait_condition(lambda: dataset.record in self.drops)
+            self.drops.discard(dataset.record)
+            result = await self._act(
+                "verify_drop", state.round_id, dataset.record, seconds=1800, result_type=DropResult
+            )
+            if result.ok:
+                return
+            attempt += 1
+            await self._act("comment_drop", state.issue, state.round_id, dataset.record, result.missing, seconds=300)
+
+    async def _fail(self, dataset: DatasetStatus, reason: str) -> None:
+        state = self.state
+        dataset.status, dataset.reason = "failed", reason
+        await self._comment(f"`{dataset.record}` failed: {reason}", f"dataset {state.round_id} {dataset.record} failed")
+
+    async def _job(self, record: str, workspace: str, hosts: list[str]) -> JobDone:
+        """Submit the stage job (at most once per key) and wait for it on the await queue."""
+        state = self.state
+        assert state.round_id and state.pins
+        args = StageJobArgs(workspace, state.round_id, state.pins, record, list(hosts), list(state.levels), state.patch)
+        job_id = await self._act(
+            "submit", job_key(state.issue, state.round_id, record), args, seconds=600, result_type=str
+        )
+        walltime = timedelta(minutes=(await self._limits()).walltime_min)
+        return await workflow.execute_activity(
+            "await_job",
+            args=[job_id, workspace],
+            result_type=JobDone,
+            task_queue=workflow.info().task_queue + "-await",
+            start_to_close_timeout=walltime + QUEUE_SLACK,
+            schedule_to_close_timeout=walltime + timedelta(hours=24),
+            heartbeat_timeout=timedelta(minutes=3),
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+        )
+
+
+@workflow.defn(name="MiaBufferPoll")
+class MiaBufferPoll:
+    """Run on a schedule: turn new labels and dropped files into signals for the buffer workflows."""
+
+    @workflow.run
+    async def run(self) -> list[str]:
+        return await workflow.execute_activity(
+            "poll",
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+            result_type=list[str],
+        )

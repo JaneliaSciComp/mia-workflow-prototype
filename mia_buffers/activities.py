@@ -53,9 +53,10 @@ from .models import (
     StageResult,
 )
 from .plan import MANUAL_DROP_NOTE, _group_key, build_plan, load_records
+from .poll import run_poll
 from .register import buffer_config, volume_bodies
 from .spec import SpecError, load_spec
-from .status import render_plan_comment
+from .status import render_drop_comment, render_plan_comment
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -88,7 +89,12 @@ class Activities:
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
-        self._dropped: dict[tuple[int, str], float] = {}  # poll: (issue, record) -> incoming/ mtime last signalled
+        self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
+
+    @property
+    def gh_data(self) -> GitHub:
+        """mia-data's name for the issue repo client (mia_data.poll.deliver_label posts through it)."""
+        return self.gh_issues
 
     @property
     def temporal(self) -> Client:
@@ -113,6 +119,8 @@ class Activities:
             self.verify_drop,
             self.create_buffer,
             self.register_dataset,
+            self.comment_drop,
+            self.poll,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -120,12 +128,12 @@ class Activities:
     def _clean(self, text: str) -> str:
         return neutralize(text, self.gh_issues.tokens())
 
-    async def _comment_once(self, number: int, body: str, marker: str) -> str | None:
+    async def _comment_once(self, gh: GitHub, number: int, body: str, marker: str) -> str | None:
         """Post unless the bot already commented with this marker (an outsider's copy does not count)."""
-        for comment in await self.gh_issues.issue_comments(number):
+        for comment in await gh.issue_comments(number):
             if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or ""):
                 return comment.get("html_url")
-        return (await self.gh_issues.comment(number, body)).get("html_url")
+        return (await gh.comment(number, body)).get("html_url")
 
     def _round_dir(self, round_id: str) -> Path:
         if not ROUND_RE.fullmatch(round_id):
@@ -281,14 +289,16 @@ class Activities:
             self._clean(extra) if extra else "",
             render_links(links),
         ]
-        await self._comment_once(issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker)
+        await self._comment_once(
+            self.gh_issues, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker
+        )
 
     @activity.defn(name="comment")
     @mia_permanent_errors
     async def comment(self, issue: int, body: str, marker: str) -> str | None:
         """Post once per marker. Returns the comment's URL."""
         full_marker = self.cfg.marker(marker)
-        return await self._comment_once(issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        return await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
 
     @activity.defn(name="comment_plan")
     @mia_permanent_errors
@@ -296,7 +306,29 @@ class Activities:
         """Post the round's plan (errors, warnings, the pool) once, linking the browsable plan files."""
         marker = self.cfg.marker(f"plan {round_id}")
         body = render_plan_comment(self._plan(round_id), self.cfg.paths.link(self._round_workspace(issue, round_id)))
-        await self._comment_once(issue, f"{self._clean(body)}\n{marker}", marker)
+        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+
+    @activity.defn(name="comment_drop")
+    @mia_permanent_errors
+    async def comment_drop(self, issue: int, round_id: str, record: str, missing: list[str]) -> None:
+        """Ask for a dataset's files (once), or list the ones still missing after a failed verification (once
+        per distinct missing set)."""
+        binding = yaml.safe_load(self._binding_path(round_id, record).read_text()) or {}
+        urls = [
+            str(url)
+            for array in (binding.get("raw") or []) + (binding.get("labels") or [])
+            for url in (array.get("urls") or [])
+        ]
+        files = [list(pair) for pair in drop_names(urls)]
+        link = self.cfg.paths.link(self._cache_dir(record) / "incoming")
+        suffix = " " + hashlib.sha256("\n".join(sorted(missing)).encode()).hexdigest()[:8] if missing else ""
+        marker = self.cfg.marker(f"drop {round_id} {record}{suffix}")
+        body = render_drop_comment(record, link, files, list(missing))
+        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+
+    @activity.defn(name="poll")
+    async def poll(self) -> list[str]:
+        return await run_poll(self)
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -306,7 +338,9 @@ class Activities:
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         await self.gh_issues.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._comment_once(issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+        await self._comment_once(
+            self.gh_issues, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker
+        )
 
     # --- sourcing: binding, drop, stage job, registration ------------------------------------
 
