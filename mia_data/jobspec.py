@@ -26,7 +26,7 @@ from collections.abc import Callable
 from importlib.resources import files
 from pathlib import Path
 from string import Template
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import yaml
 
@@ -55,6 +55,15 @@ BINDING_FILE = "binding.yaml"  # the round's checked binding, copied into the wo
 RECORD_FILE = "record.yaml"  # the dataset record, copied into every workspace
 
 
+class HarnessPinned(Protocol):
+    """What a job builder needs from a round's pins: the harness commit and environment digest."""
+
+    @property
+    def harness_commit(self) -> str: ...
+    @property
+    def env_digest(self) -> str: ...
+
+
 class PinMoved(RuntimeError):
     """The harness environment changed since the round was admitted. Not retryable: the round goes to needs-human."""
 
@@ -77,9 +86,34 @@ def _snapshot_dir(cfg: Config, sha: str) -> Path:
 def snapshot(cfg: Config, sha: str, tokens: Callable[[], str | None] = lambda: None) -> Path:
     """`snippets/`, `WITHDRAWN.yaml` and `SPEC.md` of mia-snippets at `sha`, extracted once and read-only, at
     `work_root/_snapshots/<sha>`. The bare mirror in `state_dir` is fetched only when it lacks `sha`."""
+    github = cfg.github
+    return archive_snapshot(
+        cfg,
+        mirror="mia-snippets.git",
+        git_url=github.snippets_git_url or f"https://github.com/{github.snippets_repo}.git",
+        sha=sha,
+        paths=["snippets", "WITHDRAWN.yaml", "SPEC.md"],
+        dest=_snapshot_dir(cfg, sha),
+        tokens=tokens,
+    )
+
+
+def archive_snapshot(
+    cfg: Config,
+    *,
+    mirror: str,
+    git_url: str,
+    sha: str,
+    paths: list[str],
+    dest: Path,
+    tokens: Callable[[], str | None] = lambda: None,
+) -> Path:
+    """`paths` of the repository behind `git_url` at commit `sha`, extracted once and read-only at `dest`.
+
+    The bare mirror `state_dir/mirror/<mirror>` is fetched only when it lacks `sha`; concurrent callers share one
+    extraction through a lock file beside `dest`. mia-buffers uses this for the catalog at a spec's `catalog.ref`."""
     if not SHA_RE.fullmatch(sha):
         raise ValueError(f"not a full commit SHA: {sha!r}")
-    dest = _snapshot_dir(cfg, sha)
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -87,19 +121,14 @@ def snapshot(cfg: Config, sha: str, tokens: Callable[[], str | None] = lambda: N
         fcntl.flock(lock, fcntl.LOCK_EX)
         if dest.exists():
             return dest
-        github = cfg.github
-        mirror = Mirror(
-            cfg.paths.state_dir / "mirror" / "mia-snippets.git",
-            github.snippets_git_url or f"https://github.com/{github.snippets_repo}.git",
-            tokens,
-        )
+        repo = Mirror(cfg.paths.state_dir / "mirror" / mirror, git_url, tokens)
         if (
-            not (mirror.path / "HEAD").exists()
+            not (repo.path / "HEAD").exists()
             or subprocess.run(
-                ["git", "-C", str(mirror.path), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True
+                ["git", "-C", str(repo.path), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True
             ).returncode
         ):
-            mirror.sync()
+            repo.sync()
         tmp = dest.with_name(f".{sha}.tmp")
         if tmp.exists():  # left by a crash; read-only, like a finished one
             subprocess.run(["chmod", "-R", "u+w", str(tmp)], check=True)
@@ -118,12 +147,10 @@ def snapshot(cfg: Config, sha: str, tokens: Callable[[], str | None] = lambda: N
                 "-c",
                 "filter.lfs.required=false",
                 "-C",
-                str(mirror.path),
+                str(repo.path),
                 "archive",
                 sha,
-                "snippets",
-                "WITHDRAWN.yaml",
-                "SPEC.md",
+                *paths,
             ],
             capture_output=True,
             env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
@@ -183,7 +210,7 @@ def harness_snapshot(cfg: Config, commit: str) -> Path:
         return dest
 
 
-def assert_pin(cfg: Config, pins: Pins) -> None:
+def assert_pin(cfg: Config, pins: HarnessPinned) -> None:
     """Raise PinMoved unless the harness environment is still the one the round was admitted with.
 
     Only the `pixi.lock` digest is compared: the harness commit is served by its snapshot, so HEAD may move."""
@@ -214,7 +241,7 @@ def harness_env(cfg: Config) -> Path:
     return cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "python"
 
 
-def _harness(cfg: Config, pins: Pins) -> str:
+def _harness(cfg: Config, pins: HarnessPinned) -> str:
     """The `harness` command for a round: the pinned environment's python running the snapshot's source.
 
     PYTHONPATH precedes the env's editable install of the checkout's own source; -P keeps the job's cwd off
@@ -242,7 +269,7 @@ def _spec(
     cfg: Config,
     kind: str,
     workspace: Path,
-    pins: Pins,
+    pins: HarnessPinned,
     body: str,
     allow_hosts: list[str],
     ro_inputs: list[Path | None],

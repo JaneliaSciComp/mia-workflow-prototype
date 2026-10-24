@@ -43,6 +43,7 @@ class GitHubCfg(mia_data_config.GitHubCfg):
     the object so mia-data's helpers, which post to `data_repo`, work unchanged)."""
 
     data_repo: str = Field(alias="buffers_repo")
+    catalog_git_url: str | None = None  # clone URL override for the catalog mirror (default: GitHub https)
 
     @property
     def buffers_repo(self) -> str:
