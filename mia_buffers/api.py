@@ -1,0 +1,276 @@
+"""buffer-api: the one sampler and ledger for a buffer, as a small HTTP service (spec v0.5 §5).
+
+`BufferService.handle` does all routing and validation without sockets; `make_server` wraps it in the standard
+library's threading HTTP server. Consumers are untrusted (§7): bodies are validated strictly and a consumer can
+only name its split.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Literal
+from urllib.parse import parse_qsl, urlsplit
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from .ledger import Ledger
+from .sampler import Level, Volume, draw, fits, servable
+
+RETRY_AFTER_S = 30
+DEFAULT_SPLIT_SIZE = 256
+Response = tuple[int, dict | None, dict[str, str]]
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class BufferConfig(_Strict):
+    spec_name: str
+    spec_hash: str
+    catalog_ref: str | None = None
+    levels: list[int]
+    patch: int
+    channels: int | Literal["all"]
+    seed: int = 0
+    tensorizer: str = "muvit-2d"
+    tensorizer_params: dict = {}
+    splits: dict[str, float]
+    split_sizes: dict[str, int] = {}  # frozen list lengths for val and test
+
+
+class VolumeBody(_Strict):
+    path: str
+    record: str
+    axes: str
+    shape: list[int]
+    levels: list[dict]
+    split_planes: dict[str, list[int]]
+    labels: dict[str, str] = {}
+    weight: float
+    channels_stored: int
+    recipe: dict | None = None
+    voxel_size_nm: dict[str, float]
+
+
+class ConsumerBody(_Strict):
+    name: str
+    host: str
+    pid: int
+    rank: int = 0
+    split: str
+    mode: Literal["local", "remote"] = "local"
+
+
+class HttpError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def _parse[Model: _Strict](model: type[Model], body: bytes) -> Model:
+    try:
+        return model.model_validate_json(body or b"null")
+    except ValidationError as error:
+        raise HttpError(422, str(error)) from None
+
+
+def _int(query: dict[str, str], key: str, default: int | None = None) -> int:
+    value = query.get(key)
+    if value is None and default is not None:
+        return default
+    try:
+        return int(value or "")
+    except ValueError:
+        raise HttpError(422, f"query {key} must be an integer") from None
+
+
+ROUTES = [
+    ("PUT", re.compile(r"^/buffers/([^/]+)$"), "put_buffer"),
+    ("PUT", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "put_volume"),
+    ("POST", re.compile(r"^/buffers/([^/]+)/consumers$"), "add_consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status"),
+]
+
+
+class BufferService:
+    """Routes → ledger operations. One train rng per buffer, seeded from the config; frozen lists seeded per split."""
+
+    def __init__(self, ledger: Ledger, stale_s: float = 300.0):
+        self.ledger = ledger
+        self.stale_s = stale_s
+        self._rng: dict[str, random.Random] = {}
+        self._lock = threading.Lock()
+
+    def handle(self, method: str, path: str, query: dict[str, str], body: bytes) -> Response:
+        try:
+            for route_method, pattern, name in ROUTES:
+                match = pattern.match(path)
+                if match and route_method == method:
+                    return getattr(self, f"_{name}")(*match.groups(), query=query, body=body)
+            raise HttpError(404, f"no route {method} {path}")
+        except HttpError as error:
+            return error.status, {"error": str(error)}, {}
+
+    def _config(self, buffer: str) -> BufferConfig:
+        config = self.ledger.buffer(buffer)
+        if config is None:
+            raise HttpError(404, f"unknown buffer {buffer}")
+        return BufferConfig.model_validate(config)
+
+    def _consumer(self, buffer: str, query: dict[str, str]) -> str:
+        consumer_id = query.get("consumer", "")
+        if not self.ledger.touch(buffer, consumer_id):
+            raise HttpError(404, f"unknown consumer {consumer_id!r} for buffer {buffer}")
+        return consumer_id
+
+    def _put_buffer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = _parse(BufferConfig, body)
+        self.ledger.put_buffer(buffer, config.model_dump())
+        with self._lock:
+            self._rng.pop(buffer, None)
+        return 200, {"buffer": buffer}, {}
+
+    def _put_volume(self, buffer: str, volume_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = self._config(buffer)
+        parsed = _parse(VolumeBody, body)
+        try:
+            levels = tuple(Level(**{**level, "shape": tuple(level["shape"])}) for level in parsed.levels)
+        except TypeError as error:
+            raise HttpError(422, f"levels: {error}") from None
+        volume = Volume(
+            id=volume_id,
+            path=parsed.path,
+            record=parsed.record,
+            axes=parsed.axes,
+            shape=tuple(parsed.shape),
+            levels=levels,
+            split_planes={split: tuple(planes) for split, planes in parsed.split_planes.items()},
+            labels=parsed.labels,
+            weight=parsed.weight,
+            channels_stored=parsed.channels_stored,
+            recipe=parsed.recipe,
+            voxel_size_nm=parsed.voxel_size_nm,
+        )
+        if len(volume.shape) != len(volume.axes):
+            raise HttpError(422, f"shape {volume.shape} does not match axes {volume.axes!r}")
+        reason = fits(volume, config.patch, config.levels)
+        if reason:
+            raise HttpError(422, reason)
+        self.ledger.put_volume(buffer, volume)
+        return 200, {"buffer": buffer, "volume": volume_id}, {}
+
+    def _add_consumer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        info = _parse(ConsumerBody, body)
+        return 201, {"consumer_id": self.ledger.add_consumer(buffer, info.model_dump())}, {}
+
+    def _split_of(self, buffer: str, consumer_id: str) -> str:
+        for consumer in self.ledger.consumers(buffer, self.stale_s):
+            if consumer["consumer_id"] == consumer_id:
+                return str(consumer["split"])
+        raise HttpError(404, f"unknown consumer {consumer_id!r}")
+
+    def _next(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = self._config(buffer)
+        consumer_id = self._consumer(buffer, query)
+        n = _int(query, "n", 1)
+        split = self._split_of(buffer, consumer_id)
+        volumes = self.ledger.volumes(buffer)
+        with self._lock:
+            rng = self._rng.setdefault(buffer, random.Random(config.seed))
+            descriptors = [
+                d
+                for _ in range(n)
+                if (d := draw(rng, volumes, split, patch=config.patch, levels=config.levels, channels=config.channels))
+            ]
+        if not descriptors:
+            return 204, None, {"Retry-After": str(RETRY_AFTER_S)}
+        return 200, {"descriptors": self.ledger.record_draws(buffer, consumer_id, descriptors)}, {}
+
+    def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = self._config(buffer)
+        self._consumer(buffer, query)
+        start, n = _int(query, "from", 0), _int(query, "n", 1)
+        size = config.split_sizes.get(split, DEFAULT_SPLIT_SIZE)
+        if start >= size:
+            raise HttpError(416, f"from {start} is past the {split} list of {size}")
+        volumes = self.ledger.volumes(buffer)
+        if not servable(volumes, split):
+            return 204, None, {"Retry-After": str(RETRY_AFTER_S)}
+        end = min(start + n, size)
+        with self._lock:
+            frozen = self.ledger.frozen(buffer, split)
+            if len(frozen) < end:
+                rng = random.Random(f"{config.seed}:{split}")
+                fresh = []
+                for index in range(end):  # replay the whole prefix so the list never depends on request order
+                    d = draw(rng, volumes, split, patch=config.patch, levels=config.levels, channels=config.channels)
+                    if index >= len(frozen) and d is not None:
+                        fresh.append({**d, "seq": index})
+                self.ledger.extend_frozen(buffer, split, fresh)
+                frozen += fresh
+        return 200, {"descriptors": frozen[start:end], "size": size}, {}
+
+    def _status(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = self._config(buffer)
+        volumes = self.ledger.volumes(buffer)
+        splits = sorted({split for volume in volumes for split in volume.split_planes})
+        return (
+            200,
+            {
+                "buffer": buffer,
+                "config": config.model_dump(),
+                "volumes": len(volumes),
+                "servable": {split: len(servable(volumes, split)) for split in splits},
+                "draws": self.ledger.draws_per_volume(buffer),
+                "consumers": self.ledger.consumers(buffer, self.stale_s),
+            },
+            {},
+        )
+
+
+def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def _dispatch(self) -> None:
+            parts = urlsplit(self.path)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            status, payload, headers = service.handle(self.command, parts.path, dict(parse_qsl(parts.query)), body)
+            data = json.dumps(payload).encode() if payload is not None else b""
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            if data:
+                self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if data:
+                self.wfile.write(data)
+
+        do_GET = do_PUT = do_POST = _dispatch
+
+        def log_message(self, format: str, *args: object) -> None:  # quiet; the ledger is the record
+            return
+
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def serve(state_dir: Path, host: str, port: int) -> None:
+    """Run buffer-api until interrupted; the ledger lives at <state_dir>/buffers.sqlite."""
+    server = make_server(BufferService(Ledger(state_dir / "buffers.sqlite")), host, port)
+    host_name, port_number = server.server_address[0], server.server_address[1]
+    print(f"buffer-api on http://{host_name!s}:{port_number} ledger {state_dir}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()

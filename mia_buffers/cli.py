@@ -1,4 +1,4 @@
-"""The `mia-buffers` command line. Milestone 0: `plan`, the offline planner over a catalog checkout."""
+"""The `mia-buffers` command line: `plan` (offline planner over a catalog checkout) and `serve` (buffer-api)."""
 
 from __future__ import annotations
 
@@ -58,6 +58,13 @@ def _plan(args: argparse.Namespace) -> int:
     return 0 if plan.valid else 2
 
 
+def _serve(args: argparse.Namespace) -> int:
+    from .api import serve
+
+    serve(args.state_dir.expanduser(), args.host, args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mia-buffers")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -71,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-ref-mismatch", action="store_true", help="plan even when the checkout is not at catalog.ref"
     )
     plan.set_defaults(func=_plan)
+    serve = sub.add_parser("serve", help="run buffer-api, the sampler and ledger for buffers (spec §5)")
+    serve.add_argument("--state-dir", type=Path, default=Path("~/.local/state/mia-buffers"))
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.set_defaults(func=_serve)
     args = parser.parse_args(argv)
     return int(args.func(args))
 
