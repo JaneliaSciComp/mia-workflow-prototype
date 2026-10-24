@@ -111,3 +111,20 @@ def test_worker_reregisters_on_pid_change(buffer_server, monkeypatch):
     monkeypatch.setattr(client_module.os, "getpid", lambda: 999_999)
     ds[1]
     assert [c["pid"] for c in consumers(buffer_server)][-1] == 999_999 and len(consumers(buffer_server)) == 2
+
+
+def test_meta_has_no_none_values(buffer_server, monkeypatch):
+    def with_nones(pyramid_dir, descriptor, snapshot, name, params):
+        out = fake_tensorize(pyramid_dir, descriptor, snapshot, name, params)
+        out["meta"] = {**out["meta"], "record": None, "descriptor": {**descriptor, "channels": None}}
+        return out
+
+    monkeypatch.setattr(client_module, "tensorize", with_nones)
+    meta = BufferDataset(buffer_server, "b", "train", n_samples=1, tensorizers=SNAP)[0]["meta"]
+
+    def has_none(value):
+        if isinstance(value, dict):
+            return any(v is None or has_none(v) for v in value.values())
+        return isinstance(value, list) and any(v is None or has_none(v) for v in value)
+
+    assert "record" not in meta and "channels" not in meta["descriptor"] and not has_none(meta)

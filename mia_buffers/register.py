@@ -39,10 +39,16 @@ def buffer_config(plan: dict, spec: Spec, *, tensorizer: str, split_sizes: dict[
 
 def _split_planes(volume_id: str, planes: int, spec: Spec) -> dict[str, list[int]]:
     """Seeded shuffle of the planes, cut by the spec's fractions (largest remainder); split keys are (volume, plane)."""
+    rng = random.Random(f"{spec.sampling.seed}:{volume_id}")
     order = list(range(planes))
-    random.Random(f"{spec.sampling.seed}:{volume_id}").shuffle(order)
-    out: dict[str, list[int]] = {}
-    for split, count in split_counts(planes, spec.splits.fractions).items():
+    rng.shuffle(order)
+    fractions = spec.splits.fractions
+    out: dict[str, list[int]] = {split: [] for split in fractions}
+    if planes < len(fractions):  # too few planes to apportion: each plane picks its split by fraction, so a dataset
+        for plane in order:  # of single-image volumes still splits by fraction overall (review C1)
+            out[rng.choices(list(fractions), weights=list(fractions.values()))[0]].append(plane)
+        return {split: sorted(chosen) for split, chosen in out.items()}
+    for split, count in split_counts(planes, fractions).items():
         out[split], order = sorted(order[:count]), order[count:]
     return out
 

@@ -103,3 +103,13 @@ def test_register_end_to_end(tmp_path, spec_2d, server):  # noqa: F811
         "val": 4,
         "test": 4,
     }
+
+
+def test_single_plane_volumes_split_by_fraction_across_a_dataset(tmp_path, spec_2d):  # noqa: F811
+    seen = {"train": 0, "val": 0, "test": 0}
+    for i in range(40):
+        staged = write_stage_json(tmp_path / f"one{i}", planes=1)
+        [(_, vb)] = volume_bodies({**ROW, "id": f"one{i}"}, staged, spec_2d)
+        for split, planes in vb["split_planes"].items():
+            seen[split] += len(planes)
+    assert sum(seen.values()) == 40 and seen["val"] > 0 and seen["test"] > 0 and seen["train"] > 20

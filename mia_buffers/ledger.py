@@ -82,6 +82,18 @@ class Ledger:
             )
         return cursor.rowcount == 1
 
+    def consumer(self, buffer: str, consumer_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT info FROM consumers WHERE id = ? AND buffer = ?", (consumer_id, buffer)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def max_seq(self, buffer: str) -> int:
+        with self._lock:
+            (last,) = self._db.execute("SELECT COALESCE(MAX(seq), 0) FROM draws WHERE buffer = ?", (buffer,)).fetchone()
+        return int(last)
+
     def consumers(self, buffer: str, stale_s: float) -> list[dict]:
         with self._lock:
             rows = self._db.execute(

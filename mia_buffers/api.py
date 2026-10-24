@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .ledger import Ledger
 from .sampler import Level, Volume, draw, fits, servable
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
+MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 Response = tuple[int, dict | None, dict[str, str]]
 
 
@@ -44,12 +45,26 @@ class BufferConfig(_Strict):
     split_sizes: dict[str, int] = {}  # frozen list lengths for val and test
 
 
+class LevelBody(_Strict):
+    factor: int
+    shape: list[int]
+    scale_nm: dict[str, float]
+    translation_nm: dict[str, float]
+
+    @model_validator(mode="after")
+    def _has_y_x(self) -> LevelBody:
+        for name, mapping in (("scale_nm", self.scale_nm), ("translation_nm", self.translation_nm)):
+            if "y" not in mapping or "x" not in mapping:
+                raise ValueError(f"level {self.factor}: {name} needs y and x")
+        return self
+
+
 class VolumeBody(_Strict):
     path: str
     record: str
     axes: str
     shape: list[int]
-    levels: list[dict]
+    levels: list[LevelBody]
     split_planes: dict[str, list[int]]
     labels: dict[str, str] = {}
     weight: float
@@ -80,14 +95,17 @@ def _parse[Model: _Strict](model: type[Model], body: bytes) -> Model:
         raise HttpError(422, str(error)) from None
 
 
-def _int(query: dict[str, str], key: str, default: int | None = None) -> int:
+def _int(query: dict[str, str], key: str, default: int | None = None, *, low: int, high: int) -> int:
     value = query.get(key)
     if value is None and default is not None:
         return default
     try:
-        return int(value or "")
+        parsed = int(value or "")
     except ValueError:
         raise HttpError(422, f"query {key} must be an integer") from None
+    if not low <= parsed <= high:
+        raise HttpError(422, f"query {key} must be between {low} and {high}, got {parsed}")
+    return parsed
 
 
 ROUTES = [
@@ -119,6 +137,8 @@ class BufferService:
             raise HttpError(404, f"no route {method} {path}")
         except HttpError as error:
             return error.status, {"error": str(error)}, {}
+        except Exception as error:  # a bug answers 500 instead of dropping the connection
+            return 500, {"error": f"{type(error).__name__}: {error}"}, {}
 
     def _config(self, buffer: str) -> BufferConfig:
         config = self.ledger.buffer(buffer)
@@ -142,10 +162,12 @@ class BufferService:
     def _put_volume(self, buffer: str, volume_id: str, *, query: dict[str, str], body: bytes) -> Response:
         config = self._config(buffer)
         parsed = _parse(VolumeBody, body)
-        try:
-            levels = tuple(Level(**{**level, "shape": tuple(level["shape"])}) for level in parsed.levels)
-        except TypeError as error:
-            raise HttpError(422, f"levels: {error}") from None
+        levels = tuple(
+            Level(level.factor, tuple(level.shape), level.scale_nm, level.translation_nm) for level in parsed.levels
+        )
+        factors = [level.factor for level in levels]
+        if not factors or factors[0] != 1 or not set(config.levels) <= set(factors):
+            raise HttpError(422, f"pyramid levels {factors} do not cover the buffer's levels {config.levels}")
         volume = Volume(
             id=volume_id,
             path=parsed.path,
@@ -174,19 +196,21 @@ class BufferService:
         return 201, {"consumer_id": self.ledger.add_consumer(buffer, info.model_dump())}, {}
 
     def _split_of(self, buffer: str, consumer_id: str) -> str:
-        for consumer in self.ledger.consumers(buffer, self.stale_s):
-            if consumer["consumer_id"] == consumer_id:
-                return str(consumer["split"])
-        raise HttpError(404, f"unknown consumer {consumer_id!r}")
+        consumer = self.ledger.consumer(buffer, consumer_id)
+        if consumer is None:
+            raise HttpError(404, f"unknown consumer {consumer_id!r}")
+        return str(consumer["split"])
 
     def _next(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         config = self._config(buffer)
         consumer_id = self._consumer(buffer, query)
-        n = _int(query, "n", 1)
+        n = _int(query, "n", 1, low=1, high=MAX_N)
         split = self._split_of(buffer, consumer_id)
         volumes = self.ledger.volumes(buffer)
         with self._lock:
-            rng = self._rng.setdefault(buffer, random.Random(config.seed))
+            if buffer not in self._rng:  # seed from what the ledger already served, so a restart draws fresh crops
+                self._rng[buffer] = random.Random(f"{config.seed}:{self.ledger.max_seq(buffer)}")
+            rng = self._rng[buffer]
             descriptors = [
                 d
                 for _ in range(n)
@@ -199,7 +223,7 @@ class BufferService:
     def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
         config = self._config(buffer)
         self._consumer(buffer, query)
-        start, n = _int(query, "from", 0), _int(query, "n", 1)
+        start, n = _int(query, "from", 0, low=0, high=10**9), _int(query, "n", 1, low=1, high=MAX_N)
         size = config.split_sizes.get(split, DEFAULT_SPLIT_SIZE)
         if start >= size:
             raise HttpError(416, f"from {start} is past the {split} list of {size}")

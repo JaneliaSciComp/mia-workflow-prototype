@@ -197,7 +197,18 @@ class BufferDataset(Base):
         meta = sample.pop("meta", {})
         convert: Callable[[Any], Any] = torch.from_numpy if torch is not None else (lambda array: array)
         out: dict = {key: convert(value) for key, value in sample.items()}
-        out["meta"] = {
-            k: v for k, v in meta.items() if isinstance(v, str | int | float | bool | list | dict | type(None))
-        }
+        out["meta"] = _collatable(meta)
         return out
+
+
+def _collatable(value: Any) -> Any:
+    """JSON-like meta without None (torch's default_collate rejects NoneType) and without foreign objects."""
+    if isinstance(value, dict):
+        return {k: _collatable(v) for k, v in value.items() if v is not None and _plain(v)}
+    if isinstance(value, list):
+        return [_collatable(v) for v in value if v is not None and _plain(v)]
+    return value
+
+
+def _plain(value: Any) -> bool:
+    return isinstance(value, str | int | float | bool | list | dict)

@@ -141,3 +141,58 @@ def test_over_http(tmp_path):
         assert httpx.get(f"{base}/buffers/b/status").json()["volumes"] == 2
     finally:
         server.shutdown()
+
+
+def test_next_n_is_bounded_and_from_is_non_negative(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    assert call(s, "GET", "/buffers/b/next", {"n": "0", "consumer": cid})[0] == 422
+    assert call(s, "GET", "/buffers/b/next", {"n": "100000", "consumer": cid})[0] == 422
+    assert call(s, "GET", "/buffers/b/next", {"n": "1024", "consumer": cid})[0] == 200
+    assert call(s, "GET", "/buffers/b/split/val", {"from": "-1", "n": "1", "consumer": cid})[0] == 422
+
+
+def test_volume_levels_are_validated_and_errors_never_drop_the_connection(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    broken = body()
+    del broken["levels"][0]["shape"]
+    status, out, _ = call(s, "PUT", "/buffers/b/volumes/a", payload=broken)
+    assert status == 422 and "shape" in out["error"]
+    no_yx = body()
+    no_yx["levels"][0]["scale_nm"] = {"z": 1.0}
+    status, out, _ = call(s, "PUT", "/buffers/b/volumes/a", payload=no_yx)
+    assert status == 422 and "scale_nm" in out["error"]
+    short = body()
+    short["levels"] = short["levels"][:2]
+    status, out, _ = call(s, "PUT", "/buffers/b/volumes/a", payload=short)
+    assert status == 422 and "levels" in out["error"] and "4" in out["error"]
+    s.ledger.put_volume = lambda *a, **k: 1 / 0  # type: ignore[method-assign]
+    status, out, _ = call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    assert status == 500 and out["error"].startswith("ZeroDivisionError")
+
+
+def test_restart_does_not_replay_the_train_stream(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    first = [
+        {k: v for k, v in d.items() if k != "seq"}
+        for d in call(s, "GET", "/buffers/b/next", {"n": "5", "consumer": cid})[1]["descriptors"]
+    ]
+    restarted = BufferService(Ledger(tmp_path / "l.sqlite"))
+    again = [
+        {k: v for k, v in d.items() if k != "seq"}
+        for d in call(restarted, "GET", "/buffers/b/next", {"n": "5", "consumer": cid})[1]["descriptors"]
+    ]
+    assert again != first
+
+
+def test_consumer_lookup_is_by_id(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    cid = led.add_consumer("b", {**CONSUMER, "rank": 0, "mode": "local"})
+    assert led.consumer("b", cid)["split"] == "train" and led.consumer("b", "nope") is None
