@@ -9,6 +9,7 @@ import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from .assume import channel_recipes, voxel_size
 from .select import Decision, decide_all
 from .spec import Spec
 from .specmap import Facts, facts
@@ -50,6 +51,9 @@ class Row:
     weight: float = 0.0
     splits: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    voxel_size_nm: dict[str, float | None] = field(default_factory=dict)
+    assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
+    channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
 
     @property
     def in_pool(self) -> bool:
@@ -90,8 +94,8 @@ class Plan:
         pool = [row for row in self.rows if row.in_pool]
         lines += [f"## Records ({len(pool)} in the pool, {len(self.rows)} seen)", ""]
         lines += [
-            "| id | decision | rule | dims | modality | channels | positions | weight | split preview |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| id | decision | rule | dims | modality | channels | voxel nm | positions | weight | split preview |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in self.rows:
             rule = row.rule if row.fit is None else f"{row.rule}; {row.fit.reason}"
@@ -106,9 +110,22 @@ class Plan:
                 row.dims or "",
                 row.modality_group or "",
             ]
-            cells += [row.channels if row.channels is not None else "", row.positions or "", weight, splits]
+            cells += [
+                row.channels if row.channels is not None else "",
+                _voxel_cell(row),
+                row.positions or "",
+                weight,
+                splits,
+            ]
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
         return "\n".join(lines) + "\n"
+
+
+def _voxel_cell(row: Row) -> str:
+    if not row.voxel_size_nm:
+        return ""
+    sizes = "×".join(f"{row.voxel_size_nm[a]:g}" for a in ("z", "y", "x") if row.voxel_size_nm.get(a) is not None)
+    return f"{sizes} (assumed)" if row.assumed else sizes
 
 
 def fit(f: Facts, spec: Spec) -> Fit:
@@ -136,11 +153,15 @@ def fit(f: Facts, spec: Spec) -> Fit:
         )
     if three_d and patch.get("z", 0) > (largest.extent_z or 0):
         return Fit(False, f"patch z {patch.get('z')} exceeds {largest.extent_z}", footprint, False)
-    if not f.voxel_size_known(f.dims or ""):
+    _, assumed = voxel_size(f)
+    if assumed and not spec.sampling.assume_voxel_size:
         return Fit(False, "voxel size unknown", footprint, False)
+    notes = []
     if largest.shape_varies:
-        return Fit(True, "fits (shape varies: checked against the representative item)", footprint, True)
-    return Fit(True, "fits", footprint, False)
+        notes.append("shape varies: checked against the representative item")
+    if assumed:
+        notes.append(f"voxel size assumed for {', '.join(assumed)}")
+    return Fit(True, "fits" + (f" ({'; '.join(notes)})" if notes else ""), footprint, largest.shape_varies)
 
 
 def positions(f: Facts, spec: Spec) -> int:
@@ -203,6 +224,11 @@ def split_counts(n: int, fractions: dict[str, float]) -> dict[str, int]:
     return counts
 
 
+def _some(ids: list[str], limit: int = 5) -> list[str]:
+    """The first few ids with a count of the rest, so an error stays one readable line."""
+    return ids if len(ids) <= limit else [*ids[:limit], f"… {len(ids) - limit} more"]
+
+
 def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
     errors: list[str] = []
     if not pool:
@@ -216,12 +242,14 @@ def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
         for row in pool:
             by_count.setdefault(row.channels or 1, []).append(row.id)
         if len(by_count) > 1:
-            shown = {count: sorted(ids) for count, ids in sorted(by_count.items())}
+            shown = {count: _some(sorted(ids)) for count, ids in sorted(by_count.items())}
             errors.append(f"patch.c: all needs one channel count; pool has {shown}")
-    else:
+    elif channel_policy not in (1, 3):  # 1 and 3 always have a recipe (mia_buffers.assume)
         short = sorted(row.id for row in pool if (row.channels or 1) < channel_policy)
         if short:
-            errors.append(f"patch.c: {channel_policy} needs at least {channel_policy} channels; {short} have fewer")
+            errors.append(
+                f"patch.c: {channel_policy} needs at least {channel_policy} channels; {_some(short)} have fewer"
+            )
     return errors
 
 
@@ -259,6 +287,10 @@ def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: lis
         )
         if decision.admitted:
             row.fit = fit(f, spec)
+            row.voxel_size_nm, row.assumed = voxel_size(f)
+            if largest is not None and spec.sampling.patch.c in (1, 3):
+                recipes = channel_recipes(largest.channels, f.family, f.modality_group)
+                row.channel_recipe = recipes["gray" if spec.sampling.patch.c == 1 else "rgb"]
             if row.fit.ok:
                 row.positions = positions(f, spec)
             if f.download_method == "other":

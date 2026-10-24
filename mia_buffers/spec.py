@@ -158,6 +158,7 @@ class Normalize(_Strict):
 class Sampling(_Strict):
     patch: Patch
     levels: list[int] = [1]
+    assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)
     output_axes: str = "tczyx"
     missing_axes: Literal["singleton", "drop"] = "singleton"
     label_axis: str | None = None  # accepted and ignored, see Spec.warnings

@@ -65,11 +65,6 @@ def test_fit_rules(spec):
     assert fit(F[HEMIBRAIN], spec).reason == "fits"
 
 
-def test_mitolab_small_patch_still_needs_voxel_size(spec):
-    small = spec_with(spec, **{"sampling.patch.2D": {"y": 64, "x": 64}, "sampling.levels": [1, 2]})
-    assert fit(F[MITOLAB], small).reason == "voxel size unknown"
-
-
 def test_positions_and_weights(spec_2d):
     assert positions(F[U937], spec_2d) == 100 and positions(F[BCSS], spec_2d) == 906
     plan = build_plan(spec_2d, "h", None, records())
@@ -173,3 +168,50 @@ def test_malformed_record_is_a_row_not_a_crash(spec_2d_mixed):
 
 def test_positions_counts_depth_for_3d(spec):
     assert positions(F[HEMIBRAIN], spec) == 1 * (41394 // 32) * (39725 // 1024) * (34427 // 1024)
+
+
+def test_assumed_voxel_size_admits_mitolab_unless_disabled(spec):
+    small = spec_with(spec, **{"sampling.patch.2D": {"y": 64, "x": 64}, "sampling.levels": [1, 2]})
+    assert fit(F[MITOLAB], small).reason == (
+        "fits (shape varies: checked against the representative item; voxel size assumed for x, y)"
+    )
+    strict = spec_with(small, **{"sampling.assume_voxel_size": False})
+    assert fit(F[MITOLAB], strict).reason == "voxel size unknown"
+
+
+def test_plan_rows_carry_voxel_size_and_recipe(spec_2d_mixed):
+    one = spec_with(spec_2d_mixed, **{"sampling.patch.c": 1})
+    plan = build_plan(one, "h", None, records())
+    assert plan.valid
+    assert plan.rows_by_id[U937].voxel_size_nm == {"x": 45.0718, "y": 45.0718} and plan.rows_by_id[U937].assumed == []
+    assert plan.rows_by_id[U937].channel_recipe == {"op": "mean"}
+    assert plan.rows_by_id[ONE_CH].channel_recipe == {"op": "channel", "index": 0}
+    three = build_plan(spec_with(spec_2d_mixed, **{"sampling.patch.c": 3}), "h", None, records())
+    assert three.valid and three.rows_by_id[ONE_CH].channel_recipe == {"op": "replicate"}
+    assert three.rows_by_id[BCSS].channel_recipe == {"op": "rgb"}
+    two = build_plan(spec_with(spec_2d_mixed, **{"sampling.patch.c": 2}), "h", None, records())
+    assert two.errors == [f"patch.c: 2 needs at least 2 channels; ['{ONE_CH}'] have fewer"]
+    assert "| 45.0718×45.0718 |" in plan.render_markdown()
+    mito = build_plan(
+        spec_with(
+            one,
+            **{"sampling.patch.2D": {"y": 64, "x": 64}, "sampling.levels": [1, 2], "select.where.min_size_voxels": 0},
+        ),
+        "h",
+        None,
+        records(),
+    )
+    assert "| 8×8 (assumed) |" in mito.render_markdown() and mito.rows_by_id[MITOLAB].assumed == ["x", "y"]
+
+
+def test_policy_error_lists_are_capped(spec_2d_mixed):
+    from mia_buffers.plan import _some
+
+    assert _some(["a", "b"]) == ["a", "b"] and _some([str(i) for i in range(8)]) == [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "… 3 more",
+    ]
