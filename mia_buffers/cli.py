@@ -8,25 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
-from .plan import UNREADABLE, build_plan
+from .plan import build_plan, load_records
 from .spec import SpecError, load_spec, spec_hash
-
-
-def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
-    """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: safe_load only."""
-    records = []
-    for path in sorted((catalog_dir / "datasets").rglob("*.yaml")):
-        try:
-            record = yaml.safe_load(path.read_text())
-        except yaml.YAMLError as error:
-            record = {UNREADABLE: f"{type(error).__name__}: {str(error).splitlines()[0]}"}
-        if not isinstance(record, dict):
-            record = {UNREADABLE: f"not a mapping: {type(record).__name__}"}
-        record.setdefault("id", path.stem)
-        records.append((str(path.relative_to(catalog_dir)), record))
-    return records
 
 
 def catalog_head(catalog_dir: Path) -> str | None:

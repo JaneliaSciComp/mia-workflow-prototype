@@ -53,9 +53,11 @@ def _split_planes(volume_id: str, planes: int, spec: Spec) -> dict[str, list[int
     return out
 
 
-def volume_bodies(row: dict, staged: Path, spec: Spec) -> list[tuple[str, dict]]:
-    """(volume id, `PUT volumes/<vol>` body) for every raw volume in the record's stage.json."""
-    report = json.loads((staged / "stage.json").read_text())
+def volume_bodies(row: dict, staged: Path, spec: Spec, report: dict | None = None) -> list[tuple[str, dict]]:
+    """(volume id, `PUT volumes/<vol>` body) for every raw volume in the record's stage.json (or in `report`, the
+    same JSON already read by the caller, e.g. through read_untrusted)."""
+    if report is None:
+        report = json.loads((staged / "stage.json").read_text())
     volumes = report.get("volumes") or []
     total_planes = sum(_planes(volume) for volume in volumes) or 1
     out = []

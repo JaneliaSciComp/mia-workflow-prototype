@@ -1,0 +1,319 @@
+"""mia_buffers.activities against fake GitHub clients, the fixture catalog as the catalog snapshot, and a live
+buffer-api for registration."""
+
+import hashlib
+import json
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+import yaml
+from mia_helpers import FakeGH
+from temporalio.exceptions import ApplicationError
+from test_buffers_config import make_cfg
+from test_buffers_plan import BCSS, CATALOG, ONE_CH, U937, spec_with
+from test_buffers_register import server, write_stage_json  # noqa: F401  (fixture)
+
+from mia_buffers import activities as acts_module
+from mia_buffers.activities import Activities
+from mia_buffers.drop import cache_key, read_manifest
+from mia_buffers.models import BufferPins, BufferState
+from mia_buffers.spec import load_spec
+from mia_buffers.status import render_plan_comment
+from mia_data.catalog import dataset_folder
+
+FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
+REF = "c" * 40
+ROUND = "i7-e11"
+
+
+def spec_text() -> str:
+    spec = spec_with(
+        load_spec(FIXTURES / "spec.yaml"),
+        **{
+            "select.where.dims": {"in": ["2D"]},
+            "select.where.annotations.source": "any",
+            "select.exclude.ids": [ONE_CH],
+            "select.exclude.reasons": {ONE_CH: "one channel"},
+            "catalog.ref": REF,
+        },
+    )
+    return yaml.safe_dump(spec.model_dump(by_alias=True, exclude={"warnings"}), sort_keys=False)
+
+
+def issue_body(spec: str | None = None, fences: int = 1) -> str:
+    block = f"```yaml\n{spec or spec_text()}```\n"
+    return "A buffer for the demo.\n\n" + block * fences + "\nNotes below.\n"
+
+
+def record_of(record_id: str) -> dict:
+    return yaml.safe_load(next(CATALOG.glob(f"datasets/**/{record_id}.yaml")).read_text())
+
+
+@pytest.fixture
+def acts(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path)
+    for directory in (cfg.paths.state_dir, cfg.paths.work_root, cfg.paths.storage_root, cfg.paths.raw_root):
+        directory.mkdir(parents=True, exist_ok=True)
+    (cfg.harness.dir / "tensorizers" / "muvit-2d").mkdir(parents=True)
+    (cfg.harness.dir / "tensorizers" / "muvit-2d" / "tensorizer.yaml").write_text("name: muvit-2d\n")
+
+    def fake_catalog_snapshot(cfg_, ref, tokens=None):
+        dest = cfg_.paths.work_root / "_catalog" / ref
+        if not dest.exists():
+            shutil.copytree(CATALOG, dest)
+        return dest
+
+    monkeypatch.setattr(acts_module, "catalog_snapshot", fake_catalog_snapshot)
+    monkeypatch.setattr(acts_module, "harness_pin", lambda cfg_: ("h" * 40, "d" * 64))
+    monkeypatch.setattr(acts_module, "harness_snapshot", lambda cfg_, commit: tmp_path / "hsnap")
+    gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": issue_body(), "labels": [{"name": "buffer:planning"}]}})
+    activities = Activities(
+        cfg,
+        gh,
+        FakeGH("o/snippets"),
+        FakeGH("o/catalog"),
+        None,
+        bot="bot",
+        probe=lambda: ["zenodo.org", "*.zenodo.org"],
+    )
+    activities.gh = gh
+    return activities
+
+
+async def admitted(acts) -> BufferPins:
+    return await acts.admit(7, "11")
+
+
+def write_binding(acts, record_id: str, urls: list[str], snippet: str = "tiff-zip-member") -> Path:
+    folder = acts.cfg.paths.storage_root / dataset_folder(record_of(record_id), record_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    binding = {
+        "record": record_id,
+        "record_commit": "c" * 40,
+        "snippets_commit": "a" * 40,
+        "raw": [{"snippet": snippet, "urls": urls, "params": {"axes": "zcyx"}}],
+        "labels": [],
+        "reasons": ["test"],
+    }
+    (folder / "binding.yaml").write_text(yaml.safe_dump(binding))
+    return folder / "binding.yaml"
+
+
+# -- admit and plan
+
+
+async def test_admit_writes_spec_and_pins(acts):
+    pins = await admitted(acts)
+    assert pins.catalog_ref == REF and pins.harness_commit == "h" * 40 and len(pins.spec_hash) == 64
+    round_dir = acts.cfg.paths.state_dir / "rounds" / ROUND
+    assert (round_dir / "spec.yaml").read_text() == spec_text() and (round_dir / "pins.json").is_file()
+    assert await acts.admit(7, "11") == pins
+
+
+@pytest.mark.parametrize("fences", [0, 2])
+async def test_admit_refuses_issue_without_one_yaml_fence(acts, fences):
+    acts.gh.issues[7]["body"] = issue_body(fences=fences)
+    with pytest.raises(ApplicationError, match="exactly one ```yaml") as error:
+        await admitted(acts)
+    assert error.value.non_retryable
+
+
+async def test_admit_refuses_invalid_spec(acts):
+    acts.gh.issues[7]["body"] = issue_body(spec_text().replace("schema_version: 1", "schema_version: 2"))
+    with pytest.raises(ApplicationError, match="spec refused") as error:
+        await admitted(acts)
+    assert error.value.non_retryable
+
+
+async def test_plan_writes_files_and_summarises(acts):
+    pins = await admitted(acts)
+    result = await acts.plan(7, ROUND, pins)
+    assert result.valid and result.errors == [] and result.n_seen == 6
+    assert sorted(d.record for d in result.pool) == sorted([BCSS, U937])
+    by_record = {d.record: d for d in result.pool}
+    assert by_record[U937].group == "confocal" and by_record[BCSS].group == "histology-WSI"
+    assert by_record[BCSS].manual and not by_record[U937].manual
+    assert (result.min_fraction, result.timeout_days, result.levels, result.patch) == (1.0, 14, [1, 2, 4], 256)
+    round_dir, workspace = acts.cfg.paths.state_dir / "rounds" / ROUND, acts.cfg.paths.work_root / "issue-7" / ROUND
+    assert json.loads((round_dir / "plan.json").read_text())["spec_hash"] == pins.spec_hash
+    assert (workspace / "plan.md").read_text() == (round_dir / "plan.md").read_text()
+
+
+async def test_plan_without_tensorizer_is_invalid(acts):
+    shutil.rmtree(acts.cfg.harness.dir / "tensorizers")
+    result = await acts.plan(7, ROUND, await admitted(acts))
+    assert not result.valid and result.errors == ["no tensorizer muvit-2d in the harness checkout"]
+
+
+async def test_comment_plan_posts_once(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    await acts.comment_plan(7, ROUND)
+    await acts.comment_plan(7, ROUND)
+    bodies = [c["body"] for c in acts.gh.comments[7]]
+    assert (
+        len(bodies) == 1
+        and "2 in the pool" in bodies[0]
+        and U937 in bodies[0]
+        and "<!-- mia-buffers: plan i7-e11 -->" in bodies[0]
+    )
+
+
+def test_render_plan_comment_truncates():
+    rows = [
+        {
+            "id": f"rec-{i}",
+            "in_pool": True,
+            "modality_group": "TEM",
+            "voxel_size_nm": {"y": 4, "x": 4},
+            "assumed": [],
+            "weight": 0.001,
+            "splits": {"train": 1},
+            "notes": [],
+            "admitted": True,
+            "fit": {"ok": True},
+        }
+        for i in range(3000)
+    ]
+    body = render_plan_comment(
+        {"spec_name": "s", "spec_hash": "h" * 64, "catalog_ref": REF, "errors": [], "warnings": [], "rows": rows},
+        "https://b/w",
+    )
+    assert len(body) <= 61_000 and "truncated" in body and "https://b/w" in body
+
+
+# -- bindings and the manual drop
+
+
+async def test_read_binding_found_hosts_and_copy(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
+    info = await acts.read_binding(ROUND, U937)
+    assert info.found and info.errors == [] and info.manual == []
+    assert info.hosts == ["conda.anaconda.org", "files.pythonhosted.org", "pypi.org", "repo.prefix.dev", "zenodo.org"]
+    copied = acts.cfg.paths.state_dir / "rounds" / ROUND / "bindings" / f"{U937}.yaml"
+    assert Path(info.path) == copied and info.hash == hashlib.sha256(copied.read_bytes()).hexdigest()
+
+
+async def test_read_binding_manual_when_host_not_allowed(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    urls = ["https://drive.google.com/uc?export=download&id=1", "manual://x/b.zip::m.png"]
+    write_binding(acts, BCSS, urls, snippet="png-pairs")
+    info = await acts.read_binding(ROUND, BCSS)
+    assert info.found and info.hosts == []
+    assert info.manual == [
+        ["https://drive.google.com/uc?export=download&id=1", "file-0"],
+        ["manual://x/b.zip", "b.zip"],
+    ]
+
+
+async def test_read_binding_missing_or_wrong_record(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    info = await acts.read_binding(ROUND, U937)
+    assert not info.found and info.errors and "no binding at" in info.errors[0]
+    path = write_binding(acts, U937, ["https://zenodo.org/a.tif"])
+    path.write_text(path.read_text().replace(f"record: {U937}", "record: other"))
+    info = await acts.read_binding(ROUND, U937)
+    assert not info.found and "names record 'other'" in info.errors[0]
+
+
+async def test_verify_drop_moves_files_and_writes_manifest(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, BCSS, ["manual://x/b.zip::m.png", "manual://x/b.zip::n.png"], snippet="png-pairs")
+    await acts.read_binding(ROUND, BCSS)
+    cache = acts.cfg.paths.raw_root / BCSS
+    (cache / "incoming").mkdir(parents=True)
+    (cache / "incoming" / "b.zip").write_bytes(b"zipbytes")
+    result = await acts.verify_drop(ROUND, BCSS)
+    validators = {"size": 8, "sha256": hashlib.sha256(b"zipbytes").hexdigest()}
+    assert result.ok and result.placed == ["b.zip"] and result.missing == []
+    assert (cache / cache_key("manual://x/b.zip", validators)).read_bytes() == b"zipbytes"
+    assert not (cache / "incoming" / "b.zip").exists()
+    entry = read_manifest(cache)["manual://x/b.zip"]
+    assert entry["validators"] == validators and entry["source"] == "manual"
+    assert (await acts.verify_drop(ROUND, BCSS)).ok  # idempotent: the manifest already has it
+
+
+async def test_verify_drop_rejects_symlink_and_empty_file(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, BCSS, ["manual://x/a.zip", "manual://x/b.zip", "manual://x/c.zip"], snippet="png-pairs")
+    await acts.read_binding(ROUND, BCSS)
+    cache = acts.cfg.paths.raw_root / BCSS
+    (cache / "incoming").mkdir(parents=True)
+    (cache / "incoming" / "a.zip").write_bytes(b"")
+    os.symlink("/etc/hostname", cache / "incoming" / "b.zip")
+    result = await acts.verify_drop(ROUND, BCSS)
+    assert not result.ok and result.placed == [] and result.missing == ["a.zip", "b.zip", "c.zip"]
+    assert not (cache / "files.json").exists() and (cache / "incoming" / "a.zip").exists()
+
+
+# -- the stage job's output and registration
+
+
+def staged_dir(acts, record_id):
+    return acts.cfg.paths.staged_root / "p256-l1-2-4" / record_id
+
+
+async def test_prepare_stage_makes_workspace_and_dirs(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/a.tif"])
+    await acts.read_binding(ROUND, U937)
+    workspace = Path(await acts.prepare_stage(7, ROUND, U937))
+    assert workspace == acts.cfg.paths.work_root / "issue-7" / ROUND / f"stage-{U937}"
+    assert yaml.safe_load((workspace / "record.yaml").read_text())["id"] == U937
+    assert yaml.safe_load((workspace / "binding.yaml").read_text())["record"] == U937
+    assert (acts.cfg.paths.raw_root / U937).is_dir() and staged_dir(acts, U937).is_dir()
+
+
+async def test_read_stage_reduces_report(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    assert (await acts.read_stage(ROUND, U937)).errors == ["stage.json is missing, unreadable or not a JSON object"]
+    write_stage_json(staged_dir(acts, U937))
+    result = await acts.read_stage(ROUND, U937)
+    assert result.ok and result.volumes == 1 and result.errors == []
+    (staged_dir(acts, U937) / "stage.json").write_text(
+        json.dumps(
+            {"ok": False, "volumes": [], "errors": ["boom"], "host_not_allowed": {"host": "h.example", "chain": []}}
+        )
+    )
+    result = await acts.read_stage(ROUND, U937)
+    assert not result.ok and result.errors == ["boom"] and result.host_not_allowed == "h.example"
+
+
+async def test_register_dataset_against_live_service(acts, server):  # noqa: F811
+    acts.cfg.service.url = server
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_stage_json(staged_dir(acts, U937))
+    await acts.create_buffer(ROUND, ROUND)
+    result = await acts.register_dataset(ROUND, U937, ROUND)
+    assert result.registered == [f"{U937}/v0.zarr"] and result.refused == {}
+    import httpx
+
+    status = httpx.get(f"{server}/buffers/{ROUND}/status").json()
+    assert status["config"]["spec_name"] == "microscopy-foundation-pretrain" and status["volumes"] == 1
+
+
+# -- labels and comments
+
+
+async def test_set_stage_swaps_label_and_comments_once(acts):
+    state = BufferState(7, round_id=ROUND, stage="plan-review")
+    await acts.set_stage(7, "plan-review", state, "approve the plan")
+    await acts.set_stage(7, "plan-review", state, "approve the plan")
+    assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:plan-review"]
+    bodies = [c["body"] for c in acts.gh.comments[7]]
+    assert len(bodies) == 1 and "`buffer:plan-review`" in bodies[0] and "approve the plan" in bodies[0]
+
+
+async def test_refuse_label_removes_and_explains(acts):
+    acts.gh.issues[7]["labels"].append({"name": "buffer:approve"})
+    await acts.refuse_label(7, "buffer:approve", "it is older than the plan", "12")
+    assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in acts.gh.comments[7][0]["body"]
+    with pytest.raises(ApplicationError):
+        await acts.refuse_label(7, "data:go", "x", "12")
+
+
+async def test_limits_come_from_config(acts):
+    limits = await acts.limits()
+    assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")

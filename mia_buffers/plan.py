@@ -8,6 +8,9 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
 
 from .assume import channel_recipes, voxel_size
 from .select import Decision, decide_all
@@ -257,6 +260,21 @@ def _unreadable_row(path: str, record: dict, error: str) -> Row:
     raw_id = record.get("id")
     record_id = raw_id if isinstance(raw_id, str) else path.rsplit("/", 1)[-1].removesuffix(".yaml")
     return Row(record_id, path, None, None, None, None, None, 0, False, f"record unreadable: {error}")
+
+
+def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
+    """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: safe_load only."""
+    records = []
+    for path in sorted((catalog_dir / "datasets").rglob("*.yaml")):
+        try:
+            record = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as error:
+            record = {UNREADABLE: f"{type(error).__name__}: {str(error).splitlines()[0]}"}
+        if not isinstance(record, dict):
+            record = {UNREADABLE: f"not a mapping: {type(record).__name__}"}
+        record.setdefault("id", path.stem)
+        records.append((str(path.relative_to(catalog_dir)), record))
+    return records
 
 
 def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: list[tuple[str, dict]]) -> Plan:
