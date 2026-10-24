@@ -81,5 +81,5 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-module = ["csub", "csub.*"]
+module = ["csub", "csub.*", "torch", "muvit.*", "mia_harness.*"]  # optional consumer-side imports in mia_buffers.client
 ignore_missing_imports = true
