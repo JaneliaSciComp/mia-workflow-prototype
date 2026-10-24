@@ -14,7 +14,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -114,7 +114,8 @@ class BufferService:
             for route_method, pattern, name in ROUTES:
                 match = pattern.match(path)
                 if match and route_method == method:
-                    return getattr(self, f"_{name}")(*match.groups(), query=query, body=body)
+                    segments = [unquote(group) for group in match.groups()]  # volume ids hold "/" (record/v0.zarr)
+                    return getattr(self, f"_{name}")(*segments, query=query, body=body)
             raise HttpError(404, f"no route {method} {path}")
         except HttpError as error:
             return error.status, {"error": str(error)}, {}

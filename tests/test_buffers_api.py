@@ -137,5 +137,7 @@ def test_over_http(tmp_path):
         empty = httpx.get(f"{base}/buffers/b/split/val", params={"from": 0, "n": 1, "consumer": cid})
         assert empty.status_code == 200
         assert httpx.get(f"{base}/nothing").status_code == 404
+        assert httpx.put(f"{base}/buffers/b/volumes/rec%2Fv0.zarr", json=body("rec")).status_code == 200
+        assert httpx.get(f"{base}/buffers/b/status").json()["volumes"] == 2
     finally:
         server.shutdown()

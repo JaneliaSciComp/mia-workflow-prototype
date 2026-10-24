@@ -1,4 +1,4 @@
-"""The `mia-buffers` command line: `plan` (offline planner over a catalog checkout) and `serve` (buffer-api)."""
+"""The `mia-buffers` command line: `plan` (offline planner), `serve` (buffer-api) and `register` (plan → buffer)."""
 
 from __future__ import annotations
 
@@ -65,6 +65,27 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _register(args: argparse.Namespace) -> int:
+    from .register import register
+
+    try:
+        spec = load_spec(args.spec)
+    except SpecError as error:
+        print(f"spec refused: {error}", file=sys.stderr)
+        return 1
+    out = register(
+        args.url,
+        args.buffer,
+        json.loads(args.plan.read_text()),
+        spec,
+        args.staged_root,
+        tensorizer=args.tensorizer,
+        split_sizes={"val": args.val_size, "test": args.test_size},
+    )
+    print(json.dumps(out, indent=1))
+    return 0 if out["registered"] else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mia-buffers")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -83,6 +104,16 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     serve.set_defaults(func=_serve)
+    reg = sub.add_parser("register", help="register a plan's staged volumes with a running buffer-api")
+    reg.add_argument("plan", type=Path, help="plan.json from `mia-buffers plan --json`")
+    reg.add_argument("spec", type=Path)
+    reg.add_argument("--staged-root", type=Path, required=True, help="<root>/<record id>/stage.json per record")
+    reg.add_argument("--url", required=True, help="buffer-api base URL")
+    reg.add_argument("--buffer", required=True, help="buffer id")
+    reg.add_argument("--tensorizer", default="muvit-2d")
+    reg.add_argument("--val-size", type=int, default=256, help="frozen val list length")
+    reg.add_argument("--test-size", type=int, default=256, help="frozen test list length")
+    reg.set_defaults(func=_register)
     args = parser.parse_args(argv)
     return int(args.func(args))
 
