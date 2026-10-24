@@ -329,3 +329,17 @@ def test_stack_rejects_services_sharing_a_deployment(tmp_path, fake):
                 }
             )
         )
+
+
+def test_mia_buffers_app_mounts(tmp_path):
+    from test_buffers_config import make_cfg
+
+    cfg = make_cfg(tmp_path)
+    app = services.APPS["mia-buffers"]
+    assert app.module == "mia_buffers.cli" and app.config_env == "MIA_BUFFERS_CONFIG"
+    assert app.extra_mounts(cfg) == [
+        ("--ro", cfg.harness.dir),
+        ("--ro", cfg.paths.storage_root),
+        ("--rw", cfg.paths.raw_root),
+        ("--rw", cfg.paths.staged_root),
+    ]

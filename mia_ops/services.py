@@ -92,12 +92,20 @@ class App:
     def extra_mounts(self, cfg: Any) -> list[tuple[str, Path]]:
         if self.package == "mia_data":
             return [("--ro", cfg.harness.dir), ("--rw", cfg.paths.storage_root)]
+        if self.package == "mia_buffers":  # bindings are read from mia-data's storage_root; the caches are written
+            return [
+                ("--ro", cfg.harness.dir),
+                ("--ro", cfg.paths.storage_root),
+                ("--rw", cfg.paths.raw_root),
+                ("--rw", cfg.paths.staged_root),
+            ]
         return []
 
 
 APPS = {
     "autodev": App("autodev", "AUTODEV_CONFIG", "AUTODEV_TEMPORAL_VIA_PROXY"),
     "mia-data": App("mia_data", "MIA_DATA_CONFIG", "MIA_DATA_TEMPORAL_VIA_PROXY"),
+    "mia-buffers": App("mia_buffers", "MIA_BUFFERS_CONFIG", "MIA_BUFFERS_TEMPORAL_VIA_PROXY"),
 }
 
 

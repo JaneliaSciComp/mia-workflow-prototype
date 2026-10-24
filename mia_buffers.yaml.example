@@ -1,0 +1,38 @@
+# Copy to mia_buffers.yaml (git-ignored). Same shape as mia_data.yaml, plus the buffer roots and the service.
+deployment: mia-buffers
+github:
+  buffers_repo: JaneliaSciComp/mia-buffers     # one issue per buffer spec; humans add buffer:go / buffer:approve
+  snippets_repo: JaneliaSciComp/mia-snippets
+  catalog_repo: AI-HHMI/mia-agentic-search
+  auth: token            # token | app (app needs app_id, installation_id, private_key_path)
+  token_env: GITHUB_TOKEN
+temporal:
+  address: localhost:7233
+  namespace: mia-buffers
+  via_https_proxy: false
+  poll_minutes: 2
+paths:
+  state_dir: ~/.local/state/mia-buffers        # specs, plans, pins, job ids; never mounted into a job
+  work_root: /shared/TBD/mia-buffers-work      # job workspaces, catalog and harness snapshots
+  storage_root: /shared/TBD/mia-crops          # mia-data's storage_root: <dataset folder>/binding.yaml is read here
+  raw_root:                                    # the shared raw cache, raw_root/<record id>/ (may be mia-data's
+    path: /shared/TBD/mia-raw                  # <work_root>/_cache to share downloads); humans drop files under
+    url: https://fileglancer.example.org/browse/TBD/mia-raw   # raw_root/<record id>/incoming/
+  staged_root:                                 # one NGFF pyramid per volume, staged_root/<levels key>/<record id>/
+    path: /shared/TBD/mia-staged
+    url: https://fileglancer.example.org/browse/TBD/mia-staged
+service:
+  url: http://buffer-api.example.org:8765      # `mia-buffers serve`
+sourcing:
+  parallel: 4            # stage jobs in flight per buffer
+  tensorizer: muvit-2d   # under <harness.dir>/tensorizers/
+  val_size: 256          # frozen val/test list lengths
+  test_size: 256
+limits:
+  job_bytes: 5e9
+  job_walltime_min: 120
+harness:
+  dir: /path/to/mia-snippets-checkout   # pinned per round by commit + pixi.lock digest
+network:
+  package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
+  redirect_hosts: {}

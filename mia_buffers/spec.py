@@ -1,6 +1,6 @@
 """The buffer spec: the YAML a buffer issue carries, validated strictly (unknown keys refused).
 
-The grammar is the catalog's examples/spec-microscopy-pretrain.yaml plus `sampling.levels`. Decisions the
+The grammar is the catalog's examples/spec-microscopy-pretrain.yaml plus `sampling.levels`, `ready` and `sourcing`. Decisions the
 architecture spec leaves open are fixed in notes/plans/2026-10-23-mia-buffers-milestone-0.md. The spec is untrusted
 text: safe-loaded, every field typed, and refused with the validator's own message.
 """
@@ -199,6 +199,18 @@ class Cache(_Strict):
     num_workers: int = 16
 
 
+class Ready(_Strict):
+    """When a sourcing buffer is announced ready: the servable share each weighting group must reach (spec §1)."""
+
+    min_fraction: float = Field(default=1.0, gt=0, le=1)
+
+
+class Sourcing(_Strict):
+    """How long a weighting group may stay without a servable dataset before the issue needs a human (spec §1)."""
+
+    dataset_timeout_days: float = Field(default=14, gt=0)
+
+
 class Spec(_Strict):
     schema_version: Literal[1]
     name: str
@@ -207,6 +219,8 @@ class Spec(_Strict):
     sampling: Sampling
     splits: Splits
     cache: Cache | None = None
+    ready: Ready = Ready()
+    sourcing: Sourcing = Sourcing()
     warnings: list[str] = []  # filled by the validator, not by the file
 
     @model_validator(mode="after")

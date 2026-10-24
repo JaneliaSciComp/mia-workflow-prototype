@@ -57,3 +57,16 @@ def test_refused(tmp_path, edit, needle):
 def test_spec_hash_is_file_sha256():
     path = FIXTURES / "spec.yaml"
     assert spec_hash(path) == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_ready_and_sourcing_defaults():
+    spec = load_spec(FIXTURES / "spec.yaml")
+    assert spec.ready.min_fraction == 1.0 and spec.sourcing.dataset_timeout_days == 14
+
+
+@pytest.mark.parametrize("edit", [{"ready": {"min_fraction": 0}}, {"ready": {"min_fraction": 1.5}}])
+def test_ready_fraction_bounds(tmp_path, edit):
+    path = tmp_path / "spec.yaml"
+    path.write_text(yaml.safe_dump(_merge(yaml.safe_load((FIXTURES / "spec.yaml").read_text()), edit)))
+    with pytest.raises(SpecError, match="min_fraction"):
+        load_spec(path)

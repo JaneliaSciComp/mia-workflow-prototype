@@ -23,7 +23,7 @@ class TemporalCfg(BaseModel):
 
 
 class ServiceCfg(BaseModel):
-    app: Literal["autodev", "mia-data"]
+    app: Literal["autodev", "mia-data", "mia-buffers"]
     config: Path  # relative to the repo
 
 

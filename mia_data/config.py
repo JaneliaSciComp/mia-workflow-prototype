@@ -12,8 +12,9 @@ import math
 import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 from urllib.parse import quote
 
 import yaml
@@ -68,6 +69,8 @@ class PathsCfg(BaseModel):
     """`work_root` and `storage_root` take a path, or `{path, url}` where `url` is where a browser (Fileglancer)
     shows that folder; issue comments then link the folders they mention."""
 
+    ROOTS: ClassVar[tuple[str, ...]] = ("work_root", "storage_root")  # the roots that take `{path, url}`
+
     state_dir: Path = Path("~/.local/state/mia-data")
     work_root: Path
     work_root_url: str | None = None
@@ -80,14 +83,15 @@ class PathsCfg(BaseModel):
         """Accept `{path, url}` for a root and split it into the `<root>` and `<root>_url` fields."""
         if isinstance(data, dict):
             data = dict(data)
-            for key in ("work_root", "storage_root"):
+            for key in cls.ROOTS:
                 if isinstance(value := data.get(key), dict):
                     data[key], data[f"{key}_url"] = value.get("path"), value.get("url")
         return data
 
     def link(self, path: Path) -> str | None:
         """The browse URL of `path`, from the url of the root it is under; None when that root has none."""
-        for root, url in ((self.work_root, self.work_root_url), (self.storage_root, self.storage_root_url)):
+        for name in self.ROOTS:
+            root, url = getattr(self, name), getattr(self, f"{name}_url")
             if url and path.is_relative_to(root):
                 rel = path.relative_to(root)
                 return url.rstrip("/") + ("" if rel == Path() else "/" + quote(rel.as_posix()))
@@ -217,22 +221,32 @@ class Config(BaseModel):
         return f"<!-- mia-data: {text} -->"
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
+def load_config(
+    path: str | os.PathLike | None = None,
+    *,
+    cls: type[Config] = Config,
+    env_var: str = "MIA_DATA_CONFIG",
+    default_name: str = "mia_data.yaml",
+    prog: str = "mia-data",
+    overrides: Mapping[str, tuple[str, ...]] = _ENV_OVERRIDES,
+) -> Config:
+    """Load and validate the config file, exiting with a readable message if it is missing or invalid.
+
+    mia_buffers loads its `Config` subclass through the same function (`cls`, its own env var and file name)."""
     load_dotenv()
-    path = Path(path or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml")
+    path = Path(path or os.environ.get(env_var) or PROJECT_DIR / default_name)
     if not path.is_file():
-        sys.exit(f"mia-data: config not found at {path} (copy mia_data.yaml.example, or set $MIA_DATA_CONFIG)")
+        sys.exit(f"{prog}: config not found at {path} (copy {default_name}.example, or set ${env_var})")
     data = yaml.safe_load(path.read_text()) or {}
-    for env_var, key_path in _ENV_OVERRIDES.items():
-        if os.environ.get(env_var):
+    for env_name, key_path in overrides.items():
+        if os.environ.get(env_name):
             node = data
             for key in key_path[:-1]:
                 if node.get(key) is None:  # a bare `temporal:` in YAML parses as None
                     node[key] = {}
                 node = node[key]
-            node[key_path[-1]] = os.environ[env_var]
+            node[key_path[-1]] = os.environ[env_name]
     try:
-        return Config(**data)
+        return cls(**data)
     except ValidationError as err:
-        sys.exit(f"mia-data: invalid config {path}:\n{err}")
+        sys.exit(f"{prog}: invalid config {path}:\n{err}")
