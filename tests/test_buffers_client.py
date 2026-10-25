@@ -130,3 +130,27 @@ def test_meta_has_no_none_values(buffer_server, monkeypatch):
         return isinstance(value, list) and any(v is None or has_none(v) for v in value)
 
     assert "record" not in meta and "channels" not in meta["descriptor"] and not has_none(meta)
+
+
+def test_collate_stacks_the_shared_keys_and_keeps_meta_as_a_list(monkeypatch):
+    """A buffer mixes datasets whose label layers (and meta keys) differ; torch's default_collate needs identical
+    dicts, so BufferDataset.collate stacks what every sample has and leaves the rest out."""
+    from mia_buffers.client import collate
+
+    monkeypatch.setattr(client_module, "_stack", lambda values: ("stacked", *values))  # torch/numpy stack stand-in
+    a = {
+        "img": "ia",
+        "bbox": "ba",
+        "label/nuclei": "na",
+        "label/edu": "ea",
+        "meta": {"plane": {"z": 1}, "normalize": 1},
+    }
+    b = {"img": "ib", "bbox": "bb", "label/nuclei": "nb", "meta": {"plane": {"z": 0}}}
+    out = collate([a, b])
+    assert out == {
+        "img": ("stacked", "ia", "ib"),
+        "bbox": ("stacked", "ba", "bb"),
+        "label/nuclei": ("stacked", "na", "nb"),
+        "meta": [a["meta"], b["meta"]],
+    }
+    assert BufferDataset.collate is collate

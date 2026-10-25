@@ -107,10 +107,29 @@ except ImportError:
     Base = _Base
 
 
+def collate(batch: list[dict]) -> dict:
+    """`DataLoader(..., collate_fn=BufferDataset.collate)`: a buffer mixes datasets whose label layers differ (and
+    whose meta keys differ), which torch's default_collate rejects. Stacks every key all samples share; `meta`
+    stays a list of per-sample dicts; a label layer some dataset lacks is left out of the batch."""
+    keys = sorted(set.intersection(*(set(sample) for sample in batch)) - {"meta"})
+    out: dict = {key: _stack([sample[key] for sample in batch]) for key in keys}
+    out["meta"] = [sample["meta"] for sample in batch]
+    return out
+
+
+def _stack(values: list) -> Any:
+    if torch is not None and isinstance(values[0], torch.Tensor):
+        return torch.stack(values)
+    import numpy
+
+    return numpy.stack(values)
+
+
 class BufferDataset(Base):
     """Map-style dataset over one buffer and split; train streams fresh crops, val and test replay a frozen list."""
 
     ndim = 2
+    collate = staticmethod(collate)  # DataLoader(..., collate_fn=BufferDataset.collate)
 
     def __init__(
         self,
