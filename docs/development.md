@@ -135,7 +135,10 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    person with write access counts.
 2. **Planning.** The worker pins the round (`state_dir/rounds/<round>/`: `spec.yaml`, `pins.json`), archives the
    catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan; `plan.md` and `plan.json` land
-   in the round directory and in the browsable `work_root/issue-<n>/<round>/`. The plan is posted (pool table,
+   in the round directory and in the browsable `work_root/issue-<n>/<round>/`. Everything sourcing needs is
+   checked here: a record mia-data could not place (no single modality family and organism, the rule behind
+   `<dataset folder>`) or whose voxel size is unknown stays out of the pool with that reason, and each pool
+   row's voxel size travels to its stage job (1 nm for the plane axis a 2D stack keeps). The plan is posted (pool table,
    cut at 60k characters) and the issue moves to `buffer:plan-review`; an invalid plan, or no `tensorizers/<name>`
    in the harness checkout, goes to `buffer:needs-human`.
 3. **Approval.** `buffer:approve` newer than the plan comment starts sourcing; an older one is refused with a
