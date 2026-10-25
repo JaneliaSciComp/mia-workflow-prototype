@@ -197,7 +197,13 @@ def test_ensure_namespace_failure_is_one_line(tmp_path, fake):
 
 
 def worker_command(fake, session):
-    (call,) = [c for c, _ in fake.calls if c[:2] == ["tmux", "new-window"] and c[c.index("-t") + 1] == f"={session}"]
+    (call,) = [
+        c
+        for c, _ in fake.calls
+        if c[:2] == ["tmux", "new-window"]
+        and c[c.index("-t") + 1] == f"={session}"
+        and c[c.index("-n") + 1] == "worker"
+    ]
     return call[-1]
 
 
@@ -343,3 +349,41 @@ def test_mia_buffers_app_mounts(tmp_path):
         ("--rw", cfg.paths.raw_root),
         ("--rw", cfg.paths.staged_root),
     ]
+
+
+def make_buffers_stack(tmp_path):
+    write_configs(tmp_path)
+    (tmp_path / "mia_buffers.yaml").write_text(
+        f"github: {{buffers_repo: o/b, datasets_repo: o/d, snippets_repo: o/s, catalog_repo: o/c, "
+        f"token_file: {tmp_path}/token}}\n"
+        "temporal: {address: localhost:7233, namespace: mia-buffers}\n"
+        f"paths: {{state_dir: {tmp_path}/mb-state, work_root: {tmp_path}/mb-work, storage_root: {tmp_path}/store, "
+        f"raw_root: {tmp_path}/raw, staged_root: {tmp_path}/staged}}\n"
+        "service: {url: http://buffer-host.example.org:8765}\n"
+        f"harness: {{dir: {tmp_path}/harness}}\n"
+    )
+    return Stack(
+        Manifest(
+            sandbox_dir=tmp_path / "sandbox",
+            temporal={"managed": True, "state_dir": tmp_path / "temporal"},
+            services={"mia-buffers": {"app": "mia-buffers", "config": tmp_path / "mia_buffers.yaml"}},
+        )
+    )
+
+
+def test_up_mia_buffers_starts_buffer_api_on_the_host_and_lets_the_worker_reach_it(tmp_path, fake):
+    s = make_buffers_stack(tmp_path)
+    services.service_up(s.services["mia-buffers"], s, Temporal(s))
+    windows_ = [(c[c.index("-n") + 1], c[-1]) for c in tmux_calls(fake, "new-window")]
+    assert [name for name, _ in windows_] == ["api", "worker"]
+    api = dict(windows_)["api"]
+    assert "sandbox-run.sh" not in api
+    assert f"-m mia_buffers.cli serve --state-dir {tmp_path}/mb-state --host buffer-host.example.org --port 8765" in api
+    assert f"{tmp_path}/mb-state-host/logs/api.log" in api
+    assert "--allow localhost --allow buffer-host.example.org" in worker_command(fake, "mia-buffers")
+    assert s.services["mia-buffers"].logs()["api"] == tmp_path / "mb-state-host/logs/api.log"
+
+
+def test_only_mia_buffers_has_an_api_window(tmp_path, fake):
+    s = make_stack(tmp_path)
+    assert "api" not in s.services["autodev"].logs() and "api" not in s.services["mia-data"].logs()

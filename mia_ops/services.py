@@ -1,5 +1,6 @@
 """The services in mia.yaml and how to run them: a Temporal dev server (or an external one), and per app
-service one tmux session holding a csub broker and a worker inside agentic-sandbox."""
+service one tmux session holding a csub broker and a worker inside agentic-sandbox (mia-buffers adds buffer-api,
+which runs on the host like the broker)."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from autodev.config import PROJECT_DIR
 
@@ -101,6 +103,14 @@ class App:
             ]
         return []
 
+    def api_endpoint(self, cfg: Any) -> tuple[str, int] | None:
+        """(host, port) of buffer-api from `service.url`: `mia up` runs it beside the broker and lets the worker
+        reach that host through the sandbox proxy. None for the apps without a service."""
+        if self.package != "mia_buffers":
+            return None
+        url = urlparse(cfg.service.url)
+        return url.hostname or "localhost", url.port or 80
+
 
 APPS = {
     "autodev": App("autodev", "AUTODEV_CONFIG", "AUTODEV_TEMPORAL_VIA_PROXY"),
@@ -135,7 +145,10 @@ class Service:
         return Path(path).expanduser().resolve() if path else None
 
     def logs(self) -> dict[str, Path]:
-        return {"worker": self.state / "logs/worker.log", "broker": self.host / "logs/broker.log"}
+        logs = {"worker": self.state / "logs/worker.log", "broker": self.host / "logs/broker.log"}
+        if self.app.api_endpoint(self.cfg):
+            logs["api"] = self.host / "logs/api.log"
+        return logs
 
 
 class Stack:
@@ -299,6 +312,12 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     sock = svc.run / "csub.sock"
     broker_log = svc.host / "logs/broker.log"
     new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
+    allow = ["github.com", "api.github.com", temporal.host]
+    if endpoint := svc.app.api_endpoint(cfg):  # buffer-api: on the host, unsandboxed like the broker
+        host, port = endpoint
+        allow.append(host)
+        api = shell(PY, "-m", svc.app.module, "serve", "--state-dir", svc.state, "--host", host, "--port", port)
+        new_window(svc.name, "api", f"{api} 2>&1 | tee -a {shell(svc.host / 'logs/api.log')}")
     # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
     # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
     mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]
@@ -306,7 +325,7 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         mounts += [flag, path]
     mounts += ["--rw", cfg.paths.work_root, "--rw", svc.run]
     worker = shell(
-        sandbox, *mounts, "--allow", "github.com", "--allow", "api.github.com", "--allow", temporal.host, "--",
+        sandbox, *mounts, *(a for h in allow for a in ("--allow", h)), "--",
         "env", f"{svc.app.config_env}={svc.config_path}", "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
         f"{svc.app.proxy_env}=1", PY, "-m", svc.app.module, "worker",
     )  # fmt: skip

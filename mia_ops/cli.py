@@ -63,7 +63,10 @@ def cmd_logs(stack: Stack, args: argparse.Namespace) -> int:
             sys.exit("temporal is external (temporal.managed is false); see your cluster")
         path = temporal.log
     else:
-        path = stack.service(args.service).logs()[args.window]
+        logs = stack.service(args.service).logs()
+        if args.window not in logs:
+            sys.exit(f"{args.service} has no {args.window} window (it has {', '.join(logs)})")
+        path = logs[args.window]
     if not path.is_file():
         sys.exit(f"no log at {path}")
     cmd = ["tail", "-n", str(args.lines), *(["-F"] if args.follow else []), str(path)]
@@ -113,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         "logs", help="tail a service's log (default window: worker; `mia logs temporal` for Temporal)"
     )
     logs.add_argument("service")
-    logs.add_argument("window", nargs="?", default="worker", choices=["worker", "broker"])
+    logs.add_argument("window", nargs="?", default="worker", choices=["worker", "broker", "api"])
     logs.add_argument("-n", "--lines", type=int, default=50)
     logs.add_argument("-f", "--follow", action="store_true", help="keep following (default: print the last lines)")
     sub.add_parser("attach", help="attach to a service's tmux session").add_argument("service")
