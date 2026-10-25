@@ -118,6 +118,7 @@ class DatasetIssue:
     stage: str
     nudged: bool
     note: str = ""
+    folder: str = ""  # the dataset folder under storage_root, where the poller watches for binding.yaml
 
 
 @dataclass
@@ -134,6 +135,7 @@ class DatasetStatus:
     volumes: int = 0
     reason: str = ""
     issue: int | None = None  # the dataset's issue number in the datasets repo, once looked up
+    folder: str = ""  # <storage_root>/<folder>/binding.yaml is what the poller watches while waiting-dataset
 
 
 @dataclass

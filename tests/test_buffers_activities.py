@@ -204,6 +204,79 @@ def test_plan_comment_lists_dropped_records():
     assert "**Dropped**" not in render_plan_comment(plan, None)
 
 
+# -- the dataset hand-off (milestone 4)
+
+
+def with_datasets(acts, issues=None):
+    """Give the activities a datasets-repo client holding `issues` (number -> labels)."""
+    gh = FakeGH(
+        "o/data",
+        issues={
+            n: {"number": n, "body": f"<!-- mia-data:record={rid} -->\n", "labels": [{"name": x} for x in labels]}
+            for n, (rid, labels) in (issues or {}).items()
+        },
+    )
+    acts.gh_datasets = gh
+    return gh
+
+
+async def test_nudge_dataset_opens_the_issue_and_adds_go(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts)
+    info = await acts.nudge_dataset(ROUND, U937)
+    assert (info.number, info.stage, info.nudged) == (100, "new", True) and info.folder == "lm-human-u937-edu-h2ax-dapi"
+    ((title, body, labels),) = gh.created
+    assert body.startswith(f"<!-- mia-data:record={U937} -->") and title.startswith(U937) and "data:new" in labels
+    assert "Downloaded by: none" in body and "data:go" in {x["name"] for x in gh.issues[100]["labels"]}
+    again = await acts.nudge_dataset(ROUND, U937)  # a retry: the issue exists and already carries data:go
+    assert (again.number, again.nudged) == (100, False) and len(gh.created) == 1
+
+
+async def test_nudge_dataset_in_progress_does_not_relabel(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts, {5: (U937, ["data:testing"])})
+    info = await acts.nudge_dataset(ROUND, U937)
+    assert (info.number, info.stage, info.nudged) == (5, "testing", False)
+    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:testing"}
+
+
+async def test_nudge_dataset_ineligible(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts, {5: (U937, ["data:ineligible", "licence-excluded"])})
+    info = await acts.nudge_dataset(ROUND, U937)
+    assert (info.number, info.stage, info.nudged) == (5, "ineligible", False)
+    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:ineligible", "licence-excluded"}
+
+
+async def test_nudge_dataset_done_without_binding_reports_it(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts, {5: (U937, ["data:done"])})
+    info = await acts.nudge_dataset(ROUND, U937)
+    assert (info.number, info.stage, info.nudged) == (5, "done", False)
+    assert "binding.yaml" in info.note and "data:go" in info.note
+    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:done"}
+
+
+async def test_nudge_dataset_needs_human_gets_go_again(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts, {5: (U937, ["data:needs-human"])})
+    info = await acts.nudge_dataset(ROUND, U937)
+    assert (info.stage, info.nudged) == ("needs-human", True)
+    assert "data:go" in {x["name"] for x in gh.issues[5]["labels"]}
+
+
+async def test_comment_plan_reposts_once_per_dropped_set(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    await acts.comment_plan(7, ROUND)
+    await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
+    await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
+    bodies = [c["body"] for c in acts.gh.comments[7]]
+    assert len(bodies) == 2 and "**Dropped**" in bodies[1] and f"- `{BCSS}`: data:ineligible" in bodies[1]
+    assert "1 in the pool" in bodies[1] and f"| `{BCSS}` |" not in bodies[1]
+    await acts.comment_plan(7, ROUND, {BCSS: "x", U937: "y"})
+    assert len(acts.gh.comments[7]) == 3
+
+
 # -- bindings and the manual drop
 
 

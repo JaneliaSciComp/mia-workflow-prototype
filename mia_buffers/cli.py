@@ -92,10 +92,15 @@ async def cmd_worker(cfg: Config) -> int:
     from .workflows import MiaBuffer, MiaBufferPoll
 
     client = await _client(cfg)
-    clients = _github_clients(cfg)
+    clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
     bot = await bot_login(cfg)
     activities = Activities(
-        cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
+        cfg,
+        *clients[:3],
+        jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"),
+        bot=bot,
+        client=client,
+        gh_datasets=clients[3],
     )
     main_worker = Worker(
         client,

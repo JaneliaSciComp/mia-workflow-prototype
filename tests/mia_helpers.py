@@ -53,6 +53,9 @@ class FakeGH:
     async def list_issues(self, **params):
         return list(self.issues.values())
 
+    async def find_issue_by_marker(self, marker, labels=None):
+        return next((i for i in self.issues.values() if marker in (i.get("body") or "")), None)
+
     async def add_labels(self, n, labels):
         self.issues[n]["labels"] += [{"name": x} for x in labels]
 

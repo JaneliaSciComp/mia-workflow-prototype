@@ -3,7 +3,9 @@
 `MiaBuffer` lives as long as the issue does. Each `go` starts a round: the spec in the issue body is planned
 against the catalog, a human approves the plan, then every dataset of the pool is sourced in parallel (a stage
 job, or a manual drop first) and registered with buffer-api as it becomes servable; the issue is `ready` once
-every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining.
+every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining. A dataset with no
+approved binding is handed to mia-data (`data:go` on its dataset issue) and waits for the poller's
+`dataset_update`; one that ends ineligible, or is still waiting at the timeout, is dropped from the plan.
 
 Workflow code does no I/O: every GitHub, filesystem, cluster and service interaction is an activity called by
 name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
@@ -28,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         BindingInfo,
         BufferPins,
         BufferState,
+        DatasetIssue,
         DatasetStatus,
         DropResult,
         PlanResult,
@@ -43,6 +46,7 @@ GO, APPROVE = "buffer:go", "buffer:approve"
 BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
 NOT_REVIEW = "`buffer:approve` counts only while the issue is in `buffer:plan-review`, for the plan under review."
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
+WAITING = ("waiting-dataset", "waiting-drop")  # dataset statuses that wait on a human or on mia-data
 
 
 class RoundFailed(Exception):
@@ -73,6 +77,7 @@ class MiaBuffer:
         self.go_events: list[LabelEvent] = []
         self.approve_events: list[LabelEvent] = []
         self.drops: set[str] = set()  # records whose files a human dropped since we last looked
+        self.dataset_updates: dict[str, str] = {}  # record -> "binding" | "ineligible", from the poller
         self.limits: SourcingLimits | None = None
 
     @workflow.signal
@@ -86,6 +91,11 @@ class MiaBuffer:
     @workflow.signal
     def dropped(self, record: str) -> None:
         self.drops.add(record)
+
+    @workflow.signal
+    def dataset_update(self, record: str, outcome: str) -> None:
+        """The poller saw the dataset's binding published (`binding`) or its issue go `data:ineligible`."""
+        self.dataset_updates[record] = outcome
 
     @workflow.query
     def status(self) -> BufferState:
@@ -228,9 +238,11 @@ class MiaBuffer:
     # --- sourcing --------------------------------------------------------------------------
 
     def _groups(self) -> dict[str, tuple[int, int]]:
-        """group -> (servable, total) over the pool."""
+        """group -> (servable, total) over the pool; dropped datasets are out of the denominator."""
         groups: dict[str, tuple[int, int]] = {}
         for dataset in self.state.datasets:
+            if dataset.status == "dropped":
+                continue
             servable, total = groups.get(dataset.group, (0, 0))
             groups[dataset.group] = (servable + (dataset.status == "servable"), total + 1)
         return groups
@@ -238,6 +250,13 @@ class MiaBuffer:
     def _ready_now(self) -> bool:
         groups = self._groups()
         return bool(groups) and all(servable / total >= self.state.min_fraction for servable, total in groups.values())
+
+    def _below(self) -> list[str]:
+        """The weighting groups under ready.min_fraction, sorted."""
+        groups = self._groups()
+        return sorted(
+            group for group, (servable, total) in groups.items() if servable / total < self.state.min_fraction
+        )
 
     async def _sourcing(self) -> None:
         """Create the buffer, source every dataset in parallel, announce ready when the groups allow it."""
@@ -258,18 +277,16 @@ class MiaBuffer:
             )
         except TimeoutError:
             if not self._ready_now():
-                for task in tasks:
-                    task.cancel()
-                below = sorted(
-                    group
-                    for group, (servable, total) in self._groups().items()
-                    if servable / total < state.min_fraction
-                )
-                return await self._finish(
-                    "needs-human",
-                    f"after {state.timeout_days:g} days these weighting groups are below ready.min_fraction "
-                    f"{state.min_fraction:g}: {', '.join(below)}",
-                )
+                below = self._below()  # before the drops: the message names what the human waited for
+                await self._drop_waiting(tasks, f"still {{status}} after {state.timeout_days:g} days")
+                if not self._ready_now():
+                    for task in tasks:
+                        task.cancel()
+                    return await self._finish(
+                        "needs-human",
+                        f"after {state.timeout_days:g} days these weighting groups are below ready.min_fraction "
+                        f"{state.min_fraction:g}: {', '.join(below)}",
+                    )
         if self._ready_now():
             await self._announce_ready(limits)
             if not await self._await_stragglers(tasks):
@@ -289,9 +306,9 @@ class MiaBuffer:
         pairs = list(zip(tasks, self.state.datasets, strict=True))
 
         def abandonable() -> bool:
-            """Every unfinished task is only waiting for a human's drop (no job, no registration in flight)."""
+            """Every unfinished task is only waiting on a human or mia-data (no job, no registration in flight)."""
             pending = [dataset for task, dataset in pairs if not task.done()]
-            return bool(pending) and all(dataset.status == "waiting-drop" for dataset in pending)
+            return bool(pending) and all(dataset.status in WAITING for dataset in pending)
 
         while not all(task.done() for task in tasks):
             await workflow.wait_condition(
@@ -334,7 +351,11 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
+            if not await self._await_dataset(dataset):
+                return  # dropped
+            binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
+            if not binding.found:
+                return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
         if binding.manual:
             await self._await_drop(dataset)
         async with semaphore:
@@ -361,6 +382,69 @@ class MiaBuffer:
         await self._comment(
             f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.",
             f"dataset {round_id} {record} servable",
+        )
+
+    async def _await_dataset(self, dataset: DatasetStatus) -> bool:
+        """No approved binding: hand the dataset to mia-data (spec §3 step 1) and wait for the poller's
+        `dataset_update`. True once a binding was published; False when the dataset was dropped."""
+        state = self.state
+        assert state.round_id
+        info = await self._act("nudge_dataset", state.round_id, dataset.record, seconds=300, result_type=DatasetIssue)
+        dataset.issue, dataset.folder = info.number, info.folder
+        where = f"the dataset issue #{info.number}"
+        if info.stage == "ineligible":
+            await self._drop(dataset, f"data:ineligible on {where}")
+            return False
+        dataset.status = "waiting-dataset"
+        what = (
+            f"`data:go` added on {where}"
+            if info.nudged
+            else f"{where} is already `data:{info.stage}`" + (f": {info.note}" if info.note else "")
+        )
+        await self._comment(
+            f"`{dataset.record}` has no approved binding yet: {what}. Waiting for mia-data to publish it.",
+            f"dataset {state.round_id} {dataset.record} waiting",
+        )
+        await workflow.wait_condition(lambda: dataset.record in self.dataset_updates)
+        if self.dataset_updates.pop(dataset.record) == "ineligible":
+            await self._drop(dataset, f"data:ineligible on {where}")
+            return False
+        return True
+
+    async def _drop(self, dataset: DatasetStatus, reason: str) -> None:
+        """Take the dataset out of the plan and the ready denominator; say so and re-post the plan."""
+        state = self.state
+        assert state.round_id
+        dataset.status, dataset.reason = "dropped", reason
+        await self._comment(
+            f"`{dataset.record}` dropped from the plan: {reason}", f"dataset {state.round_id} {dataset.record} dropped"
+        )
+        dropped = {d.record: d.reason for d in state.datasets if d.status == "dropped"}
+        await self._act("comment_plan", state.issue, state.round_id, dropped, seconds=300)
+
+    async def _drop_waiting(self, tasks: list[asyncio.Task], reason: str) -> None:
+        """At the timeout: cancel the datasets still waiting on a human or mia-data and drop them; `reason` may
+        name `{status}`. One plan re-post for all of them."""
+        state = self.state
+        assert state.round_id
+        dropped = {}
+        for task, dataset in zip(tasks, state.datasets, strict=True):
+            if not task.done() and dataset.status in WAITING:
+                task.cancel()
+                dataset.status, dataset.reason = "dropped", reason.format(status=dataset.status)
+                dropped[dataset.record] = dataset.reason
+        if not dropped:
+            return
+        for record, why in dropped.items():
+            await self._comment(
+                f"`{record}` dropped from the plan: {why}", f"dataset {state.round_id} {record} dropped"
+            )
+        await self._act(
+            "comment_plan",
+            state.issue,
+            state.round_id,
+            {d.record: d.reason for d in state.datasets if d.status == "dropped"},
+            seconds=300,
         )
 
     async def _await_drop(self, dataset: DatasetStatus) -> None:

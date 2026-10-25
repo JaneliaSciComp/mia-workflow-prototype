@@ -23,6 +23,7 @@ from mia_buffers.models import (
     BindingInfo,
     BufferPins,
     BufferState,
+    DatasetIssue,
     DatasetPlan,
     DropResult,
     PlanResult,
@@ -72,12 +73,24 @@ def shift(iso, seconds):
 
 class Mocks:
     def __init__(
-        self, plan=PLAN, bindings=None, stage=None, drops=None, states=None, refuse=None, gate=None, gate_on=""
+        self,
+        plan=PLAN,
+        bindings=None,
+        stage=None,
+        drops=None,
+        states=None,
+        refuse=None,
+        gate=None,
+        gate_on="",
+        unbound=(),
+        nudges=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
         self.drops, self.states, self.refuse = drops or {}, states or {}, refuse or {}
         self.gate, self.gate_on = gate, gate_on
+        self.unbound, self.bound = set(unbound), set()  # records without a binding until added to `bound`
+        self.nudges = nudges or {}  # record -> DatasetIssue
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -109,8 +122,13 @@ class Mocks:
             return None
 
         @activity.defn(name="comment_plan")
-        async def comment_plan(issue: int, round_id: str) -> None:
-            rec("comment_plan", round_id)
+        async def comment_plan(issue: int, round_id: str, dropped: dict[str, str] | None = None) -> None:
+            rec("comment_plan", round_id, dropped)
+
+        @activity.defn(name="nudge_dataset")
+        async def nudge_dataset(round_id: str, record: str) -> DatasetIssue:
+            rec("nudge_dataset", record)
+            return self.nudges.get(record, DatasetIssue(5, "new", True, folder=f"lm-{record}"))
 
         @activity.defn(name="comment_drop")
         async def comment_drop(issue: int, round_id: str, record: str, missing: list[str]) -> None:
@@ -123,6 +141,8 @@ class Mocks:
         @activity.defn(name="read_binding")
         async def read_binding(round_id: str, record: str) -> BindingInfo:
             rec("read_binding", record)
+            if record in self.unbound and record not in self.bound:
+                return BindingInfo(False, errors=[f"no binding at /s/{record}: the dataset is not data:done"])
             manual = next(d.manual for d in self.plan.pool if d.record == record)
             default = (
                 BindingInfo(True, f"/s/{record}.yaml", "bh", [], [[f"manual://{record}/a.zip", "a.zip"]])
@@ -172,6 +192,7 @@ class Mocks:
             set_stage,
             comment,
             comment_plan,
+            nudge_dataset,
             comment_drop,
             refuse_label,
             read_binding,
@@ -302,7 +323,7 @@ async def test_invalid_plan_is_needs_human(env):
     m = Mocks(plan=PlanResult(False, ["patch.c all: channel counts differ"], [], 10))
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
-    assert m.stages == ["planning", "needs-human"] and m.of("comment_plan") == [("i7-e11",)]
+    assert m.stages == ["planning", "needs-human"] and m.of("comment_plan") == [("i7-e11", None)]
     assert "channel counts differ" in m.of("set_stage")[-1][1] and not m.of("create_buffer")
 
 
@@ -372,17 +393,20 @@ async def test_job_exit_failure_fails_dataset(env):
     assert not m.of("read_stage")
 
 
-async def test_missing_binding_fails_dataset(env):
+async def test_binding_still_missing_after_update_fails_dataset(env):
+    """A `binding` update whose file then cannot be read (gone again, or naming another record) fails the dataset
+    rather than waiting forever; a plain missing binding goes to mia-data instead (milestone 4 tests below)."""
     only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
-    m = Mocks(
-        plan=only, bindings={"u937": BindingInfo(False, errors=["no binding at /x: the dataset is not data:done"])}
-    )
+    m = Mocks(plan=only, unbound={"u937"})
     async with started(env, m) as h:
         await approve(h, m)
+        await until(lambda: m.of("nudge_dataset"), m=m)
+        await h.signal(MiaBuffer.dataset_update, args=["u937", "binding"])  # the mock still has no binding
         await idle(h, m, "needs-human")
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "failed" and "not data:done" in dataset(state, "u937").reason
-    assert len([a for a in m.of("comment") if "u937" in a[0]]) == 1 and not m.of("prepare_stage")
+    assert [a[0] for a in m.of("read_binding")] == ["u937", "u937"] and not m.of("prepare_stage")
+    assert len([a for a in m.of("comment") if "u937" in a[0] and "failed" in a[0]]) == 1
 
 
 async def test_drop_with_missing_files_keeps_waiting(env):
@@ -475,6 +499,9 @@ class PollGH:
         self.comments.setdefault(n, []).append({"body": body, "user": {"login": "bot"}, "html_url": "u"})
         return self.comments[n][-1]
 
+    async def get_issue(self, n):
+        return self.issues[n]
+
 
 class FakeClient:
     def __init__(self, states):
@@ -487,8 +514,8 @@ class FakeClient:
         client = self
 
         class Handle:
-            async def signal(self, name, arg):
-                client.signals.append((wid, name, arg))
+            async def signal(self, name, arg=None, *, args=None):
+                client.signals.append((wid, name, tuple(args) if args is not None else arg))
 
             async def query(self, name, result_type=None):
                 return client.states[wid]
@@ -614,3 +641,90 @@ async def test_poll_signals_only_a_stable_listing(tmp_path):
     assert await run_poll(acts) == []
     assert await run_poll(acts) == ["dropped #2 bcss"]  # unchanged for a whole pass: stable
     assert await run_poll(acts) == []
+
+
+# --- milestone 4: datasets without a binding -----------------------------------------------------
+
+
+async def test_unmatched_dataset_waits_for_binding_then_stages(env):
+    m = Mocks(unbound={"bcss"})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("nudge_dataset") and m.of("register_dataset"), m=m)
+        await until(lambda: any("data:go" in a[0] for a in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+        bcss = dataset(state, "bcss")
+        assert (bcss.status, bcss.issue, bcss.folder) == ("waiting-dataset", 5, "lm-bcss")
+        assert dataset(state, "u937").status == "servable" and m.stages[-1] == "sourcing"
+        m.bound.add("bcss")
+        await h.signal(MiaBuffer.dataset_update, args=["bcss", "binding"])
+        await until(lambda: m.of("comment_drop"), m=m)  # bcss is manual: the binding found, the drop path follows
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("nudge_dataset") == [("bcss",)] and [a[0] for a in m.of("read_binding")].count("bcss") == 2
+    assert dataset(state, "bcss").status == "servable" and state.ready
+
+
+async def test_ineligible_dataset_is_dropped_and_plan_reposted(env):
+    m = Mocks(unbound={"bcss"}, nudges={"bcss": DatasetIssue(5, "ineligible", False, folder="lm-bcss")})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")  # u937 alone: bcss's group is gone from the denominator
+        state = await h.query(MiaBuffer.status)
+    bcss = dataset(state, "bcss")
+    assert bcss.status == "dropped" and "ineligible" in bcss.reason and "#5" in bcss.reason
+    assert [a[1] for a in m.of("comment_plan")] == [None, {"bcss": bcss.reason}]
+    assert any("dropped" in a[0] and "bcss" in a[0] for a in m.of("comment"))
+    assert not m.of("comment_drop") and not m.of("verify_drop") and state.ready
+
+
+async def test_late_dataset_update_is_ignored(env):
+    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        calls = len(m.calls)
+        await h.signal(MiaBuffer.dataset_update, args=["u937", "binding"])
+        await h.signal(MiaBuffer.dataset_update, args=["nobody", "ineligible"])
+        await asyncio.sleep(0.5)
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "servable" and len(m.calls) == calls and state.ready
+
+
+async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
+    m = Mocks(unbound={"bcss"})  # u937 becomes servable, bcss waits for mia-data forever
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("register_dataset") and m.of("nudge_dataset"), m=m)
+        await env.sleep(timedelta(days=15))
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    bcss = dataset(state, "bcss")
+    assert bcss.status == "dropped" and "14" in bcss.reason and "waiting-dataset" in bcss.reason
+    assert m.of("comment_plan")[-1][1] == {"bcss": bcss.reason} and "needs-human" not in m.stages
+    assert state.ready and dataset(state, "u937").status == "servable"
+
+
+async def test_poll_signals_dataset_updates(tmp_path):
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
+    datasets = PollGH(issues={4: issue(4, "data:testing"), 5: issue(5, "data:ineligible", "licence-excluded")})
+    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
+    waiting.datasets = [
+        workflows.DatasetStatus("u937", "confocal", False, "waiting-dataset", issue=4, folder="lm-u937"),
+        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-dataset", issue=5, folder="lm-bcss"),
+        workflows.DatasetStatus("other", "TEM", False, "servable", issue=6, folder="lm-other"),
+    ]
+    client = FakeClient({cfg.workflow_id(2): waiting})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
+    assert await run_poll(acts) == ["dataset #2 bcss ineligible"]  # u937's issue is still in progress
+    (cfg.paths.storage_root / "lm-u937").mkdir(parents=True)
+    (cfg.paths.storage_root / "lm-u937" / "binding.yaml").write_text("record: u937\n")
+    assert await run_poll(acts) == ["dataset #2 u937 binding"]
+    assert client.signals == [
+        (cfg.workflow_id(2), "dataset_update", ("bcss", "ineligible")),
+        (cfg.workflow_id(2), "dataset_update", ("u937", "binding")),
+    ]
+    assert await run_poll(acts) == []  # each update is signalled once

@@ -34,7 +34,7 @@ from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, snapshot
 from mia_data.models import JobDone
-from mia_data.seed import ID_RE
+from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
 from .config import HUMAN_LABELS, STAGES
@@ -44,6 +44,7 @@ from .models import (
     BindingInfo,
     BufferPins,
     BufferState,
+    DatasetIssue,
     DatasetPlan,
     DropResult,
     PlanResult,
@@ -69,11 +70,15 @@ if TYPE_CHECKING:
 ROUND_RE = re.compile(r"i\d+-e\d+")
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
+DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
+DATA_GO = DATA_LABEL.format("go")
+DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
 
 
 class Activities:
-    """The activity implementations, bound to the GitHub clients (issue, snippets and catalog repos), the csub
-    job runner, buffer-api's URL (from the config) and the Temporal client (for the poller)."""
+    """The activity implementations, bound to the GitHub clients (issue, snippets, catalog and mia-data's
+    datasets repos), the csub job runner, buffer-api's URL (from the config) and the Temporal client (for the
+    poller)."""
 
     def __init__(
         self,
@@ -85,17 +90,31 @@ class Activities:
         bot: str,
         client: Client | None = None,
         probe: Callable[[], list[str]] | None = None,
+        gh_datasets: GitHub | None = None,
     ):
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
+        self._gh_datasets = gh_datasets
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
         self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
         self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
+        self._signalled: set[tuple[int, str, str]] = set()  # poll: (issue, record, outcome) dataset updates sent
 
     @property
     def gh_data(self) -> GitHub:
         """mia-data's name for the issue repo client (mia_data.poll.deliver_label posts through it)."""
         return self.gh_issues
+
+    @property
+    def gh_datasets(self) -> GitHub:
+        """The client for mia-data's issue repo (`github.datasets_repo`)."""
+        if self._gh_datasets is None:
+            raise RuntimeError("no datasets-repo client: this activity runs only inside the worker")
+        return self._gh_datasets
+
+    @gh_datasets.setter
+    def gh_datasets(self, gh: GitHub) -> None:
+        self._gh_datasets = gh
 
     @property
     def temporal(self) -> Client:
@@ -121,6 +140,7 @@ class Activities:
             self.create_buffer,
             self.register_dataset,
             self.comment_drop,
+            self.nudge_dataset,
             self.poll,
         ]
 
@@ -303,11 +323,54 @@ class Activities:
 
     @activity.defn(name="comment_plan")
     @mia_permanent_errors
-    async def comment_plan(self, issue: int, round_id: str) -> None:
-        """Post the round's plan (errors, warnings, the pool) once, linking the browsable plan files."""
-        marker = self.cfg.marker(f"plan {round_id}")
-        body = render_plan_comment(self._plan(round_id), self.cfg.paths.link(self._round_workspace(issue, round_id)))
+    async def comment_plan(self, issue: int, round_id: str, dropped: dict[str, str] | None = None) -> None:
+        """Post the round's plan (errors, warnings, the pool) once, linking the browsable plan files; with
+        `dropped` (record -> reason), re-post it without those datasets, once per distinct dropped set."""
+        suffix = ""
+        if dropped:
+            suffix = " minus " + hashlib.sha256("\n".join(sorted(dropped)).encode()).hexdigest()[:8]
+        marker = self.cfg.marker(f"plan {round_id}{suffix}")
+        link = self.cfg.paths.link(self._round_workspace(issue, round_id))
+        body = render_plan_comment(self._plan(round_id), link, dropped)
         await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+
+    @activity.defn(name="nudge_dataset")
+    @mia_permanent_errors
+    async def nudge_dataset(self, round_id: str, record: str) -> DatasetIssue:
+        """Hand a dataset without a binding to mia-data (spec §3 step 1): find its issue in the datasets repo by
+        the record marker, open one if there is none (mia-data's own issue body, pinned to the round's catalog
+        ref), and add `data:go` unless mia-data is already working on it, has finished, or found it ineligible."""
+        gh, record_yaml = self.gh_datasets, self._record(round_id, record)
+        folder = dataset_folder(record_yaml, record)
+        issue = await gh.find_issue_by_marker(MARKER.format(record))
+        if issue is None:
+            title, body, labels = render_issue(
+                record_yaml,
+                {"record_commit": self._pins(round_id).catalog_ref},
+                self.cfg.crops.licences,
+                self.cfg.github.catalog_repo,
+                self._row(round_id, record)["path"],
+                record,
+            )
+            issue = await gh.create_issue(title, body, labels)
+        number = int(issue["number"])
+        names = {label["name"] for label in issue.get("labels") or []}
+        stages = [name[len("data:") :] for name in names if name.startswith("data:")]
+        stages = [stage for stage in stages if stage not in ("go", "approve")]  # human labels are not stages
+        stage = stages[0] if stages else "new"
+        if stage == "ineligible" or "licence-excluded" in names:
+            return DatasetIssue(number, "ineligible", False, folder=folder)
+        if stage == "done":
+            path = self.cfg.paths.storage_root / folder / "binding.yaml"
+            note = (
+                f"the dataset issue is `data:done` but there is no binding at `{path}`: run the dataset again "
+                "(add `data:go` on it) so mia-data publishes the binding"
+            )
+            return DatasetIssue(number, stage, False, note, folder)
+        if DATA_GO in names or stage in DATA_IN_PROGRESS:
+            return DatasetIssue(number, stage, False, folder=folder)
+        await gh.add_labels(number, [DATA_GO])
+        return DatasetIssue(number, stage, True, folder=folder)
 
     @activity.defn(name="comment_drop")
     @mia_permanent_errors
