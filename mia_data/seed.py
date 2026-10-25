@@ -32,7 +32,8 @@ def render_issue(
     """Build (title, body, labels) for a dataset issue.
 
     `record` is the catalog's YAML record, `entry` its downloads-state entry (dataset_dir, record_commit,
-    bytes_on_disk, downloaders), `repo`/`path` locate the record on GitHub for links."""
+    bytes_on_disk, downloaders) or just `{"record_commit": sha}` for a record nobody downloaded (a buffer asks
+    for it; its jobs fetch on demand), `repo`/`path` locate the record on GitHub for links."""
     record_id = record_id or record["id"]
     imaging, spdx = record.get("imaging") or {}, (record.get("license") or {}).get("spdx")
     arrays = (record.get("technical") or {}).get("arrays") or []
@@ -66,10 +67,10 @@ def render_issue(
         f"- Modality: {safe_text(', '.join(imaging.get('modality') or []))}",
         f"- Organism: {safe_text(', '.join(imaging.get('organism') or []))}",
         f"- Voxel size (nm): {safe_text(f'x={voxel.get("x")} y={voxel.get("y")} z={voxel.get("z")}')}",
-        f"- Data size: {entry.get('bytes_on_disk')} bytes",
+        f"- Data size: {entry.get('bytes_on_disk', 'unknown')} bytes",
         f"- Source: {safe_text(', '.join([urls] if isinstance(urls, str) else urls))}",
-        f"- Downloaded by: {', '.join(entry['downloaders'])}",
-        f"- Dataset dir: `{safe_text(entry['dataset_dir'])}`",
+        f"- Downloaded by: {', '.join(entry.get('downloaders') or []) or 'none (jobs fetch on demand)'}",
+        *([f"- Dataset dir: `{safe_text(entry['dataset_dir'])}`"] if entry.get("dataset_dir") else []),
         "",
         "| role | axes | shape | dtype |",
         "|---|---|---|---|",

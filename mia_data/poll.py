@@ -76,12 +76,14 @@ async def deliver_label(
 ) -> bool:
     """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
 
-    Only a person with write access counts; `guard` may name a reason to refuse the label. The label is removed
+    Only a person with write access, or a bot login listed in `github.trusted_bots` (the buffer worker, spec §6.2),
+    counts; `guard` may name a reason to refuse the label. The label is removed
     only once Temporal has accepted the signal, so a crash in between leaves it for the next poll. Returns True
     when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard."""
     cfg, gh_data, number = activities.cfg, activities.gh_data, issue["number"]
     actor, event_id, labeled_at = await gh_data.label_event(number, label)
-    if not actor or await gh_data.permission(actor) not in WRITE_PERMISSIONS:
+    trusted = actor in getattr(cfg.github, "trusted_bots", [])
+    if not actor or not (trusted or await gh_data.permission(actor) in WRITE_PERMISSIONS):
         await gh_data.remove_label(number, label)
         marker = cfg.marker(f"ignored {label} {event_id}")
         await activities._comment_once(

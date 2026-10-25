@@ -321,8 +321,9 @@ class Activities:
     @mia_permanent_errors
     async def admit(self, issue: int, event_id: str) -> Pins:
         """Pin the round: the record id from the issue's first-line marker, record_commit from the downloads
-        state, snippets main, and the harness checkout. Written once to state_dir/rounds/<round_id>/; a retry
-        returns the same pins."""
+        state (or the catalog's main when the record was never downloaded: a buffer opened the issue and its jobs
+        fetch on demand), snippets main, and the harness checkout. Written once to state_dir/rounds/<round_id>/;
+        a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
@@ -333,8 +334,10 @@ class Activities:
             raise ValueError(f"issue #{issue} has no valid record marker on its first line")
         record_id = match.group(1)
         entry = (await catalog.downloaded(self.gh_catalog)).get(record_id)
-        if not (entry and SHA_RE.fullmatch(str(entry.get("record_commit")))):
-            raise ValueError(f"{record_id}: not in the downloads state, or no record_commit")
+        if entry is None:
+            entry = {"record_commit": await self.gh_catalog.get_ref_sha("main"), "downloaders": []}
+        if not SHA_RE.fullmatch(str(entry.get("record_commit"))):
+            raise ValueError(f"{record_id}: the downloads entry has no record_commit")
         path = (await catalog.record_paths(self.gh_catalog)).get(record_id)
         if path is None:
             raise ValueError(f"{record_id}: no record on main")
@@ -691,11 +694,20 @@ class Activities:
     @activity.defn(name="publish_crops")
     @mia_permanent_errors
     async def publish_crops(
-        self, issue: int, round_id: str, crop_workspace: str, verified: list[dict], sha: str
+        self,
+        issue: int,
+        round_id: str,
+        crop_workspace: str,
+        verified: list[dict],
+        sha: str,
+        binding: str | None = None,
     ) -> dict:
         """Publish the verified crops into the dataset folder, marking crops of snippets withdrawn in
-        mia-snippets at `sha`. Returns {"published", "already", "total"}."""
+        mia-snippets at `sha`, and the approved binding (one of this round's, from state_dir) as binding.yaml
+        beside them for mia-buffers to read (spec §6.1). Returns {"published", "already", "total"}."""
         crops_dir = self._crops_dir(self._job_workspace(issue, round_id, crop_workspace))
+        if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
+            raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
         return await asyncio.to_thread(
@@ -705,6 +717,7 @@ class Activities:
             verified,
             withdrawn,
             tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600),
+            binding=Path(binding) if binding else None,
         )
 
     # --- snippet development -----------------------------------------------------------------

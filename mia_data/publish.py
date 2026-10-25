@@ -49,9 +49,16 @@ def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
 
 
 def publish(
-    dataset_dir: Path, src_dir: Path, verified: list[dict], withdrawn: dict[str, str], *, tmp_max_age_s: float
+    dataset_dir: Path,
+    src_dir: Path,
+    verified: list[dict],
+    withdrawn: dict[str, str],
+    *,
+    tmp_max_age_s: float,
+    binding: Path | None = None,
 ) -> dict:
-    """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`.
+    """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`, and
+    `binding` (the approved binding YAML), when given, to `dataset_dir/binding.yaml`.
 
     `verified` is [{"crop_id", "files": {rel: sha256}}] from read_verify; only those files are copied, and
     they must still hash the same. Temp directories older than `tmp_max_age_s` are left by dead attempts and
@@ -67,6 +74,10 @@ def publish(
         if not {"crop.json", "raw.png"} <= set(crop["files"]):
             raise ValueError(f"{crop['crop_id']}: crop.json and raw.png must be verified")
     dataset_dir.mkdir(parents=True, exist_ok=True)
+    if binding is not None:
+        tmp = dataset_dir / f".tmp-binding-{uuid.uuid4().hex}"
+        shutil.copyfile(binding, tmp)
+        os.replace(tmp, dataset_dir / "binding.yaml")
     now = time.time()
     for stale in dataset_dir.glob(".tmp-*"):  # younger ones may belong to a live attempt
         try:
@@ -108,7 +119,8 @@ def publish(
 
 
 def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
-    """Rebuild manifest.json from every <crop>/crop.json (dot-dirs ignored). Returns the crop count.
+    """Rebuild manifest.json from every <crop>/crop.json (dot-dirs ignored) and record the published binding's
+    sha256 (`"binding": {"sha256": ...}`, null when none is published). Returns the crop count.
 
     `withdrawn` maps snippet name -> reason; crops made with a withdrawn snippet are marked, not removed.
     Each manifest entry carries "files" (rel -> sha256), which `harness verify --existing` reads for its
@@ -131,6 +143,8 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
             }
         )
     tmp = dataset_dir / f".tmp-manifest-{uuid.uuid4().hex}.json"  # per writer: a zombie attempt can't interleave
-    tmp.write_text(json.dumps({"crops": crops, "count": len(crops)}, indent=1))
+    binding_file = dataset_dir / "binding.yaml"
+    binding = {"sha256": hashlib.sha256(binding_file.read_bytes()).hexdigest()} if binding_file.is_file() else None
+    tmp.write_text(json.dumps({"crops": crops, "count": len(crops), "binding": binding}, indent=1))
     os.replace(tmp, dataset_dir / "manifest.json")
     return len(crops)

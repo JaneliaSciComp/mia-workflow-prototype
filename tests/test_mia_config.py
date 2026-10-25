@@ -65,3 +65,9 @@ def test_roots_take_a_path_or_a_path_with_browse_url(tmp_path):
     assert c.paths.link(c.paths.storage_root / "ds") is None  # no url for that root
     assert c.paths.link(tmp_path / "elsewhere") is None
     assert not hasattr(c, "storage")
+
+
+def test_trusted_bots_must_be_app_logins(tmp_path):
+    with pytest.raises(ValidationError, match="trusted_bots"):
+        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
+    assert make_cfg(tmp_path, github={"trusted_bots": ["mia-bot[bot]"]}).github.trusted_bots == ["mia-bot[bot]"]

@@ -391,6 +391,7 @@ class MiaDataDataset:
             crop_workspace,
             verify.crops,
             sha,
+            state.binding,
             seconds=300,
             result_type=dict,
         )

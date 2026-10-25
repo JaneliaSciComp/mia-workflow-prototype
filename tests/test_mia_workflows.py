@@ -165,8 +165,10 @@ class Mocks:
             return GalleryResult(f"galleries/rec-1/{round_id}/{kind}", {}, f"table {kind}")
 
         @activity.defn(name="publish_crops")
-        async def publish_crops(issue: int, round_id: str, crop_ws: str, verified: list[dict], sha: str) -> dict:
-            rec("publish_crops", crop_ws, len(verified), sha)
+        async def publish_crops(
+            issue: int, round_id: str, crop_ws: str, verified: list[dict], sha: str, binding: str | None = None
+        ) -> dict:
+            rec("publish_crops", crop_ws, len(verified), sha, binding)
             return {"published": [c["crop_id"] for c in verified], "already": [], "total": len(verified)}
 
         @activity.defn(name="open_snippet_issue")
@@ -312,7 +314,7 @@ async def test_match_test_review_approve_crop_done(env):
         prod.existing,
     ) == (4, 0, True, SHA, 16, 1, True, True)
     assert [a[0] for a in m.of("publish_gallery")] == [SHA, "production"]
-    assert m.of("publish_crops") == [("/w/i7-e11/crop-production-1", 16, SHA)]
+    assert m.of("publish_crops") == [("/w/i7-e11/crop-production-1", 16, SHA, "/s/binding-1.yaml")]
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
     assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops", "publish_gallery"]
     assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1")
@@ -866,3 +868,20 @@ async def test_replay_develop_history(env):
             DEVELOP_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-develop", DEVELOP_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_poll_accepts_go_only_from_listed_bot(tmp_path):
+    at = "2026-10-12T10:00:00Z"
+    data = PollGH(
+        "o/data",
+        issues={1: issue(1, "data:go"), 2: issue(2, "data:go")},
+        events={(1, "data:go"): ("mia-bot[bot]", "61", at), (2, "data:go"): ("other[bot]", "62", at)},
+    )
+    fc = FakeClient()
+    cfg = make_cfg(tmp_path, github={"trusted_bots": ["mia-bot[bot]"]})
+    a = Activities(cfg, data, PollGH("o/snippets"), None, None, bot="bot", client=fc)
+    await a.poll()
+    ((wf, arg, kw),) = fc.started
+    assert (arg, kw["start_signal_args"]) == (DatasetState(1), [LabelEvent("go", "61", "mia-bot[bot]", at)])
+    assert sorted(data.removed) == [(1, "data:go"), (2, "data:go")]
+    assert 1 not in data.comments and "does not have write access" in data.comments[2][0]["body"]

@@ -363,3 +363,39 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
     assert (await t.a.read_verify(str(ws))).n_effective is None
+
+
+async def test_admit_without_downloads_entry_pins_main(tmp_path):
+    t = _setup(tmp_path)
+    main_sha = "d" * 40
+    t.cat.files[("state/downloads.json", "state")] = b'{"downloaded": {}}'
+    t.cat.files[("datasets/rec-1.yaml", main_sha)] = yaml.safe_dump(RECORD).encode()
+    t.cat.refs["main"] = main_sha
+    pins = await t.a.admit(1, "99")
+    assert pins.record_commit == main_sha
+    downloads = json.loads((t.cfg.paths.state_dir / "rounds" / ROUND / "downloads.json").read_text())
+    assert downloads == {"record_commit": main_sha, "downloaders": []}
+
+
+async def test_publish_crops_publishes_the_binding(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    binding = t.cfg.paths.state_dir / "rounds" / ROUND / "binding-1.yaml"
+    binding.write_text("record: rec-1\n")
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    v = _crop(cw, "c1", 0)
+    await t.a.publish_crops(1, ROUND, str(cw), [v], SNIP_SHA, str(binding))
+    ds = t.cfg.paths.storage_root / "lm-human-rec-1"
+    assert (ds / "binding.yaml").read_text() == "record: rec-1\n"
+    digest = hashlib.sha256(b"record: rec-1\n").hexdigest()
+    assert json.loads((ds / "manifest.json").read_text())["binding"] == {"sha256": digest}
+
+
+async def test_publish_crops_refuses_a_binding_outside_the_round(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    v = _crop(cw, "c1", 0)
+    (tmp_path / "elsewhere.yaml").write_text("record: rec-1\n")
+    with pytest.raises(ApplicationError, match="not one of round"):
+        await t.a.publish_crops(1, ROUND, str(cw), [v], SNIP_SHA, str(tmp_path / "elsewhere.yaml"))

@@ -135,3 +135,22 @@ def test_symlinked_source_file_is_refused(tmp_path):
     (src / "c1" / "raw.png").symlink_to(real)
     with pytest.raises(Conflict, match="c1/raw.png"):
         publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)
+
+
+def test_publish_writes_binding_and_manifest_sha(tmp_path):
+    src, verified = _src(tmp_path)
+    ds, binding = tmp_path / "ds", tmp_path / "b.yaml"
+    binding.write_text("record: r\n")
+    digest = hashlib.sha256(b"record: r\n").hexdigest()
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=binding)
+    assert (ds / "binding.yaml").read_text() == "record: r\n"
+    assert json.loads((ds / "manifest.json").read_text())["binding"] == {"sha256": digest}
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)  # no binding passed: the published one stays
+    assert json.loads((ds / "manifest.json").read_text())["binding"] == {"sha256": digest}
+    assert not list(ds.glob(".tmp-*"))
+
+
+def test_manifest_without_binding_says_null(tmp_path):
+    src, verified = _src(tmp_path)
+    publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)
+    assert json.loads((tmp_path / "ds" / "manifest.json").read_text())["binding"] is None

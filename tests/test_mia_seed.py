@@ -210,3 +210,10 @@ def test_dataset_folder_follows_miao_layout(rid, folder):
     assert catalog.dataset_folder(rec, rid) == folder
     with pytest.raises(ValueError):
         catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "organism": []}}, rid)
+
+
+def test_render_issue_with_record_commit_only():
+    rec = yaml.safe_load((FIX / "records" / "bbbc034-hipsc-nuclei-3d.yaml").read_text())
+    title, body, labels = render_issue(rec, {"record_commit": "a" * 40}, LIC, "o/catalog", "datasets/x.yaml")
+    assert body.startswith("<!-- mia-data:record=bbbc034-hipsc-nuclei-3d -->")
+    assert "Downloaded by: none" in body and "Dataset dir" not in body and "data:new" in labels
