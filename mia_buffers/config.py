@@ -15,6 +15,7 @@ from typing import ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from autodev.config import TemporalCfg
+from mia_core.config import ServiceCfg
 from mia_data import config as mia_data_config
 
 # stage -> (label color, description); labels are `buffer:<stage>` (spec §1)
@@ -73,10 +74,6 @@ class PathsCfg(mia_data_config.PathsCfg):
         return data
 
 
-class ServiceCfg(BaseModel):
-    url: str  # buffer-api base URL, reachable from the worker
-
-
 class SourcingCfg(BaseModel):
     parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
@@ -104,7 +101,7 @@ class Config(mia_data_config.Config):
         return f"<!-- mia-buffers: {text} -->"
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
+def load_config(path: str | os.PathLike | None = None, *, service: str | None = None) -> Config:
     """Load and validate mia_buffers.yaml ($MIA_BUFFERS_CONFIG), exiting with a readable message on failure."""
     cfg = mia_data_config.load_config(
         path,
@@ -113,6 +110,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         default_name="mia_buffers.yaml",
         prog="mia-buffers",
         overrides=_ENV_OVERRIDES,
+        service=service,
     )
     assert isinstance(cfg, Config)  # `cls` built it
     return cfg

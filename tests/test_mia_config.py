@@ -72,3 +72,26 @@ def test_trusted_bots_take_the_app_slug_and_add_the_bot_suffix(tmp_path):
     assert cfg.github.trusted_bots == ["mia-bot[bot]", "other[bot]"]
     with pytest.raises(ValidationError, match="trusted_bots"):
         make_cfg(tmp_path, github={"trusted_bots": ["bad slug!"]})
+
+
+def test_load_config_by_service_name(tmp_path, monkeypatch):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "mia.yaml").write_text(
+        "github: {auth: token, catalog_repo: o/c, snippets_repo: o/s}\n"
+        f"paths: {{state_root: {tmp_path}/state, work_root: {tmp_path}/w, storage_root: {tmp_path}/s, local_root: {tmp_path}/local}}\n"
+        f"harness: {{dir: {tmp_path}/harness}}\nservice: {{url: http://svc:1, token_file: {tmp_path}/tok}}\n"
+        "services:\n  mia-data: {app: mia-data, github: {data_repo: o/d}}\n"
+    )
+    cfg = load_config(tmp_path / "mia.yaml", service="mia-data")
+    assert cfg.github.data_repo == "o/d" and cfg.paths.state_dir == tmp_path / "state/mia-data"
+    assert cfg.paths.local_root == tmp_path / "local" and cfg.service.token_file == tmp_path / "tok"
+
+
+def test_local_root_and_service_are_optional(tmp_path):
+    cfg = make_cfg(tmp_path)
+    assert cfg.paths.local_root is None and cfg.service is None
+
+
+def test_shared_agent_hosts_still_refused_by_mia_data(tmp_path):
+    with pytest.raises(ValidationError, match="agent.allow_hosts is not used by mia-data"):
+        make_cfg(tmp_path, agent={"allow_hosts": ["pypi.org"]})

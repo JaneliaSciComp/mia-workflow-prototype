@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError, model_validator
 from mia_core.config import PROJECT_DIR as PROJECT_DIR
 from mia_core.config import TemporalCfg as TemporalCfg
 from mia_core.config import load_dotenv as load_dotenv
+from mia_core.config import load_service_config, manifest_path
 
 # environment variable -> the YAML key path it overrides
 _ENV_OVERRIDES = {
@@ -210,13 +211,22 @@ class Config(BaseModel):
         return self.github.repo.replace("/", "__")
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
+def load_config(path: str | os.PathLike | None = None, *, service: str | None = None) -> Config:
+    """Load and validate the config, exiting with a readable message if it is missing or invalid.
+
+    With a service name (or $MIA_SERVICE) the config is that service's block of mia.yaml; otherwise autodev.yaml."""
     load_dotenv()
-    path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
-    if not path.is_file():
-        sys.exit(f"autodev: config not found at {path} (copy autodev.yaml.example, or set $AUTODEV_CONFIG)")
-    data = yaml.safe_load(path.read_text()) or {}
+    service = service or os.environ.get("MIA_SERVICE")
+    source: str | Path
+    if service:
+        source = f"{manifest_path(path)} (service {service})"
+        data = load_service_config(service, path)
+    else:
+        path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
+        if not path.is_file():
+            sys.exit(f"autodev: config not found at {path} (copy autodev.yaml.example, or set $AUTODEV_CONFIG)")
+        source = path
+        data = yaml.safe_load(path.read_text()) or {}
     for env_var, key_path in _ENV_OVERRIDES.items():
         if os.environ.get(env_var):
             node = data
@@ -228,4 +238,4 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     try:
         return Config(**data)
     except ValidationError as err:
-        sys.exit(f"autodev: invalid config {path}:\n{err}")
+        sys.exit(f"autodev: invalid config {source}:\n{err}")

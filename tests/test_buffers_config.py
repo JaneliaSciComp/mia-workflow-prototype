@@ -113,3 +113,19 @@ def test_raw_root_defaults_to_mia_data_download_cache(tmp_path):
         tmp_path, paths={**{k: str(v) for k, v in paths.items()}, "raw_root": None, "staged_root": str(tmp_path / "s")}
     )
     assert cfg.paths.raw_root == (tmp_path / "work" / "_cache").resolve() and cfg.paths.raw_root_url is None
+
+
+def test_load_config_by_service_name(tmp_path, monkeypatch):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "mia.yaml").write_text(
+        "github: {auth: token, catalog_repo: o/c, snippets_repo: o/s}\n"
+        f"paths: {{state_root: {tmp_path}/state, work_root: {tmp_path}/w, storage_root: {tmp_path}/s,"
+        f" staged_root: {tmp_path}/staged, local_root: {tmp_path}/local}}\n"
+        f"harness: {{dir: {tmp_path}/harness}}\nservice: {{url: http://svc:1, token_file: {tmp_path}/tok}}\n"
+        "services:\n  mia-buffers: {app: mia-buffers, github: {buffers_repo: o/b, datasets_repo: o/d}}\n"
+    )
+    monkeypatch.setenv("MIA_SERVICE", "mia-buffers")
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    cfg = load_config(tmp_path / "mia.yaml")
+    assert cfg.github.buffers_repo == "o/b" and cfg.deployment == "mia-buffers"
+    assert cfg.paths.raw_root == tmp_path / "w/_cache" and cfg.service.token_file == tmp_path / "tok"

@@ -21,6 +21,7 @@ import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
+from mia_core.config import ServiceCfg, load_service_config, manifest_path
 
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
@@ -77,6 +78,7 @@ class PathsCfg(BaseModel):
     work_root_url: str | None = None
     storage_root: Path
     storage_root_url: str | None = None
+    local_root: Path | None = None  # a host-local directory; no `url`, so it is not one of ROOTS
 
     @model_validator(mode="before")
     @classmethod
@@ -142,6 +144,7 @@ class Config(BaseModel):
     agent: AgentCfg = AgentCfg()
     harness: HarnessCfg
     network: NetworkCfg = NetworkCfg()
+    service: ServiceCfg | None = None
 
     @model_validator(mode="after")
     def _finish(self) -> Config:
@@ -177,6 +180,8 @@ class Config(BaseModel):
             for name, value in vars(section).items():
                 if isinstance(value, Path):
                     setattr(section, name, value.expanduser().resolve())
+        if self.service and self.service.token_file:
+            self.service.token_file = self.service.token_file.expanduser()
         for other in (paths.work_root, paths.storage_root):
             if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
                 raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")
@@ -235,15 +240,24 @@ def load_config(
     default_name: str = "mia_data.yaml",
     prog: str = "mia-data",
     overrides: Mapping[str, tuple[str, ...]] = _ENV_OVERRIDES,
+    service: str | None = None,
 ) -> Config:
     """Load and validate the config file, exiting with a readable message if it is missing or invalid.
 
+    With a service name (or $MIA_SERVICE) the config is that service's block of mia.yaml instead of the file.
     mia_buffers loads its `Config` subclass through the same function (`cls`, its own env var and file name)."""
     load_dotenv()
-    path = Path(path or os.environ.get(env_var) or PROJECT_DIR / default_name)
-    if not path.is_file():
-        sys.exit(f"{prog}: config not found at {path} (copy {default_name}.example, or set ${env_var})")
-    data = yaml.safe_load(path.read_text()) or {}
+    service = service or os.environ.get("MIA_SERVICE")
+    source: str | Path
+    if service:
+        source = f"{manifest_path(path)} (service {service})"
+        data = load_service_config(service, path)
+    else:
+        path = Path(path or os.environ.get(env_var) or PROJECT_DIR / default_name)
+        if not path.is_file():
+            sys.exit(f"{prog}: config not found at {path} (copy {default_name}.example, or set ${env_var})")
+        source = path
+        data = yaml.safe_load(path.read_text()) or {}
     for env_name, key_path in overrides.items():
         if os.environ.get(env_name):
             node = data
@@ -255,4 +269,4 @@ def load_config(
     try:
         return cls(**data)
     except ValidationError as err:
-        sys.exit(f"{prog}: invalid config {path}:\n{err}")
+        sys.exit(f"{prog}: invalid config {source}:\n{err}")
