@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from autodev.config import TemporalCfg
 from mia_data import config as mia_data_config
@@ -57,10 +57,20 @@ class PathsCfg(mia_data_config.PathsCfg):
 
     ROOTS: ClassVar[tuple[str, ...]] = ("work_root", "storage_root", "raw_root", "staged_root")
 
-    raw_root: Path
+    raw_root: Path  # unset: mia-data's download cache, <work_root>/_cache, so a dataset is fetched once for both
     raw_root_url: str | None = None
     staged_root: Path
     staged_root_url: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_raw_root(cls, data):
+        if isinstance(data, dict) and not data.get("raw_root") and data.get("work_root"):
+            work = data["work_root"]
+            work = work.get("path") if isinstance(work, dict) else work
+            if isinstance(work, str):
+                data = {**data, "raw_root": str(Path(work) / "_cache")}
+        return data
 
 
 class ServiceCfg(BaseModel):

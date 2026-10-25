@@ -123,7 +123,7 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
 ## Running a buffer from an issue (milestone 3)
 
 The deployment reads `mia_buffers.yaml` (copy the example; `buffers_repo` is the issue repo, `storage_root` is
-mia-data's, `raw_root` may be mia-data's `<work_root>/_cache` so downloads are shared). `mia.yaml` lists it as
+mia-data's, `raw_root` defaults to mia-data's `<work_root>/_cache` so downloads are shared). `mia.yaml` lists it as
 `app: mia-buffers`: `mia up mia-buffers` starts the broker, buffer-api (`mia-buffers serve` on the host, bound to
 the host and port of `service.url`, log `mia logs mia-buffers api`) and the sandboxed worker, which may reach that
 host through the sandbox proxy. `service.url` must name the host (not `localhost`: the sandbox bypasses its proxy
@@ -148,7 +148,11 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    `<storage_root>/<dataset folder>/binding.yaml`; a stage job runs the harness's `stage` with the raw cache
    `raw_root/<record>/` mounted read-write and the binding's hosts allowed, writing the pyramid to
    `staged_root/<levels key>/<record>/` (`p256-l1-2-4` for patch 256, levels 1,2,4); then every volume is
-   registered. A dataset whose hosts are not allowed to jobs, or whose binding uses `manual://` URLs, waits
+   registered. `read_stage` registers what the job left with buffer-api's registry (`PUT assets/staged/<staged
+   dir>` with the binding hash it was built from, `PUT assets/raw/<record>` from `files.json`), and registering a
+   volume references both for the buffer (`refs`); `read_binding` asks that registry first, and a pyramid staged
+   earlier for the same binding and still on disk is re-read and registered without a job. `GET assets/<kind>`
+   lists what exists and who uses it. A dataset whose hosts are not allowed to jobs, or whose binding uses `manual://` URLs, waits
    instead: the issue gets a comment listing `incoming/<name>` ← url pairs, a human places the files under
    `raw_root/<record>/incoming/`, the poller notices and the worker verifies them (regular, non-empty files),
    moves them into the cache under the harness's key and lists them in `raw_root/<record>/files.json`, which the

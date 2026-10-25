@@ -102,3 +102,14 @@ def test_config_requires_datasets_repo(tmp_path):
             github={"buffers_repo": "o/b", "snippets_repo": "o/s", "catalog_repo": "o/c", "datasets_repo": None},
         )
     assert make_cfg(tmp_path).github.datasets_repo == "o/data"
+
+
+def test_raw_root_defaults_to_mia_data_download_cache(tmp_path):
+    """One download cache for mia-data and the buffers: without `raw_root`, it is mia-data's `<work_root>/_cache`
+    (the first live run fetched U937 twice, once per root)."""
+    cfg = make_cfg(tmp_path)
+    paths = {k: v for k, v in cfg.paths.model_dump().items() if k in ("state_dir", "work_root", "storage_root")}
+    cfg = make_cfg(
+        tmp_path, paths={**{k: str(v) for k, v in paths.items()}, "raw_root": None, "staged_root": str(tmp_path / "s")}
+    )
+    assert cfg.paths.raw_root == (tmp_path / "work" / "_cache").resolve() and cfg.paths.raw_root_url is None
