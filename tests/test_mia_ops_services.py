@@ -26,6 +26,39 @@ def write_configs(tmp_path, address="localhost:7233"):
     )
 
 
+def write_mia_yaml(tmp_path, address="localhost:7233", token_mode=0o600, local_root=None):
+    """mia.yaml in the new shape; `local_root=""` leaves the key out."""
+    (tmp_path / "token").write_text("t" * 64)
+    (tmp_path / "token").chmod(token_mode)
+    (tmp_path / "harness").mkdir(exist_ok=True)
+    local = tmp_path / "local" if local_root is None else local_root
+    paths = (
+        f"state_root: {tmp_path}/state, work_root: {tmp_path}/w, storage_root: {tmp_path}/store, "
+        f"staged_root: {tmp_path}/staged" + (f", local_root: {local}" if local else "")
+    )
+    (tmp_path / "mia.yaml").write_text(
+        f"temporal: {{managed: true, state_dir: {tmp_path}/temporal, address: {address}}}\n"
+        f"github: {{auth: token, token_file: {tmp_path}/token, catalog_repo: o/c, snippets_repo: o/s}}\n"
+        f"paths: {{{paths}}}\nharness: {{dir: {tmp_path}/harness}}\n"
+        f"service: {{url: http://buffer-host.example.org:8765, token_file: {tmp_path}/token}}\n"
+        "services:\n"
+        "  autodev: {app: autodev, github: {repo: o/r}, temporal: {namespace: autodev}}\n"
+        "  snippets: {app: autodev, github: {repo: o/s2}}\n"
+        "  mia-data: {app: mia-data, github: {data_repo: o/d}, temporal: {namespace: mia-data}}\n"
+        "  mia-buffers: {app: mia-buffers, github: {buffers_repo: o/b, datasets_repo: o/d}, "
+        "temporal: {namespace: mia-buffers}}\n"
+    )
+    return tmp_path / "mia.yaml"
+
+
+def make_stack_v2(tmp_path, **kw):
+    from mia_ops.manifest import load_manifest
+
+    manifest = load_manifest(write_mia_yaml(tmp_path, **kw))
+    manifest.sandbox_dir = tmp_path / "sandbox"
+    return Stack(manifest)
+
+
 def make_stack(tmp_path, managed=True, address="localhost:7233"):
     write_configs(tmp_path, address)
     return Stack(
@@ -57,6 +90,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(services.time, "sleep", lambda s: None)
     monkeypatch.setenv("USER", "me")
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    monkeypatch.setattr(services, "require_local_dir", lambda p: p.mkdir(parents=True, exist_ok=True))
 
     def run(argv, **kw):
         argv = [str(a) for a in argv] if isinstance(argv, list) else argv
@@ -211,7 +245,9 @@ def schedule_calls(fake):
     return [
         (c, kw)
         for c, kw in fake.calls
-        if c[1:5] == ["-m", "autodev.cli", "schedule", "apply"] or c[1:5] == ["-m", "mia_data.cli", "schedule", "apply"]
+        if c[1] == "-m"
+        and c[2] in ("autodev.cli", "mia_data.cli", "mia_buffers.cli")
+        and c[3:5] == ["schedule", "apply"]
     ]
 
 
@@ -397,3 +433,71 @@ def test_up_mia_buffers_refuses_a_loopback_service_url(tmp_path, fake, url):
     with pytest.raises(SystemExit, match="service.url"):
         services.service_up(s.services["mia-buffers"], s, Temporal(s))
     assert not tmux_calls(fake, "new-session")
+
+
+# ---- mia.yaml as the configuration
+
+
+def test_stack_builds_each_service_from_its_block(tmp_path, fake):
+    s = make_stack_v2(tmp_path)
+    assert [svc.legacy for svc in s.services.values()] == [False] * 4
+    assert s.services["mia-data"].cfg.github.data_repo == "o/d"
+    assert s.services["mia-data"].state == tmp_path / "state/mia-data"
+    assert s.services["snippets"].env() == {"MIA_SERVICE": "snippets", "MIA_CONFIG": str(tmp_path / "mia.yaml")}
+
+
+def test_legacy_config_files_still_load_with_a_deprecation_line(tmp_path, fake, capsys):
+    s = make_stack(tmp_path)
+    assert s.services["mia-data"].legacy
+    assert s.services["mia-data"].env() == {"MIA_DATA_CONFIG": f"{tmp_path}/mia_data.yaml"}
+    assert "services.mia-data.config is deprecated" in capsys.readouterr().out
+
+
+def test_up_passes_the_service_name_and_mounts_locks_and_token(tmp_path, fake):
+    s = make_stack_v2(tmp_path)
+    services.service_up(s.services["mia-data"], s, Temporal(s))
+    worker = worker_command(fake, "mia-data")
+    for piece in (
+        f"MIA_SERVICE=mia-data MIA_CONFIG={tmp_path}/mia.yaml",
+        f"--ro {tmp_path}/mia.yaml",
+        f"--rw {tmp_path}/local/locks",
+        f"--ro {tmp_path}/token",
+        "-m mia_data.cli worker",
+    ):
+        assert piece in worker, piece
+    assert "MIA_DATA_CONFIG" not in worker
+    assert worker.count(f"--ro {tmp_path}/token") == 1  # the GitHub secret and the worker token are one file here
+    assert (tmp_path / "local/locks").is_dir() and (tmp_path / "local/service").is_dir()
+    ((argv, kw),) = schedule_calls(fake)
+    assert kw["env"]["MIA_SERVICE"] == "mia-data"
+
+
+def test_up_refuses_a_network_local_root(tmp_path, fake, monkeypatch):
+    s = make_stack_v2(tmp_path)
+
+    def on_nfs(path):
+        raise RuntimeError(f"{path} is on nfs, a network filesystem; it must be host-local disk")
+
+    monkeypatch.setattr(services, "require_local_dir", on_nfs)
+    with pytest.raises(SystemExit, match="network filesystem"):
+        services.service_up(s.services["mia-buffers"], s, Temporal(s))
+    assert not tmux_calls(fake, "new-session")
+
+
+def test_up_refuses_a_missing_local_root_for_data_and_buffers(tmp_path, fake):
+    s = make_stack_v2(tmp_path, local_root="")  # the builder omits the key when empty
+    with pytest.raises(SystemExit, match="paths.local_root"):
+        services.service_up(s.services["mia-data"], s, Temporal(s))
+    services.service_up(s.services["autodev"], s, Temporal(s))  # autodev needs none
+
+
+def test_up_refuses_a_loose_token_file(tmp_path, fake):
+    s = make_stack_v2(tmp_path, token_mode=0o644)
+    with pytest.raises(SystemExit, match="mode 600"):
+        services.service_up(s.services["mia-buffers"], s, Temporal(s))
+
+
+def test_mia_buffers_app_mounts_include_the_lock_directory(tmp_path, fake):
+    s = make_stack_v2(tmp_path)
+    cfg = s.services["mia-buffers"].cfg
+    assert ("--rw", cfg.paths.local_root / "locks") in services.APPS["mia-buffers"].extra_mounts(cfg)
