@@ -168,5 +168,5 @@ pixi run mia ps | logs mia-data -f | attach mia-data | down mia-data | restart m
 pixi run mia exec mia-data seed --dry-run
 ```
 
-Config is `mia_data.yaml` (see `mia_data.yaml.example`). `paths.work_root` and `paths.storage_root` take a
+Config is the `mia-data` block of `mia.yaml` (see `mia.yaml.example`). `paths.work_root` and `paths.storage_root` take a
 path or `{path, url}`; with a Fileglancer URL the comments link the folders they mention.

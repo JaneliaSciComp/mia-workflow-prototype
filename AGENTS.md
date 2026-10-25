@@ -1,8 +1,10 @@
 # Working in this repository
 
-Three Python packages: `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
+Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loader, filesystem checks,
+untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
 both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
-buffers: the `MiaBuffer` workflow, the offline planner, the buffer-api service and its client dataset). `mia_data` imports from `autodev`, `mia_buffers` from both, never the reverse. Full guide: [`docs/development.md`](docs/development.md).
+buffers: the `MiaBuffer` workflow, the offline planner, the buffer-api service and its client dataset). `mia_data` imports from `autodev`, `mia_buffers` from both, never the reverse; every package may import `mia_core`,
+which imports none of them. Full guide: [`docs/development.md`](docs/development.md).
 
 ## Before you push
 
@@ -22,6 +24,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **Workflow code is deterministic.** If `test_replay_*` fails, your change alters the commands a workflow issues
   and will break in-flight runs. Guard with `workflow.patched()` and re-record the fixture (see the guide).
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
+- **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
+  files are deprecated. `paths.local_root` must be host-local disk.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

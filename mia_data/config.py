@@ -255,7 +255,9 @@ def load_config(
     else:
         path = Path(path or os.environ.get(env_var) or PROJECT_DIR / default_name)
         if not path.is_file():
-            sys.exit(f"{prog}: config not found at {path} (copy {default_name}.example, or set ${env_var})")
+            sys.exit(
+                f"{prog}: config not found at {path} (copy mia.yaml.example to mia.yaml and set MIA_SERVICE, or set ${env_var})"
+            )
         source = path
         data = yaml.safe_load(path.read_text()) or {}
     for env_name, key_path in overrides.items():

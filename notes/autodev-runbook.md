@@ -27,8 +27,9 @@ Trust boundaries:
 
 1. Prerequisites P1-P4 in [the plan](plans/2026-10-10-autodev-basic-loop.md#before-you-start-prerequisites-not-tasks).
    csub is pinned to `krokicki/csub` branch `deploy-all` (has the `claude` request field); `pixi install` gets it.
-2. `cp autodev.yaml.example autodev.yaml` and set `deployment: autodev-<you>` (keeps your labels, branches and
-   workflows apart from the service and from colleagues), `paths.work_root` under your csub `allowed_roots`.
+2. `cp mia.yaml.example mia.yaml`, keep the `autodev` service and name it `autodev-<you>` in `services` (the deployment
+   is the service name, so your labels, branches and workflows stay apart from the service and from colleagues), and
+   set its `paths.work_root` under your csub `allowed_roots`.
    Keep `work_root` and `paths.state_dir` apart: `work_root` must not be an ancestor of `state_dir`, because
    `work_root` is bound read-write into the sandbox, and `<state_dir>-host` (the broker log) and `temporal.state_dir`
    from `mia.yaml` (the Temporal binary and database) must stay outside every writable bind.
@@ -108,7 +109,7 @@ nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes 
 mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `mia exec mia-data check`
 names what is missing); P4 see the plan.
 
-1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
+1. `cp mia.yaml.example mia.yaml` (if you have not), fill in the shared paths, the `mia-data` block, `harness.dir` and a `github.token_file` (or app key).
    `paths.work_root` and `paths.storage_root` take a path or `{path, url}`; with a `url` (the folder in Fileglancer)
    the issue comments link the round's workspace and the dataset's crops folder.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the

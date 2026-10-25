@@ -9,6 +9,15 @@ Everything runs through [pixi](https://pixi.sh). `pixi install` creates the envi
 SDK, httpx, pydantic, csub, and the test and lint tools). No GitHub token, LSF or Temporal server is needed for the
 checks below; they are only needed to run a deployment ([`docs/autodev-local-setup.md`](autodev-local-setup.md)).
 
+## Configuration
+
+One file configures every deployment: `mia.yaml` (copy `mia.yaml.example`; `MIA_CONFIG` names another file). Its top-level
+sections are shared; each block under `services` overlays them for one service, and the service name is its
+`deployment`. Run an application by hand with `MIA_SERVICE=<name> <app> check`; through `mia`, `mia exec <service> check`
+sets `MIA_SERVICE` for you (a per-app YAML file still loads when `MIA_SERVICE` is unset, deprecated). `paths.local_root`
+must be host-local disk, not NFS: `mia up` refuses otherwise and keeps the SQLite file and `locks/` there. `service.token_file`
+(mode 600; `mia init-token` creates it) holds the buffer-api worker token and is mounted read-only into the workers.
+
 ## The four checks
 
 Run all of these before pushing. CI runs the last three in this order on every pull request and push to main.
@@ -27,6 +36,7 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 
 | path | |
 |---|---|
+| `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the untrusted-output helpers (`untrusted.py`). Imports no application package; every package may import it |
 | `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
 | `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `notes/specs/2026-10-21-training-buffers.md`; walkthroughs below |
@@ -62,8 +72,7 @@ MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k 
 functions, tested directly. Everything with a side effect is an activity, called by name so the workflow module
 never imports the activity implementations.
 
-**No real paths or hostnames in tracked files.** Configs use placeholders; the real `autodev*.yaml` and
-`mia_data.yaml` are git-ignored. Before committing, `git diff | grep -n 'rokickik\|/nrs/'` should find nothing.
+**No real paths or hostnames in tracked files.** Configs use placeholders; the real `mia.yaml` is git-ignored. Before committing, `git diff | grep -n 'rokickik\|/nrs/'` should find nothing.
 
 **Anything a sandboxed job wrote is untrusted.** Read it through `read_untrusted` (size-limited, no symlinks),
 reduce it to a small typed result before it enters workflow history, and run it through `neutralize` before
@@ -124,7 +133,7 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
 
 ## Running a buffer from an issue (milestone 3)
 
-The deployment reads `mia_buffers.yaml` (copy the example; `buffers_repo` is the issue repo, `storage_root` is
+The deployment reads its `mia-buffers` block of `mia.yaml` (`mia.yaml.example`; `buffers_repo` is the issue repo, `storage_root` is
 mia-data's, `raw_root` defaults to mia-data's `<work_root>/_cache` so downloads are shared). `mia.yaml` lists it as
 `app: mia-buffers`: `mia up mia-buffers` starts the broker, buffer-api (`mia-buffers serve` on the host, bound to
 the host and port of `service.url`, log `mia logs mia-buffers api`) and the sandboxed worker, which may reach that
@@ -169,8 +178,8 @@ Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are 
 
 ## Datasets without a binding, and normalisation statistics (milestone 4)
 
-**Operator setup.** `mia_buffers.yaml` names mia-data's issue repo as `github.datasets_repo`. mia-data's own
-`mia_data.yaml` lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments
+**Operator setup.** the `mia-buffers` block names mia-data's issue repo as `github.datasets_repo`. mia-data's own
+`mia-data` block lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments
 run as the same GitHub App, so it is mia-data's own login) so its poller accepts a `data:go` the buffer adds. mia-data
 no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
 `record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.

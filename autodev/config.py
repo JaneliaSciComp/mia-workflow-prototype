@@ -224,7 +224,9 @@ def load_config(path: str | os.PathLike | None = None, *, service: str | None = 
     else:
         path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
         if not path.is_file():
-            sys.exit(f"autodev: config not found at {path} (copy autodev.yaml.example, or set $AUTODEV_CONFIG)")
+            sys.exit(
+                f"autodev: config not found at {path} (copy mia.yaml.example to mia.yaml and set MIA_SERVICE, or set $AUTODEV_CONFIG)"
+            )
         source = path
         data = yaml.safe_load(path.read_text()) or {}
     for env_var, key_path in _ENV_OVERRIDES.items():
