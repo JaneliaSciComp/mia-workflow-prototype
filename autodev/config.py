@@ -16,7 +16,9 @@ from typing import Literal, Protocol
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+from mia_core.config import PROJECT_DIR as PROJECT_DIR
+from mia_core.config import TemporalCfg as TemporalCfg
+from mia_core.config import load_dotenv as load_dotenv
 
 # environment variable -> the YAML key path it overrides
 _ENV_OVERRIDES = {
@@ -55,13 +57,6 @@ class GitHubCfg(BaseModel):
     protected_paths: list[str] = [".github/"]
     trusted_bots: list[str] = []  # GitHub App slugs whose `go` label counts without a permission lookup
     required_checks: list[str] = []  # status contexts / check-run names that must be present and green before merge
-
-
-class TemporalCfg(BaseModel):
-    address: str = "localhost:7233"
-    namespace: str = "default"
-    via_https_proxy: bool = False  # inside agentic-sandbox: reach Temporal through the allowlist proxy
-    poll_minutes: int = 2
 
 
 class PathsCfg(BaseModel):
@@ -213,18 +208,6 @@ class Config(BaseModel):
     def repo_slug(self) -> str:
         """The repo name made safe for use as a directory name ("owner__repo")."""
         return self.github.repo.replace("/", "__")
-
-
-def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
-    """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
-    if not path.is_file():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.removeprefix("export ").partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
