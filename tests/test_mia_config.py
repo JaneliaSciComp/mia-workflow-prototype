@@ -5,14 +5,6 @@ from pydantic import ValidationError
 from mia_data.config import PROJECT_DIR, load_config
 
 
-def test_example_config_loads(monkeypatch):
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    c = load_config(PROJECT_DIR / "mia_data.yaml.example")
-    assert c.task_queue == "mia-data" and c.await_queue == "mia-data-await"
-    assert c.label("go") == "data:go" and c.workflow_id(7) == "mia-data/JaneliaSciComp/mia-workflow-data/issue-7"
-    assert c.marker("x") == "<!-- mia-data: x -->"
-
-
 def test_defaults(tmp_path):
     c = make_cfg(tmp_path)
     assert c.crops.licences[0] == "CC0-1.0" and c.gallery.branch == "galleries"
@@ -48,7 +40,7 @@ def test_rejects_autodev_only_agent_settings(tmp_path, key, value):
 
 def test_via_proxy_env_override(monkeypatch):
     monkeypatch.setenv("MIA_DATA_TEMPORAL_VIA_PROXY", "1")
-    assert load_config(PROJECT_DIR / "mia_data.yaml.example").temporal.via_https_proxy is True
+    assert load_config(PROJECT_DIR / "mia.yaml.example", service="mia-data").temporal.via_https_proxy is True
 
 
 def test_roots_take_a_path_or_a_path_with_browse_url(tmp_path):

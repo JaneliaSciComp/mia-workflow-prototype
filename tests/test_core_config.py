@@ -64,3 +64,27 @@ def test_load_service_config_reads_mia_config_env(tmp_path, monkeypatch):
         load_service_config("nope")
     with pytest.raises(SystemExit, match="not found"):
         load_service_config("mia-data", tmp_path / "missing.yaml")
+
+
+@pytest.mark.parametrize(
+    "service, module, attr, expected",
+    [
+        ("autodev", "autodev.config", "github.repo", "JaneliaSciComp/mia-workflow-prototype"),
+        ("snippets", "autodev.config", "github.repo", "JaneliaSciComp/mia-snippets"),
+        ("mia-data", "mia_data.config", "github.data_repo", "JaneliaSciComp/mia-workflow-data"),
+        ("mia-buffers", "mia_buffers.config", "github.buffers_repo", "JaneliaSciComp/mia-buffers"),
+    ],
+)
+def test_example_mia_yaml_loads_every_service(service, module, attr, expected, monkeypatch):
+    import importlib
+
+    from mia_core.config import PROJECT_DIR
+
+    for name in ("TEMPORAL_ADDRESS", "AUTODEV_DEPLOYMENT", "MIA_SERVICE"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = importlib.import_module(module).load_config(PROJECT_DIR / "mia.yaml.example", service=service)
+    section, field = attr.split(".")
+    assert getattr(getattr(cfg, section), field) == expected
+    assert cfg.deployment == service and cfg.paths.state_dir.name == service
+    labels = {"autodev": "autodev:go", "snippets": "snippets:go", "mia-data": "data:go", "mia-buffers": "buffer:go"}
+    assert cfg.label("go") == labels[service]

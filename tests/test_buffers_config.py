@@ -87,14 +87,6 @@ def test_load_config_reads_env_path(tmp_path, monkeypatch):
     assert cfg.service.url == "http://svc:1" and cfg.temporal.via_https_proxy is True
 
 
-def test_example_config_loads(monkeypatch):
-    from autodev.config import PROJECT_DIR
-
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    cfg = load_config(PROJECT_DIR / "mia_buffers.yaml.example")
-    assert cfg.github.buffers_repo == "JaneliaSciComp/mia-buffers" and cfg.label("go") == "buffer:go"
-
-
 def test_config_requires_datasets_repo(tmp_path):
     with pytest.raises(ValidationError, match="datasets_repo"):
         make_cfg(

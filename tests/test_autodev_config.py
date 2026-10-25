@@ -6,12 +6,12 @@ from autodev_helpers import make_cfg
 
 from autodev.config import PROJECT_DIR, load_config
 
-EXAMPLE = PROJECT_DIR / "autodev.yaml.example"
+EXAMPLE = PROJECT_DIR / "mia.yaml.example"
 
 
 def test_example_loads_and_derives_names(monkeypatch):
     monkeypatch.delenv("AUTODEV_DEPLOYMENT", raising=False)
-    cfg = load_config(EXAMPLE)
+    cfg = load_config(EXAMPLE, service="autodev")
     assert cfg.github.auth == "token"
     assert cfg.label("go") == "autodev:go"
     assert cfg.branch(12) == "autodev/issue-12"
@@ -24,7 +24,7 @@ def test_example_loads_and_derives_names(monkeypatch):
 
 def test_deployment_override_isolates_a_personal_instance(monkeypatch):
     monkeypatch.setenv("AUTODEV_DEPLOYMENT", "autodev-kr")
-    cfg = load_config(EXAMPLE)
+    cfg = load_config(EXAMPLE, service="autodev")
     assert cfg.task_queue == "autodev-kr"
     assert cfg.label("go") == "autodev-kr:go"
     assert cfg.branch(3) == "autodev-kr/issue-3"

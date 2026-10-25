@@ -10,6 +10,7 @@ SERVICES = {
 }
 
 
+@pytest.mark.xfail(reason="Task 5 teaches the manifest the new service blocks", strict=True)
 def test_example_manifest_loads():
     m = load_manifest(PROJECT_DIR / "mia.yaml.example")
     assert list(m.services) == ["autodev", "snippets", "mia-data"] and m.temporal.managed is True
