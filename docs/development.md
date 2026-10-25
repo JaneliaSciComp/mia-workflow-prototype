@@ -158,7 +158,7 @@ Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are 
 ## Datasets without a binding, and normalisation statistics (milestone 4)
 
 **Operator setup.** `mia_buffers.yaml` names mia-data's issue repo as `github.datasets_repo`. mia-data's own
-`mia_data.yaml` lists the buffer worker's bot login in `github.trusted_bots` (quoted, `["<app slug>[bot]"]`, since bare brackets are YAML flow syntax; both deployments
+`mia_data.yaml` lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments
 run as the same GitHub App, so it is mia-data's own login) so its poller accepts a `data:go` the buffer adds. mia-data
 no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
 `record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.

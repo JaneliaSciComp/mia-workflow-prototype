@@ -12,7 +12,7 @@ github:
   installation_id: null      # auth: app
   private_key_path: null     # auth: app; PEM readable only by the service account
   protected_paths: [".github/"]
-  # trusted_bots: ["some-app[bot]"]          # app logins whose `go` label starts work (no permission lookup)
+  # trusted_bots: [some-app]                 # GitHub App slugs whose `go` label starts work (no permission lookup)
   # required_checks: ["mia-data/crops"]      # status contexts / check-run names that must be present and green
 temporal:
   address: localhost:7233    # $TEMPORAL_ADDRESS overrides

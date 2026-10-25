@@ -53,7 +53,7 @@ class GitHubCfg(BaseModel):
     api_url: str = "https://api.github.com"
     git_url: str | None = None  # default https://github.com/<repo>.git; tests use a local path
     protected_paths: list[str] = [".github/"]
-    trusted_bots: list[str] = []  # app logins ("name[bot]") whose `go` label counts without a permission lookup
+    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label counts without a permission lookup
     required_checks: list[str] = []  # status contexts / check-run names that must be present and green before merge
 
 
@@ -145,8 +145,11 @@ class Config(BaseModel):
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
-        if bad := [login for login in github.trusted_bots if not login.endswith("[bot]")]:
-            raise ValueError(f"github.trusted_bots: {bad} must be app logins ending in '[bot]'")
+        # the slug as GitHub shows the App, or the login it acts under ("<slug>[bot]"); stored as the login
+        slugs = [login.removesuffix("[bot]") for login in github.trusted_bots]
+        if bad := [slug for slug in slugs if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", slug)]:
+            raise ValueError(f"github.trusted_bots: {bad} must be GitHub App slugs")
+        github.trusted_bots = [f"{slug}[bot]" for slug in slugs]
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())

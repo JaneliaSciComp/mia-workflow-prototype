@@ -67,7 +67,8 @@ def test_roots_take_a_path_or_a_path_with_browse_url(tmp_path):
     assert not hasattr(c, "storage")
 
 
-def test_trusted_bots_must_be_app_logins(tmp_path):
+def test_trusted_bots_take_the_app_slug_and_add_the_bot_suffix(tmp_path):
+    cfg = make_cfg(tmp_path, github={"trusted_bots": ["mia-bot", "other[bot]"]})
+    assert cfg.github.trusted_bots == ["mia-bot[bot]", "other[bot]"]
     with pytest.raises(ValidationError, match="trusted_bots"):
-        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
-    assert make_cfg(tmp_path, github={"trusted_bots": ["mia-bot[bot]"]}).github.trusted_bots == ["mia-bot[bot]"]
+        make_cfg(tmp_path, github={"trusted_bots": ["bad slug!"]})

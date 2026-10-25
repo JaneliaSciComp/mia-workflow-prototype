@@ -91,10 +91,10 @@ def test_env_override_into_an_empty_section(tmp_path, monkeypatch):
     assert load_config(p).temporal.address == "example:7233"
 
 
-def test_trusted_bots_must_be_apps(tmp_path):
-    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]"]}).github.trusted_bots == ["x[bot]"]
+def test_trusted_bots_take_the_app_slug_and_add_the_bot_suffix(tmp_path):
+    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]", "y"]}).github.trusted_bots == ["x[bot]", "y[bot]"]
     with pytest.raises(ValueError, match="trusted_bots"):
-        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
+        make_cfg(tmp_path, github={"trusted_bots": ["bad slug!"]})
 
 
 def test_max_budget_must_be_positive(tmp_path):
