@@ -57,6 +57,7 @@ class BindingInfo:
     hosts: list[str] = field(default_factory=list)
     manual: list[list[str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    staged: bool = False  # buffer-api's registry knows a pyramid staged from this very binding, still on disk
 
 
 @dataclass

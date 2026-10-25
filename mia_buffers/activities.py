@@ -446,9 +446,28 @@ class Activities:
         manual = any(url.startswith("manual://") for url in urls) or bool(
             missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
         )
+        staged = await self._staged_before(round_id, record, digest)
         if manual:
-            return BindingInfo(True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)])
-        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg))
+            return BindingInfo(True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)], staged=staged)
+        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged)
+
+    async def _staged_before(self, round_id: str, record: str, binding_hash: str) -> bool:
+        """True when buffer-api's registry holds an `ok` pyramid for this record's staged directory, built from a
+        binding with this hash, and its stage.json is still there. Buffer-api unreachable: False (stage again)."""
+        staged = self._staged_dir(round_id, record)
+        try:
+            async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
+                response = await client.get(f"/assets/staged/{quote(str(staged), safe='')}")
+        except httpx.HTTPError as error:
+            activity.logger.warning("%s: registry unavailable, staging again: %s", record, error)
+            return False
+        data = response.json().get("data") if response.status_code == 200 else None
+        return (
+            isinstance(data, dict)
+            and data.get("ok") is True
+            and data.get("binding_hash") == binding_hash
+            and (staged / "stage.json").is_file()
+        )
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
@@ -509,13 +528,39 @@ class Activities:
         fetched = report.get("bytes_fetched")
         blocked = report.get("host_not_allowed")
         volumes = report.get("volumes")
-        return StageResult(
+        result = StageResult(
             report.get("ok") is True,
             len(volumes) if isinstance(volumes, list) else 0,
             _texts(report.get("errors")),
             fetched if type(fetched) is int and fetched >= 0 else 0,
             _text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
         )
+        await self._record_assets(round_id, record, result)
+        return result
+
+    async def _record_assets(self, round_id: str, record: str, result: StageResult) -> None:
+        """Register with buffer-api what the stage job left on disk: the staged directory (with the binding it was
+        built from, so a later round can reuse it) and the record's raw cache as files.json lists it."""
+        binding_path, cache = self._binding_path(round_id, record), self._cache_dir(record)
+        binding = yaml.safe_load(binding_path.read_text()) if binding_path.is_file() else {}
+        staged = {
+            "record": record,
+            "round": round_id,
+            "ok": result.ok,
+            "volumes": result.volumes,
+            "bytes_fetched": result.bytes_fetched,
+            "binding_hash": hashlib.sha256(binding_path.read_bytes()).hexdigest() if binding_path.is_file() else None,
+            "snippets_commit": str(binding.get("snippets_commit") or "") if isinstance(binding, dict) else "",
+        }
+        files = {
+            str(url)[:500]: {"size": (entry.get("validators") or {}).get("size"), "source": entry.get("source")}
+            for url, entry in read_manifest(cache).items()
+            if isinstance(entry, dict)
+        }
+        raw = {"path": str(cache), "files": files}
+        async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
+            for kind, key, data in (("staged", str(self._staged_dir(round_id, record)), staged), ("raw", record, raw)):
+                (await client.put(f"/assets/{kind}/{quote(key, safe='')}", json=data)).raise_for_status()
 
     @activity.defn(name="verify_drop")
     @mia_permanent_errors

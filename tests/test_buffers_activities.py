@@ -363,7 +363,8 @@ async def test_prepare_stage_makes_workspace_and_dirs(acts):
     assert (acts.cfg.paths.raw_root / U937).is_dir() and staged_dir(acts, U937).is_dir()
 
 
-async def test_read_stage_reduces_report(acts):
+async def test_read_stage_reduces_report(acts, server):  # noqa: F811
+    acts.cfg.service.url = server  # read_stage registers what it read
     await acts.plan(7, ROUND, await admitted(acts))
     assert (await acts.read_stage(ROUND, U937)).errors == ["stage.json is missing, unreadable or not a JSON object"]
     write_stage_json(staged_dir(acts, U937))
@@ -468,3 +469,55 @@ def test_response_error_text_survives_non_json_bodies():
             raise ValueError("not json")
 
     assert _response_error(Response()) == "<html>502 Bad Gateway</html>"
+
+
+async def test_read_stage_records_the_staged_and_raw_assets(acts, server):  # noqa: F811
+    """What the stage job left on disk is registered with buffer-api: the staged directory with the binding it
+    was built from, and the record's raw cache from files.json, so later rounds and a retire can find them."""
+    from urllib.parse import quote
+
+    import httpx
+
+    from mia_buffers.drop import merge_manifest
+
+    acts.cfg.service.url = server
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
+    info = await acts.read_binding(ROUND, U937)
+    url = "https://zenodo.org/api/records/1/files/a.tif/content"
+    merge_manifest(acts.cfg.paths.raw_root / U937, {url: {"validators": {"size": 12}, "source": "download"}})
+    write_stage_json(staged_dir(acts, U937))
+    assert (await acts.read_stage(ROUND, U937)).ok
+    key = quote(str(staged_dir(acts, U937)), safe="")
+    staged = httpx.get(f"{server}/assets/staged/{key}").json()["data"]
+    assert staged == {
+        "record": U937,
+        "round": ROUND,
+        "ok": True,
+        "volumes": 1,
+        "bytes_fetched": 0,
+        "binding_hash": info.hash,
+        "snippets_commit": "a" * 40,
+    }
+    raw = httpx.get(f"{server}/assets/raw/{U937}").json()["data"]
+    assert raw == {"path": str(acts.cfg.paths.raw_root / U937), "files": {url: {"size": 12, "source": "download"}}}
+
+
+async def test_read_binding_reports_a_pyramid_staged_earlier_for_the_same_binding(acts, server):  # noqa: F811
+    acts.cfg.service.url = server
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
+    assert not (await acts.read_binding(ROUND, U937)).staged  # nothing registered yet
+    write_stage_json(staged_dir(acts, U937))
+    await acts.read_stage(ROUND, U937)
+    assert (await acts.read_binding(ROUND, U937)).staged
+    (staged_dir(acts, U937) / "stage.json").unlink()  # registered but gone from disk: stage again
+    assert not (await acts.read_binding(ROUND, U937)).staged
+    write_stage_json(staged_dir(acts, U937).parent / "tmp")
+    (staged_dir(acts, U937).parent / "tmp" / "stage.json").rename(staged_dir(acts, U937) / "stage.json")
+    assert (await acts.read_binding(ROUND, U937)).staged
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/b.tif/content"])  # a new binding
+    assert not (await acts.read_binding(ROUND, U937)).staged
+    acts.cfg.service.url = "http://127.0.0.1:9"  # buffer-api down: the binding is still read, nothing reused
+    info = await acts.read_binding(ROUND, U937)
+    assert info.found and not info.staged

@@ -576,6 +576,23 @@ async def test_poll_refuses_go_from_a_reader(tmp_path):
     assert "does not have write access" in gh.comments[1][0]["body"]
 
 
+async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
+    """read_binding found this binding's pyramid in the registry (an earlier round or buffer staged it): no
+    workspace, no job; read_stage re-reads it and registration proceeds."""
+    m = Mocks(bindings={"u937": BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"], staged=True)})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"))
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert [a[0] for a in m.of("prepare_stage")] == ["bcss"] and [a[1].record for a in m.of("submit")] == ["bcss"]
+    assert sorted(a[0] for a in m.of("read_stage")) == ["bcss", "u937"]
+    assert dataset(state, "u937").status == "servable" and dataset(state, "u937").volumes == 1
+    servable = [c[0] for c in m.of("comment") if c[1].endswith("u937 servable")]
+    assert len(servable) == 1 and "staged earlier" in servable[0]
+
+
 # --- replay -------------------------------------------------------------------------------------
 
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"

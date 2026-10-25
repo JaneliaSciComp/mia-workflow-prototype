@@ -363,12 +363,15 @@ class MiaBuffer:
             await self._await_drop(dataset)
         async with semaphore:
             dataset.status = "staging"
-            workspace = await self._act("prepare_stage", state.issue, round_id, record, seconds=300, result_type=str)
-            job = await self._job(record, workspace, binding.hosts, dataset.voxel_size_nm)
-            if job.state not in ("DONE", "EXIT"):
-                return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
-            if job.state == "EXIT" and job.exit_code not in (0, None):
-                return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
+            if not binding.staged:  # else the registry holds this binding's pyramid from an earlier round: reuse it
+                workspace = await self._act(
+                    "prepare_stage", state.issue, round_id, record, seconds=300, result_type=str
+                )
+                job = await self._job(record, workspace, binding.hosts, dataset.voxel_size_nm)
+                if job.state not in ("DONE", "EXIT"):
+                    return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
+                if job.state == "EXIT" and job.exit_code not in (0, None):
+                    return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
             staged = await self._act("read_stage", round_id, record, seconds=300, result_type=StageResult)
         if not staged.ok:
             why = "; ".join(staged.errors) or "no errors reported"
@@ -382,8 +385,9 @@ class MiaBuffer:
             refused = "; ".join(f"{volume}: {why}" for volume, why in registered.refused.items())
             return await self._fail(dataset, f"buffer-api refused every volume: {refused or 'none staged'}")
         dataset.status, dataset.volumes, dataset.reason = "servable", len(registered.registered), ""
+        reused = " The pyramid was staged earlier for this binding and reused." if binding.staged else ""
         await self._comment(
-            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.",
+            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
             f"dataset {round_id} {record} servable",
         )
 
