@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from mia_data.catalog import FAMILIES
+from mia_data.catalog import FAMILIES, dataset_folder
 
 SPEC_TYPES = {"point": "points", "bbox": "bounding-box"}  # spec annotation types → catalog enum
 SPEC_SOURCES = {"auto-predict": "automatic"}  # spec annotation sources → catalog enum
@@ -61,6 +61,7 @@ class Facts:
     download_host: str | None
     doi: str | None
     all_arrays: list[ArrayFacts] = field(default_factory=list)
+    folder: str | None = None  # mia-data's dataset folder; None where mia-data could not place the dataset
 
     @property
     def largest_raw(self) -> ArrayFacts | None:
@@ -108,8 +109,13 @@ def facts(path: str, record: dict) -> Facts:
     arrays = [array for entry in (record.get("technical") or {}).get("arrays") or [] if (array := _array(entry))]
     modalities = list(imaging.get("modality") or [])
     url = data.get("download_url")
+    record_id = record.get("id") or path.rsplit("/", 1)[-1].removesuffix(".yaml")
+    try:
+        folder = dataset_folder(record, record_id)
+    except ValueError:
+        folder = None
     return Facts(
-        id=record.get("id") or path.rsplit("/", 1)[-1].removesuffix(".yaml"),
+        id=record_id,
         path=path,
         dims=imaging.get("dimensionality"),
         modalities=modalities,
@@ -129,4 +135,5 @@ def facts(path: str, record: dict) -> Facts:
         download_host=urlparse(url).hostname if url else None,
         doi=record.get("doi"),
         all_arrays=arrays,
+        folder=folder,
     )

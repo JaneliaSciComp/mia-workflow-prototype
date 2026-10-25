@@ -91,6 +91,12 @@ def decide_all(all_facts: list[Facts], select: Select) -> list[Decision]:
             else None
         ),
         lambda f: _where(select.where, f),
+        lambda f: (  # what mia-data will refuse at sourcing is out of the pool at planning
+            None
+            if f.folder
+            else f"no dataset folder for mia-data: modality {' '.join(f.modalities) or 'none'} / "
+            f"organism {' '.join(f.organisms) or 'none'} (one of each needed)"
+        ),
     ]
     decisions: list[Decision] = []
     kept_by_doi: dict[str, str] = {}

@@ -72,3 +72,19 @@ def test_paths_and_dims(spec):
 def test_matches():
     assert matches("any", []) and matches(InFilter(**{"in": ["a", "b"]}), ["b"])
     assert not matches(InFilter(**{"in": ["a"]}), ["c"])
+
+
+def test_record_mia_data_cannot_place_is_out_of_the_pool(spec):
+    """mia-data names a dataset folder from one modality family and one organism; a record it would refuse must
+    leave the plan here, never fail at sourcing (the StarDist nuclei record of the first live run had organism [])."""
+    path, record = next(
+        (str(p.relative_to(CATALOG)), yaml.safe_load(p.read_text()))
+        for p in CATALOG.glob("datasets/**/*.yaml")
+        if p.stem == BCSS
+    )
+    record["imaging"]["organism"] = []
+    decision = decide_all([facts(path, record)], spec.select)[0]
+    assert not decision.admitted
+    assert (
+        decision.rule == "no dataset folder for mia-data: modality histology-WSI / organism none (one of each needed)"
+    )
