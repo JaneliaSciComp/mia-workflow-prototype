@@ -8,8 +8,8 @@ import pytest
 
 from mia_buffers.api import BufferService, make_server
 from mia_buffers.ledger import Ledger
-from mia_buffers.register import buffer_config, register, volume_bodies
-from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed  # noqa: F401  (fixtures)
+from mia_buffers.register import buffer_config, normalize_bounds, register, volume_bodies
+from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed, spec_with  # noqa: F401  (fixtures)
 
 
 def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3):
@@ -68,7 +68,7 @@ def test_buffer_config_from_plan(spec_2d):  # noqa: F811
     cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 8, "test": 8})
     assert cfg["levels"] == [1, 2, 4] and cfg["patch"] == 256 and cfg["channels"] == "all" and cfg["seed"] == 0
     assert cfg["splits"] == {"train": 0.8, "val": 0.1, "test": 0.1} and cfg["split_sizes"] == {"val": 8, "test": 8}
-    assert cfg["tensorizer_params"] == {"normalize": "percentile", "range": [1, 99], "clip": True}
+    assert cfg["tensorizer_params"] == {"normalize": "percentile", "range": [1, 99], "clip": True, "scope": "patch"}
 
 
 @pytest.fixture
@@ -122,3 +122,83 @@ def test_volume_bodies_accepts_a_report(tmp_path, spec_2d):  # noqa: F811
     report = json.loads((staged / "stage.json").read_text())
     (staged / "stage.json").unlink()
     assert volume_bodies(row, staged, spec_2d, report=report) == from_file
+
+
+# --- normalisation statistics (milestone 4) ---------------------------------------------------
+
+SAMPLE_V0 = [[float(v) for v in range(0, 1010, 10)]]  # one channel, 101 values 0..1000
+SAMPLE_V1 = [[float(v) for v in range(500, 1510, 10)]]
+
+
+def write_two_volumes(staged, samples):
+    """stage.json with v0.zarr and v1.zarr (one channel, 25 planes); `samples` maps path -> intensity_sample
+    (omitted when None)."""
+    report = json.loads((write_stage_json(staged, channels=1) / "stage.json").read_text())
+    base = report["volumes"][0]
+    report["volumes"] = []
+    for path, sample in samples.items():
+        volume = {**base, "path": path}
+        if sample is not None:
+            volume["intensity_sample"] = sample
+        report["volumes"].append(volume)
+    (staged / "stage.json").write_text(json.dumps(report))
+    return staged
+
+
+def scoped(spec_2d, scope):  # noqa: F811
+    return spec_with(spec_2d, **{"sampling.normalize.scope": scope})
+
+
+def test_normalize_bounds_nearest_rank():
+    assert normalize_bounds([[0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]], (10, 90)) == {"lo": [10], "hi": [90]}
+    assert normalize_bounds([[5, 5, 5], [1, 2, 3]], (0, 100)) == {"lo": [5, 1], "hi": [5, 3]}
+
+
+def test_volume_scope_bounds_from_sample(tmp_path, spec_2d):  # noqa: F811
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": SAMPLE_V1})
+    bodies = dict(volume_bodies(ROW, staged, scoped(spec_2d, "volume")))
+    assert bodies["u937/v0.zarr"]["normalize"] == normalize_bounds(SAMPLE_V0, (1, 99)) == {"lo": [10.0], "hi": [990.0]}
+    assert bodies["u937/v1.zarr"]["normalize"] == normalize_bounds(SAMPLE_V1, (1, 99))
+
+
+def test_dataset_scope_pools_volumes(tmp_path, spec_2d):  # noqa: F811
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": SAMPLE_V1})
+    bodies = dict(volume_bodies(ROW, staged, scoped(spec_2d, "dataset")))
+    pooled = normalize_bounds([sorted(SAMPLE_V0[0] + SAMPLE_V1[0])], (1, 99))
+    assert pooled != normalize_bounds(SAMPLE_V0, (1, 99))
+    assert all(body["normalize"] == pooled for body in bodies.values()) and len(bodies) == 2
+
+
+def test_patch_scope_has_no_bounds(tmp_path, spec_2d):  # noqa: F811
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": None})
+    bodies = dict(volume_bodies(ROW, staged, spec_2d))
+    assert len(bodies) == 2 and all(body["normalize"] is None for body in bodies.values())
+
+
+def test_scope_without_sample_is_refused(tmp_path, spec_2d):  # noqa: F811
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": None, "v1.zarr": SAMPLE_V1})
+    refused = {}
+    bodies = dict(volume_bodies(ROW, staged, scoped(spec_2d, "volume"), refused=refused))
+    assert list(bodies) == ["u937/v1.zarr"] and "re-stage" in refused["u937/v0.zarr"]
+    with pytest.raises(ValueError, match="re-stage"):
+        volume_bodies(ROW, staged, scoped(spec_2d, "volume"))
+
+
+@pytest.mark.parametrize("sample", [[["a", "b"]], [[1, 2], [3]], [[]], "nope", [[1, None]]])
+def test_malformed_sample_is_refused(tmp_path, spec_2d, sample):  # noqa: F811
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": sample})
+    refused = {}
+    assert volume_bodies(ROW, staged, scoped(spec_2d, "dataset"), refused=refused) == []
+    assert "re-stage" in refused["u937/v0.zarr"]
+
+
+def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
+    plan = {"spec_name": "s", "spec_hash": "h", "catalog_ref": None}
+    params = buffer_config(plan, scoped(spec_2d, "dataset"), tensorizer="muvit-2d", split_sizes={"val": 1, "test": 1})
+    assert params["tensorizer_params"]["scope"] == "dataset"
+    assert (
+        buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 1, "test": 1})["tensorizer_params"][
+            "scope"
+        ]
+        == "patch"
+    )

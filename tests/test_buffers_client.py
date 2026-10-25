@@ -19,7 +19,8 @@ def fake_tensorize(pyramid_dir, descriptor, snapshot, name, params):
     import array
 
     assert snapshot == SNAP and name == "muvit-2d" and params["channels"] == {"op": "channel", "index": 0}
-    assert params["normalize"] == "percentile"
+    assert params["normalize"] == "percentile" and params["scope"] == "volume"
+    assert params["stats"] == {"lo": [0], "hi": [9]}
     patch, levels = descriptor["patch"], len(descriptor["levels"])
     return {
         "img": _Arr((levels, 1, patch, patch)),
@@ -44,9 +45,10 @@ def buffer_server(tmp_path, monkeypatch):
     srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite")), "127.0.0.1", 0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
-    cfg = {**CFG, "tensorizer_params": {"normalize": "percentile"}}
+    cfg = {**CFG, "tensorizer_params": {"normalize": "percentile", "scope": "volume"}}
     assert httpx.put(f"{base}/buffers/b", json=cfg).status_code == 200
-    assert httpx.put(f"{base}/buffers/b/volumes/a", json=body()).status_code == 200
+    volume = {**body(), "normalize": {"lo": [0], "hi": [9]}}
+    assert httpx.put(f"{base}/buffers/b/volumes/a", json=volume).status_code == 200
     yield base
     srv.shutdown()
 

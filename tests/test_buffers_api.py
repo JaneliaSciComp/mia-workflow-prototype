@@ -196,3 +196,16 @@ def test_consumer_lookup_is_by_id(tmp_path):
     led.put_buffer("b", {})
     cid = led.add_consumer("b", {**CONSUMER, "rank": 0, "mode": "local"})
     assert led.consumer("b", cid)["split"] == "train" and led.consumer("b", "nope") is None
+
+
+def test_descriptor_carries_normalize(tmp_path):
+    s = svc(tmp_path)
+    assert call(s, "PUT", "/buffers/b", payload=CFG)[0] == 200
+    bounds = {"lo": [1], "hi": [200]}
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "normalize": bounds})[0] == 200
+    assert call(s, "PUT", "/buffers/b/volumes/c", payload=body("c", split_planes={"test": [0]}))[0] == 200
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    descriptors = call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[1]["descriptors"]
+    assert all(d["normalize"] == bounds for d in descriptors)  # only a has train planes
+    test = call(s, "GET", "/buffers/b/split/test", {"from": "0", "n": "1", "consumer": cid})[1]["descriptors"]
+    assert test and test[0]["volume"] == "c" and test[0]["normalize"] is None  # c registered without bounds

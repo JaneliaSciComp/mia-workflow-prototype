@@ -34,6 +34,7 @@ class Volume:
     channels_stored: int
     recipe: dict | None
     voxel_size_nm: dict[str, float]
+    normalize: dict | None = None  # per-channel lo/hi bounds the tensorizer applies (scope volume|dataset)
 
     def extent(self, axis: str) -> int:
         return self.shape[self.axes.index(axis)] if axis in self.axes else 1
@@ -85,4 +86,5 @@ def draw(
         "levels": list(levels),
         "patch": patch,
         "channels": volume.recipe if channels != "all" else None,
+        "normalize": volume.normalize,
     }

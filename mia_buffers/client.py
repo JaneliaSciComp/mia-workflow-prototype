@@ -186,7 +186,11 @@ class BufferDataset(Base):
             raise RuntimeError(str(error)) from None
 
     def _tensorize(self, descriptor: dict) -> dict:
-        params = {**self.config.get("tensorizer_params", {}), "channels": descriptor.get("channels")}
+        params = {
+            **self.config.get("tensorizer_params", {}),
+            "channels": descriptor.get("channels"),
+            "stats": descriptor.get("normalize"),
+        }
         assert tensorize is not None
         return dict(
             tensorize(Path(descriptor["path"]), descriptor, self.tensorizers, self.config["tensorizer"], params)

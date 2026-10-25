@@ -6,6 +6,7 @@ The hand-registration path: the worker of milestone 3 will call the same functio
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from pathlib import Path
@@ -32,7 +33,12 @@ def buffer_config(plan: dict, spec: Spec, *, tensorizer: str, split_sizes: dict[
         "channels": spec.sampling.patch.c,
         "seed": spec.sampling.seed,
         "tensorizer": tensorizer,
-        "tensorizer_params": {"normalize": normalize.method, "range": list(normalize.range), "clip": normalize.clip},
+        "tensorizer_params": {
+            "normalize": normalize.method,
+            "range": list(normalize.range),
+            "clip": normalize.clip,
+            "scope": normalize.scope,
+        },
         "splits": dict(spec.splits.fractions),
         "split_sizes": dict(split_sizes),
     }
@@ -55,6 +61,31 @@ def _split_planes(volume_id: str, planes: int, spec: Spec) -> dict[str, list[int
 
 
 VOLUME_PATH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a plain directory name under the record's staged dir
+
+
+def normalize_bounds(samples: list[list[float]], range_: tuple[float, float]) -> dict:
+    """`{"lo": [per channel], "hi": [per channel]}`: the range's percentiles of each channel's sorted sample
+    (nearest rank), what the tensorizer uses instead of per-patch percentiles for scope volume|dataset."""
+
+    def rank(values: list[float], percentile: float) -> float:
+        return values[min(len(values) - 1, max(0, math.ceil(percentile / 100 * len(values)) - 1))]
+
+    return {
+        "lo": [rank(values, range_[0]) for values in samples],
+        "hi": [rank(values, range_[1]) for values in samples],
+    }
+
+
+def check_sample(value: object, channels: int) -> str | None:
+    """Why a stage.json `intensity_sample` is unusable (not `channels` non-empty lists of numbers), or None."""
+    if not (isinstance(value, list) and len(value) == channels):
+        return f"intensity_sample is not a list of {channels} channel sample(s)"
+    for sample in value:
+        if not (isinstance(sample, list) and sample):
+            return "a channel sample is empty or not a list"
+        if not all(type(number) in (int, float) and math.isfinite(number) for number in sample):
+            return "a channel sample holds a non-number"
+    return None
 
 
 def check_volume(volume: object) -> str | None:
@@ -82,23 +113,43 @@ def volume_bodies(
 ) -> list[tuple[str, dict]]:
     """(volume id, `PUT volumes/<vol>` body) for every well-formed raw volume in the record's stage.json (or in
     `report`, the same JSON already read by the caller, e.g. through read_untrusted). Malformed entries go to
-    `refused` (volume id -> reason) when a dict is given, else raise ValueError."""
+    `refused` (volume id -> reason) when a dict is given, else raise ValueError. With `normalize.scope` volume
+    or dataset, each body carries `normalize` bounds from the stage job's `intensity_sample` (a volume without a
+    usable sample is refused: it must be staged again with a harness that records one)."""
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
+    scope = spec.sampling.normalize.scope
     volumes = []
-    for index, volume in enumerate(report.get("volumes") or []):
-        if (why := check_volume(volume)) is None:
-            volumes.append(volume)
-        elif refused is not None:
-            path = volume.get("path") if isinstance(volume, dict) else None
-            refused[f"{row['id']}/{path if isinstance(path, str) else index}"] = why
-        else:
+
+    def refuse(index: int, volume: object, why: str) -> None:
+        if refused is None:
             raise ValueError(f"{row['id']}: volume {index}: {why}")
+        path = volume.get("path") if isinstance(volume, dict) else None
+        refused[f"{row['id']}/{path if isinstance(path, str) else index}"] = why
+
+    for index, volume in enumerate(report.get("volumes") or []):
+        if (why := check_volume(volume)) is not None:
+            refuse(index, volume, why)
+        elif scope != "patch" and (why := check_sample(volume.get("intensity_sample"), _channels(volume))):
+            refuse(index, volume, f"{why}; re-stage with the current harness for normalize.scope {scope}")
+        else:
+            volumes.append(volume)
     total_planes = sum(_planes(volume) for volume in volumes) or 1
+    bounds: dict | None = None
+    if scope == "dataset" and volumes:
+        # ponytail: dataset bounds pool each volume's sample with equal weight, not by plane count; weight by
+        # planes if a dataset of unequal volumes shows it matters
+        channels = _channels(volumes[0])
+        pooled = [
+            sorted(value for volume in volumes for value in volume["intensity_sample"][c]) for c in range(channels)
+        ]
+        bounds = normalize_bounds(pooled, spec.sampling.normalize.range)
     out = []
     for volume in volumes:
         volume_id = f"{row['id']}/{volume['path']}"
         planes = _planes(volume)
+        if scope == "volume":
+            bounds = normalize_bounds(volume["intensity_sample"], spec.sampling.normalize.range)
         out.append(
             (
                 volume_id,
@@ -117,6 +168,7 @@ def volume_bodies(
                     "channels_stored": _channels(volume),
                     "recipe": row.get("channel_recipe"),
                     "voxel_size_nm": {k: v for k, v in (volume.get("voxel_size_nm") or {}).items() if v is not None},
+                    "normalize": bounds,
                 },
             )
         )

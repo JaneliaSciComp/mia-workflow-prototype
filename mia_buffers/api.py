@@ -71,6 +71,7 @@ class VolumeBody(_Strict):
     channels_stored: int
     recipe: dict | None = None
     voxel_size_nm: dict[str, float]
+    normalize: dict | None = None  # {"lo": [per channel], "hi": [per channel]} for normalize.scope volume|dataset
 
 
 class ConsumerBody(_Strict):
@@ -181,6 +182,7 @@ class BufferService:
             channels_stored=parsed.channels_stored,
             recipe=parsed.recipe,
             voxel_size_nm=parsed.voxel_size_nm,
+            normalize=parsed.normalize,
         )
         if len(volume.shape) != len(volume.axes):
             raise HttpError(422, f"shape {volume.shape} does not match axes {volume.axes!r}")
