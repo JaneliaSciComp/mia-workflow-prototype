@@ -4,7 +4,7 @@
 ([`2026-10-21-training-buffers.md`](2026-10-21-training-buffers.md), v0.7, milestones 0–4 built on branch
 `training-buffers`) and the mia-data crops spec ([`../mia-crops-spec.md`](../mia-crops-spec.md)). This document
 changes how those two systems meet; it does not re-describe what they do inside.
-**Repos:** this repo (`mia_data/`, `mia_buffers/`, `mia_ops/`, `autodev/`), mia-snippets (harness: cache lock,
+**Repos:** this repo (`mia_data/`, `mia_buffers/`, `mia_ops/`, `autodev/`), mia-snippets (harness:
 `fetch`), the issue repos `JaneliaSciComp/mia-workflow-data` (datasets) and `JaneliaSciComp/mia-buffers`
 (buffers and preparation requests), the catalog `AI-HHMI/mia-agentic-search` (read-only).
 
@@ -90,14 +90,17 @@ Read this first; everything after assumes these calls.
    anything makes every buffer wait for its slowest download. Staging uses no network once the files are cached,
    so staging dataset A while B downloads costs nothing and reaches `ready` sooner. Two parallelism knobs, a
    weight-ordered queue (heaviest datasets first), and the global order falls out when bandwidth is the bottleneck.
-7. **The lock belongs in the cache, not in the API.** Two writers of one cache entry are prevented by a lock
-   file beside the entry (`fcntl`, the same mechanism `archive_snapshot` already uses on the same filesystem),
-   taken by the harness on every `put` and on every `files.json` rewrite. That covers mia-data's jobs, buffer
-   stage jobs, fetch jobs and anything run by hand, with no network from jobs to the service and no leases to
-   expire. The registry's asset state (`fetching` with a job id) is advisory: a worker about to submit a fetch for a
-   record that another job is fetching waits for that job instead. It also fixes a bug that exists today:
-   `files.json` is rewritten read-modify-write without a lock, so two jobs writing the same record's cache lose
-   entries.
+7. **The lock is a lease in the registry, taken by workers, never by jobs.** The caches live on NFS, where file
+   locks do not work, so nothing in this design coordinates through the filesystem. Instead every job that mounts
+   a record's raw cache read-write (mia-data's smoke and trusted crop jobs, the fetch job, the stage job) is
+   submitted only after its worker holds the record's **lease** from buffer-api (`PUT /leases/raw/<record>`),
+   and the lease is released when the job ends. One writer per record at a time, across both pipelines and any
+   number of buffers; a worker that finds the lease held waits and retries. Jobs stay network-free towards the
+   service, and the per-record serialisation also fixes a bug that exists today: `files.json` is rewritten
+   read-modify-write, so two jobs writing one record's cache at once lose entries. The lease has a TTL the
+   worker extends while it waits on the job, so a dead worker frees it. Hand-run jobs are outside this and the
+   docs say so. (`archive_snapshot`'s `fcntl` lock on `work_root` has the same NFS problem; it serialises two
+   extractions of one commit and is replaced by the same lease kind, `snapshot/<sha>`.)
 8. **The plan runs once, on the server.** The pool explorer re-implements the planner's rules in JavaScript; two
    copies drift. The live page posts the spec draft to the service and renders the real `build_plan` result over
    the registry's records. Charts and the funnel are just views of plan rows.
@@ -135,6 +138,7 @@ tables join them. Workers write through HTTP; the page reads through HTTP; nothi
 | `datasets` | `id` | preparation state: `state` (`unprepared` is the absence of a row · `in-progress` · `prepared` · `ineligible` · `needs-human`), `data_stage` (mia-data's `data:<stage>`), `issue`, `folder`, `binding_hash`, `binding_commit` (snippets commit), `published_at`, `crops` (count), `evaluation` (JSON, §4.3, null until evaluated), `updated_at` | mia-data's `set_stage` and `publish_crops` activities (best effort), `mia-buffers datasets sync` | `storage_root/<folder>/{binding.yaml, manifest.json, evaluation.yaml}` and the datasets repo's labels |
 | `assets` | `(kind, key)` | as now (`staged`: staged dir → stage facts and binding hash; `raw`: record → files), plus `state` (`fetching` · `waiting-drop` · `ready` · `partial` · `missing` · `evicted`), `bytes`, `job` (csub job id while fetching or staging), `last_used`, `scanned_at` | the workers after every job that touched the cache; the keeper's scan | the roots: `files.json`, `stage.json`, `du` |
 | `refs` | `(buffer, kind, key)` | as now; removed on retire | the buffers worker | the ledger's volumes |
+| `leases` | `(kind, key)` | `owner` (deployment, workflow id, job key), `expires_at`, `taken_at`; kinds `raw` (a record's cache) and `snapshot` (an extraction) | both workers, through the lease routes | nothing: an expired or lost lease is simply free |
 | `buffer_datasets` | `(buffer, record)` | the per-dataset status the workflow holds today (`pending` · `fetching` · `waiting-drop` · `staging` · `servable` · `failed` · `skipped`), `reason`, `job`, `updated_at` | the buffers worker on every change | the workflow's `status` query |
 | `buffer_events` | `(buffer, seq)` | `created`, `planned`, `approved`, `ready`, `idle`, `retired`, `needs-human`, with time, issue, event id and a short detail | the buffers worker | the issue's comments |
 | `usage` | `(buffer, day)` | draws, distinct consumers, bytes of pyramid read is unknown (local mode), `204` responses | buffer-api itself, rolled up from `draws` once a day and on retire | `draws` |
@@ -172,6 +176,7 @@ and the workers use the rest. No authentication (§1.3, §7).
 | `POST /plan` body `{spec: <yaml text>}` | runs `load_spec` + `build_plan` over `records` at the spec's `catalog.ref` joined with `datasets` and `assets`; returns the plan rows with three extra columns per row: `prepared` (state), `raw` (asset state and bytes), `staged` (levels keys present). A row that passes every spec rule but is not `prepared` is **out** with the rule `not prepared` |
 | `PUT /datasets/<id>` · `GET /datasets[/<id>]` | preparation state; the PUT merges fields (a stage change sends only `data_stage` and `issue`) |
 | `PUT /assets/<kind>/<key>` · `GET` (as now) | plus the new fields; `GET /assets?kind=&state=` lists with totals per root |
+| `PUT /leases/<kind>/<key>` body `{owner, ttl_s}` · `DELETE /leases/<kind>/<key>?owner=` · `GET /leases` | take or extend (same owner) a lease: `200` with `expires_at`; `409` with the holder and its `expires_at` when another owner holds it and it has not expired. One SQL statement under the ledger's lock, so two workers cannot both win. Release by the owner only; `GET` lists holders for the page |
 | `PUT /buffers/<id>/datasets/<record>` · `GET /buffers/<id>/datasets` | per-dataset status board |
 | `POST /buffers/<id>/events` · `GET /buffers/<id>/events` | lifecycle events |
 | `DELETE /buffers/<id>/refs` | on retire: drop the buffer's refs, archive its draws (the service writes the archive file under its own `state_dir`; that is the one file it writes) |
@@ -282,18 +287,21 @@ Per dataset of the pool, ordered by weight descending, with two semaphores (`sou
    dir as today). Hosts not allowed to jobs, or `manual://` URLs → **waiting-drop**, the drop comment and the
    poller's `dropped` signal, unchanged, but the asset row says `waiting-drop` and the page shows the `incoming/`
    path.
-2. **Fetch.** If the raw asset is `ready` for every URL of the binding, skip. If another job is `fetching` it
-   (fresh `updated_at`), wait on the asset row instead of submitting (poll every `temporal.poll_minutes` through
-   an activity). Else check the raw quota (§5.4): the record's expected bytes (plan row, from the catalog's
+2. **Fetch.** If the raw asset is `ready` for every URL of the binding, skip. Else take the record's lease
+   (§5.5); while it is held elsewhere, the dataset shows `waiting-lease` with the holder and the workflow sleeps
+   `temporal.poll_minutes` between attempts. With the lease, re-read the asset (the holder may have fetched it)
+   and check the raw quota (§5.4): the record's expected bytes (plan row, from the catalog's
    `bytes`, else unknown and allowed) against `quota.raw_bytes − Σ raw assets`; over quota → the dataset is
    **blocked**, the buffer comment and the page say by how much, and the reconciler retries after the keeper's
    next pass. Under quota → submit the **fetch job**: `harness fetch binding.yaml --record record.yaml --out
    fetch.json`, cache read-write, the binding's hosts, byte cap `limits.fetch_bytes`, walltime
    `limits.fetch_walltime_min` (a long-queue job by csub's walltime tables; it mounts only roots the policy
    already allows). It calls `io.fetch` for every URL (whole files; zip members fetch the zip once)
-   under the cache lock and writes per-file outcomes. `partial` (cap or walltime hit) resubmits with the next
+   and writes per-file outcomes. `partial` (cap or walltime hit) resubmits with the next
    attempt number up to `limits.fetch_attempts`; each attempt resumes from cache hits. The asset row goes
-   `fetching` with the job id at submission and `ready` or `partial` from `fetch.json`.
+   `fetching` with the job id at submission and `ready` or `partial` from `fetch.json`. The lease is held
+   across the attempts of one dataset's fetch and its stage, and released when the dataset is servable, failed or
+   blocked.
 3. **Stage.** As today (`harness stage`, reuse when the registry holds this binding's pyramid for this levels
    key), except the stage job runs with the cache **read-only** again, as training-buffers §3 first intended:
    everything it needs is there, and a miss is a bug the job reports rather than a download. *Exception, my
@@ -342,26 +350,39 @@ running one activity, agent-free, under the buffers worker:
    raw comes from the newest job that read it (mia-data's smoke and crop jobs and the stage and fetch jobs all
    end with the worker's `put_asset`, which touches it); for staged from `draws` (the service updates it hourly
    per volume's staged dir).
-3. **Stale fetches.** An asset `fetching` whose job id csub reports finished or lost → `partial` or `missing`,
-   so a waiting reconciler proceeds.
+3. **Stale fetches.** An asset `fetching` whose job id csub reports finished or lost → `partial` or `missing`.
+   Its lease needs no help: it expires on its own once the owner stops extending it.
 
 The keeper is also what `mia-buffers assets sync` runs by hand.
 
-### 5.5 Locking, concretely
+### 5.5 Leases, concretely
 
-In the harness (`mia_harness/cache.py`), one change: `put()` and `manifest_put()` take `fcntl.flock(LOCK_EX)` on
-`<cache dir>/.lock-<key>` (per entry) and `<cache dir>/.lock-manifest` respectively, and `put()` re-checks
-`get()` after acquiring, so the second writer finds the first one's file and downloads nothing. Lock files are
-tiny and left in place. `/nrs` is NFS; `fcntl` locks are what `archive_snapshot` already relies on there between
-worker processes, and the live run must confirm they hold between compute nodes and the host (a one-line check:
-two `harness fetch` jobs on one URL, one download). The byte cap is per job and unchanged: the waiting job spends
-no bytes while it waits and finds a hit afterwards.
+The rule: **no job writes a record's shared cache unless its worker holds `leases/raw/<record>`.** The harness
+is unchanged; the discipline is in the two workers' job submission, in one shared helper
+(`mia_data/registry.py: Registry.lease(kind, key, owner, ttl_s)` / `release`), used by:
+
+- mia-data before the smoke job and before a trusted crop job (`writable=True` in `jobspec`): take the lease,
+  submit, extend it from `await_job`'s heartbeat (every 3 minutes, TTL 15 minutes), release after `read_*`. A PR
+  head's crop job and the match agent mount the cache read-only and need no lease.
+- mia-buffers before the fetch job, held through the stage job (§5.2).
+- both, for `leases/snapshot/<sha>` around `archive_snapshot`'s fetch-and-extract, replacing its `fcntl` lock.
+
+Waiting is a workflow timer loop (`take` → `409` → `workflow.sleep(poll_minutes)` → `take`), deterministic and
+visible: the holder's owner string names the deployment and workflow, so the page and the issue comment can say
+"waiting for mia-data round i12-e345 on this record". A lease whose owner died expires after its TTL; the next
+`take` wins. The service is therefore a dependency of every cache-writing job in both pipelines, like Temporal
+and the broker already are; the lease activity retries while the service is down rather than failing the round.
+Hand-run harness commands bypass this; the docs say to run them only on records no round is touching.
+
+*Why not a filesystem primitive:* `mkdir` and `O_EXCL` are atomic on NFS and are the usual lock there, but they
+need stale-lock heuristics (a dead node's directory) and give no visibility; the registry already exists, is the
+one process that sees both pipelines, and a row with an expiry is the whole mechanism.
 
 ### 5.6 `harness fetch` and `fetch.json`
 
-The harness changes (the locks and `fetch`) are part of milestone C, made on mia-snippets' `training-buffers`
-branch like the rest of this work; a buffer round pins the harness commit as today, so a round admitted before
-the change keeps staging as it does now. The contract the worker reads, so both sides can be built against it:
+The harness change (`fetch`) is part of milestone C, made on mia-snippets' `training-buffers` branch like the
+rest of this work; a buffer round pins the harness commit as today, so a round admitted before the change keeps
+staging as it does now. The contract the worker reads, so both sides can be built against it:
 
 ```json
 {"ok": true, "partial": false, "bytes_fetched": 123456789,
@@ -372,7 +393,7 @@ the change keeps staging as it does now. The contract the worker reads, so both 
  "errors": []}
 ```
 
-`outcome` is `cached` (a hit, zero bytes), `fetched` (downloaded under the lock), `stream` (cannot be fetched as
+`outcome` is `cached` (a hit, zero bytes), `fetched` (downloaded), `stream` (cannot be fetched as
 a whole file; the stage job reads it as today, with the cache read-write and the host allowed) or `failed`.
 `partial` is true when the byte cap or the walltime stopped the job before every URL was `cached`, `fetched` or
 `stream`; `ok` is false only when a URL `failed`. A zip's members share the zip's one entry.
@@ -413,8 +434,10 @@ the network, which is the intended trust level for now.
 
 Unchanged from the two specs, plus: the registry is written by workers only and read by anyone; the service
 still holds no GitHub credentials and deletes nothing (the draws archive is the one file it writes, under its own
-state dir). The page's write actions are prefilled GitHub links and three idempotent sync triggers. Jobs do not
-talk to the service; the lock that protects the cache is a file lock. When an identity layer is added in front
+state dir). The page's write actions are prefilled GitHub links and the sync triggers. Jobs do not talk to the
+service; the lease that protects the cache is taken by the workers, which already hold the service's URL and
+nothing else about it (no token: the lease routes are open like the rest, and a forged lease can at worst delay a
+round, which the page would show with the forged owner string). When an identity layer is added in front
 of buffer-api (a reverse proxy that sets a trusted header, or tokens issued by the operator), the page's compose
 actions can call `POST /buffers` and `POST /prep` directly and the worker can take those as it takes labels
 today, through a signal from the poller that lists the service's pending requests; the GitHub issue is then
@@ -488,9 +511,10 @@ address) hold by construction. The per-service `github` block may override `auth
 
 | where | change |
 |---|---|
-| mia-snippets harness | `cache.put`/`manifest_put` under `fcntl` locks with re-check; `harness fetch` (URLs of a binding → cache, `fetch.json` with per-file `cached` / `fetched` / `stream` / `failed`, `partial` flag) |
-| `mia_data/registry.py` (new) | `Registry(url)`: `put_dataset`, `put_asset`, `put_buffer_dataset`, `event`; httpx, 30 s, raises for the caller to decide |
-| `mia_data/activities.py` | `set_stage` and `publish_crops` write the dataset row; `publish_crops` copies `evaluation.yaml`; after a cache-writing job, `put_asset("raw")` from `files.json`; optional `evaluate` job (switch only) |
+| mia-snippets harness | `harness fetch` (URLs of a binding → cache, `fetch.json` with per-file `cached` / `fetched` / `stream` / `failed`, `partial` flag); no locking change |
+| `mia_data/registry.py` (new) | `Registry(url)`: `put_dataset`, `put_asset`, `put_buffer_dataset`, `event`, `lease`, `release`; httpx, 30 s, raises for the caller to decide |
+| `mia_data/activities.py`, `workflows.py` | `set_stage` and `publish_crops` write the dataset row; `publish_crops` copies `evaluation.yaml`; the lease taken before smoke and trusted crop jobs, extended from `await_job`, released after; after a cache-writing job, `put_asset("raw")` from `files.json`; optional `evaluate` job (switch only) |
+| `mia_data/jobspec.py` | `archive_snapshot` serialised by a `snapshot/<sha>` lease instead of `fcntl` |
 | `mia_data/config.py` | `service`, `evaluate.enabled`, `quota`, `keeper` sections; `load_config` via `load_service_config` |
 | `autodev/config.py` | `load_service_config`, the merge |
 | `mia_ops` | `mia.yaml` is the manifest and the configuration; `MIA_SERVICE` env; `extra_mounts` unchanged |
@@ -513,7 +537,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 |---|---|---|
 | A | one `mia.yaml`: `load_service_config`, `mia_ops` on `MIA_SERVICE`, the example file | both deployments start from one file; `mia exec mia-data check` and `mia exec mia-buffers check` pass; the old files still load with a deprecation line |
 | B | registry: `records`, `datasets`, `catalog sync`, `datasets sync`, mia-data's stage and publish writes, `POST /plan` | after `datasets sync` the U937 row is `prepared`; `POST /plan` with the example spec returns the same pool as `mia-buffers plan` minus unprepared rows, each with its rule |
-| C | cache: harness lock + `fetch`, asset states and sizes, the keeper with quotas and eviction, `assets sync` | two concurrent `harness fetch` jobs on one URL download it once; a 0-ref staged asset is evicted when the staged quota is set below its size and nothing referenced is touched |
+| C | cache: leases, `harness fetch`, asset states and sizes, the keeper with quotas and eviction, `assets sync` | two buffers sourcing the same record at once submit one fetch job and the second shows `waiting-lease` with the first's owner, then stages from the cache; a mia-data round on that record waits the same way; a lease whose worker was killed frees itself after its TTL; a 0-ref staged asset is evicted when the staged quota is set below its size and nothing referenced is touched |
 | D | buffering rework: plan from the registry, fetch then stage per dataset, status board, events, `idle`/`keep`/`retire`, `degraded` | the live-test spec reaches `ready` from an empty cache with the fetch jobs visible on the page; deleting a pyramid under it shows `missing` and a re-stage; `buffer:retire` releases refs and the keeper evicts |
 | E | `MiaPrep` and the `prep:go` issue; the poller's binding watch removed | a preparation request for an unprepared record opens its dataset issue, adds `data:go`, and the registry shows `in-progress` then `prepared` |
 | F | the page: datasets with YAML and issue links, buffers, cache, preparation views | the lead composes a 2D gray buffer on the page, opens the issue from it, and follows it to `ready` without opening the issue again |
