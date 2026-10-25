@@ -40,7 +40,10 @@ PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
 PLAN = PlanResult(
     True,
     [],
-    [DatasetPlan("u937", "confocal", 0.6, False), DatasetPlan("bcss", "histology-WSI", 0.4, True)],
+    [
+        DatasetPlan("u937", "confocal", 0.6, False, {"z": 1.0, "y": 45.0718, "x": 45.0718}),
+        DatasetPlan("bcss", "histology-WSI", 0.4, True),
+    ],
     10,
     levels=[1, 2, 4],
     patch=256,
@@ -297,6 +300,10 @@ async def test_go_plan_approve_sourcing_ready(env):
     assert len(keys) == 2 and all(k.startswith("buf-7-i7-e11-stage-") for k in keys)
     args = m.of("submit")[0][1]
     assert (args.levels, args.patch, args.pins) == ([1, 2, 4], 256, PINS) and args.out == ""
+    assert {a[1].record: a[1].voxel_size_nm for a in m.of("submit")} == {
+        "u937": {"z": 1.0, "y": 45.0718, "x": 45.0718},
+        "bcss": None,
+    }
     assert {d.record: d.status for d in state.datasets} == {"u937": "servable", "bcss": "servable"}
     ready = m.of("set_stage")[-1]
     assert "BufferDataset(" in ready[2] and "i7-e11" in ready[2] and "http://svc:8765" in ready[2]

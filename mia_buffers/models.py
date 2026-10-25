@@ -29,6 +29,7 @@ class DatasetPlan:
     group: str
     weight: float
     manual: bool
+    voxel_size_nm: dict[str, float] | None = None  # nm per spatial axis for the stage job; z = 1.0 for a 2D stack
 
 
 @dataclass
@@ -136,6 +137,7 @@ class DatasetStatus:
     reason: str = ""
     issue: int | None = None  # the dataset's issue number in the datasets repo, once looked up
     folder: str = ""  # <storage_root>/<folder>/binding.yaml is what the poller watches while waiting-dataset
+    voxel_size_nm: dict[str, float] | None = None  # from the plan, handed to the stage job
 
 
 @dataclass

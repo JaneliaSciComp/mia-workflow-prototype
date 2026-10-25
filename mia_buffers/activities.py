@@ -53,7 +53,7 @@ from .models import (
     StageJobArgs,
     StageResult,
 )
-from .plan import MANUAL_DROP_NOTE, _group_key, build_plan, load_records
+from .plan import MANUAL_DROP_NOTE, Row, _group_key, build_plan, load_records
 from .poll import run_poll
 from .register import buffer_config, volume_bodies
 from .spec import SpecError, load_spec
@@ -74,6 +74,13 @@ STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per chann
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
+
+
+def _voxel(row: Row) -> dict[str, float]:
+    """The stage job's voxel size: the plan's per-axis nm, plus 1 nm for the plane axis a 2D stack keeps (its fields
+    of view, not a physical z; the harness has no other source for it and refuses to write a pyramid without)."""
+    known = {axis: float(value) for axis, value in row.voxel_size_nm.items() if value is not None}
+    return {"z": 1.0, **known} if row.dims == "2D" else known
 
 
 class Activities:
@@ -261,7 +268,7 @@ class Activities:
             write_atomic(directory / "plan.md", plan_md)
         over = spec.sampling.weighting.over
         pool = [
-            DatasetPlan(row.id, _group_key(row, over[0]), row.weight, MANUAL_DROP_NOTE in row.notes)
+            DatasetPlan(row.id, _group_key(row, over[0]), row.weight, MANUAL_DROP_NOTE in row.notes, _voxel(row))
             for row in plan.rows
             if row.in_pool
         ]

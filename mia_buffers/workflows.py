@@ -203,7 +203,10 @@ class MiaBuffer:
         await self._act("comment_plan", state.issue, state.round_id, seconds=300)
         if not plan.valid:
             return await self._finish("needs-human", "the plan is invalid: " + "; ".join(plan.errors))
-        state.datasets = [DatasetStatus(dataset.record, dataset.group, dataset.manual) for dataset in plan.pool]
+        state.datasets = [
+            DatasetStatus(dataset.record, dataset.group, dataset.manual, voxel_size_nm=dataset.voxel_size_nm)
+            for dataset in plan.pool
+        ]
         state.min_fraction, state.timeout_days = plan.min_fraction, plan.timeout_days
         state.levels, state.patch = list(plan.levels), plan.patch
         state.planned_at = workflow.now().isoformat()
@@ -361,7 +364,7 @@ class MiaBuffer:
         async with semaphore:
             dataset.status = "staging"
             workspace = await self._act("prepare_stage", state.issue, round_id, record, seconds=300, result_type=str)
-            job = await self._job(record, workspace, binding.hosts)
+            job = await self._job(record, workspace, binding.hosts, dataset.voxel_size_nm)
             if job.state not in ("DONE", "EXIT"):
                 return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
             if job.state == "EXIT" and job.exit_code not in (0, None):
@@ -477,11 +480,22 @@ class MiaBuffer:
                 "issue #%d: could not post %s's failure: %s", state.issue, dataset.record, error_message(error)
             )
 
-    async def _job(self, record: str, workspace: str, hosts: list[str]) -> JobDone:
+    async def _job(
+        self, record: str, workspace: str, hosts: list[str], voxel_size_nm: dict[str, float] | None
+    ) -> JobDone:
         """Submit the stage job (at most once per key) and wait for it on the await queue."""
         state = self.state
         assert state.round_id and state.pins
-        args = StageJobArgs(workspace, state.round_id, state.pins, record, list(hosts), list(state.levels), state.patch)
+        args = StageJobArgs(
+            workspace,
+            state.round_id,
+            state.pins,
+            record,
+            list(hosts),
+            list(state.levels),
+            state.patch,
+            voxel_size_nm=dict(voxel_size_nm) if voxel_size_nm else None,
+        )
         job_id = await self._act(
             "submit", job_key(state.issue, state.round_id, record), args, seconds=600, result_type=str
         )

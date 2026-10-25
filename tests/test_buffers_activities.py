@@ -135,6 +135,9 @@ async def test_plan_writes_files_and_summarises(acts):
     by_record = {d.record: d for d in result.pool}
     assert by_record[U937].group == "confocal" and by_record[BCSS].group == "histology-WSI"
     assert by_record[BCSS].manual and not by_record[U937].manual
+    # the record's voxel size reaches the stage job; a 2D stack's plane axis (fields of view) gets 1 nm, which
+    # the harness would otherwise report as "voxel size unknown" after downloading the whole dataset
+    assert by_record[U937].voxel_size_nm == {"z": 1.0, "y": 45.0718, "x": 45.0718}
     assert (result.min_fraction, result.timeout_days, result.levels, result.patch) == (1.0, 14, [1, 2, 4], 256)
     round_dir, workspace = acts.cfg.paths.state_dir / "rounds" / ROUND, acts.cfg.paths.work_root / "issue-7" / ROUND
     assert json.loads((round_dir / "plan.json").read_text())["spec_hash"] == pins.spec_hash
