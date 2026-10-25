@@ -351,7 +351,7 @@ def test_mia_buffers_app_mounts(tmp_path):
     ]
 
 
-def make_buffers_stack(tmp_path):
+def make_buffers_stack(tmp_path, url="http://buffer-host.example.org:8765"):
     write_configs(tmp_path)
     (tmp_path / "mia_buffers.yaml").write_text(
         f"github: {{buffers_repo: o/b, datasets_repo: o/d, snippets_repo: o/s, catalog_repo: o/c, "
@@ -359,7 +359,7 @@ def make_buffers_stack(tmp_path):
         "temporal: {address: localhost:7233, namespace: mia-buffers}\n"
         f"paths: {{state_dir: {tmp_path}/mb-state, work_root: {tmp_path}/mb-work, storage_root: {tmp_path}/store, "
         f"raw_root: {tmp_path}/raw, staged_root: {tmp_path}/staged}}\n"
-        "service: {url: http://buffer-host.example.org:8765}\n"
+        f"service: {{url: {url}}}\n"
         f"harness: {{dir: {tmp_path}/harness}}\n"
     )
     return Stack(
@@ -387,3 +387,13 @@ def test_up_mia_buffers_starts_buffer_api_on_the_host_and_lets_the_worker_reach_
 def test_only_mia_buffers_has_an_api_window(tmp_path, fake):
     s = make_stack(tmp_path)
     assert "api" not in s.services["autodev"].logs() and "api" not in s.services["mia-data"].logs()
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8765", "http://127.0.0.1:8765"])
+def test_up_mia_buffers_refuses_a_loopback_service_url(tmp_path, fake, url):
+    """Inside the sandbox localhost is the sandbox's own loopback (the proxy is bypassed for it), so a worker could
+    never reach buffer-api there; refuse before anything starts."""
+    s = make_buffers_stack(tmp_path, url)
+    with pytest.raises(SystemExit, match="service.url"):
+        services.service_up(s.services["mia-buffers"], s, Temporal(s))
+    assert not tmux_calls(fake, "new-session")

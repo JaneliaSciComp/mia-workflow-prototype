@@ -294,6 +294,10 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     for path, hint in prerequisites:
         if not os.access(path, os.X_OK):
             sys.exit(f"{svc.name}: {path} not found ({hint})")
+    endpoint = svc.app.api_endpoint(cfg)
+    if endpoint and endpoint[0] in ("localhost", "127.0.0.1", "::1"):  # the sandbox bypasses its proxy for these
+        sys.exit(f"{svc.name}: service.url must name this host, not {endpoint[0]}: inside the sandbox that is the "
+                 "sandbox's own loopback, where nothing listens")  # fmt: skip
     extra = svc.app.extra_mounts(cfg)
     rw_extra = (p for flag, p in extra if flag == "--rw")
     for d in (svc.state / "logs", svc.host / "logs", cfg.paths.work_root, svc.run, *rw_extra):
@@ -313,7 +317,7 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     broker_log = svc.host / "logs/broker.log"
     new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
     allow = ["github.com", "api.github.com", temporal.host]
-    if endpoint := svc.app.api_endpoint(cfg):  # buffer-api: on the host, unsandboxed like the broker
+    if endpoint:  # buffer-api: on the host, unsandboxed like the broker
         host, port = endpoint
         allow.append(host)
         api = shell(PY, "-m", svc.app.module, "serve", "--state-dir", svc.state, "--host", host, "--port", port)

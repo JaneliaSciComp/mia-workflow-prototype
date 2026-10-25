@@ -126,7 +126,8 @@ The deployment reads `mia_buffers.yaml` (copy the example; `buffers_repo` is the
 mia-data's, `raw_root` may be mia-data's `<work_root>/_cache` so downloads are shared). `mia.yaml` lists it as
 `app: mia-buffers`: `mia up mia-buffers` starts the broker, buffer-api (`mia-buffers serve` on the host, bound to
 the host and port of `service.url`, log `mia logs mia-buffers api`) and the sandboxed worker, which may reach that
-host through the sandbox proxy. By hand: `mia-buffers init-labels`, `mia-buffers serve`, `mia-buffers worker`,
+host through the sandbox proxy. `service.url` must name the host (not `localhost`: the sandbox bypasses its proxy
+for loopback names, and inside it they point at the sandbox's own empty loopback). By hand: `mia-buffers init-labels`, `mia-buffers serve`, `mia-buffers worker`,
 `mia-buffers schedule apply`.
 
 1. **The issue.** Its body holds the spec in exactly one ```` ```yaml ```` fence; the title is free. A human adds
