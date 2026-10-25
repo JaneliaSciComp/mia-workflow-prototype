@@ -42,13 +42,14 @@ async def run_poll(activities: Activities) -> list[str]:
                     done.append(f"{kind} #{issue['number']}")
             except Exception:
                 log.exception("poll: issue #%s %s failed", issue["number"], label)
+    ineligible: dict[str, set[int]] = {}  # the datasets repo's ineligible issues, listed once per pass when needed
     for stage in ("sourcing", "ready"):
         for issue in await gh.list_issues(labels=cfg.label(stage), state="open"):
             try:
                 done += await notice_drops(activities, issue["number"])
-                done += await notice_datasets(activities, issue["number"])
+                done += await notice_datasets(activities, issue["number"], ineligible)
             except Exception:
-                log.exception("poll: issue #%s drops failed", issue["number"])
+                log.exception("poll: issue #%s drop or dataset signals failed", issue["number"])
     if done:
         log.info("poll: %s", ", ".join(done))
     return done
@@ -81,9 +82,22 @@ async def _buffer_state(activities: Activities, number: int) -> tuple[Any, Buffe
         return handle, None
 
 
-async def notice_datasets(activities: Activities, number: int) -> list[str]:
+async def _ineligible_issues(activities: Activities, cache: dict[str, set[int]]) -> set[int]:
+    """Numbers of the datasets repo's issues labelled ineligible, from two list calls per poll pass (never one
+    request per waiting dataset: a pool of hundreds would exhaust the App's rate limit)."""
+    if "numbers" not in cache:
+        numbers: set[int] = set()
+        for label in ("data:ineligible", "licence-excluded"):
+            issues = await activities.gh_datasets.list_issues(labels=label, state="all")
+            numbers |= {int(issue["number"]) for issue in issues}
+        cache["numbers"] = numbers
+    return cache["numbers"]
+
+
+async def notice_datasets(activities: Activities, number: int, ineligible: dict[str, set[int]]) -> list[str]:
     """Signal `dataset_update(record, outcome)` for every dataset of issue `number` waiting on mia-data whose
-    binding is now published, or whose dataset issue became ineligible; each outcome once per process."""
+    binding is now published, or whose dataset issue became ineligible; each outcome once per process.
+    `ineligible` is the pass's cache for the datasets repo's ineligible issue numbers."""
     handle, state = await _buffer_state(activities, number)
     if state is None:
         return []
@@ -94,12 +108,8 @@ async def notice_datasets(activities: Activities, number: int) -> list[str]:
         outcome = None
         if dataset.folder and (cfg.paths.storage_root / dataset.folder / "binding.yaml").is_file():
             outcome = "binding"
-        elif dataset.issue is not None:
-            labels = {
-                label["name"] for label in (await activities.gh_datasets.get_issue(dataset.issue)).get("labels", [])
-            }
-            if {"data:ineligible", "licence-excluded"} & labels:
-                outcome = "ineligible"
+        elif dataset.issue is not None and dataset.issue in await _ineligible_issues(activities, ineligible):
+            outcome = "ineligible"
         key = (number, dataset.record, outcome or "")
         if outcome is None or key in activities._signalled:
             continue

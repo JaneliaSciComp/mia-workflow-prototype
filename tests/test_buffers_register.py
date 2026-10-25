@@ -202,3 +202,21 @@ def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
         ]
         == "patch"
     )
+
+
+def test_dataset_scope_refuses_volumes_with_other_channel_counts(tmp_path, spec_2d):  # noqa: F811
+    """Review (milestone 4): pooling across volumes needs one channel count; a volume with another count is refused
+    with a reason, not an IndexError that fails the activity."""
+    staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": SAMPLE_V1})
+    report = json.loads((staged / "stage.json").read_text())
+    rgb = report["volumes"][1]
+    rgb["shape"], rgb["intensity_sample"] = [3, *rgb["shape"][1:]], SAMPLE_V1 * 3
+    for level in rgb["levels"]:
+        level["shape"] = [3, *level["shape"][1:]]
+    (staged / "stage.json").write_text(json.dumps(report))
+    refused = {}
+    bodies = dict(volume_bodies(ROW, staged, scoped(spec_2d, "dataset"), refused=refused))
+    assert list(bodies) == ["u937/v0.zarr"] and bodies["u937/v0.zarr"]["normalize"] == normalize_bounds(
+        SAMPLE_V0, (1, 99)
+    )
+    assert "channel" in refused["u937/v1.zarr"]

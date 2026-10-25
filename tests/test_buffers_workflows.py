@@ -728,3 +728,56 @@ async def test_poll_signals_dataset_updates(tmp_path):
         (cfg.workflow_id(2), "dataset_update", ("u937", "binding")),
     ]
     assert await run_poll(acts) == []  # each update is signalled once
+
+
+async def test_poll_checks_ineligible_issues_with_list_calls_not_one_get_per_dataset(tmp_path):
+    """Review (milestone 4): a 400-dataset pool polled every 2 minutes must not spend one GitHub request per
+    dataset per pass; the ineligible issues come from labelled list calls, at most two per pass."""
+
+    class CountingGH(PollGH):
+        def __init__(self, issues):
+            super().__init__(issues)
+            self.lists, self.gets = [], []
+
+        async def list_issues(self, labels=None, state=None, **_):
+            self.lists.append(labels)
+            return await super().list_issues(labels=labels, state=state)
+
+        async def get_issue(self, n):
+            self.gets.append(n)
+            return await super().get_issue(n)
+
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
+    datasets = CountingGH({n: issue(n, "data:testing") for n in range(10, 40)} | {40: issue(40, "data:ineligible")})
+    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
+    waiting.datasets = [
+        workflows.DatasetStatus(f"r{n}", "g", False, "waiting-dataset", issue=n, folder=f"lm-r{n}")
+        for n in range(10, 41)
+    ]
+    client = FakeClient({cfg.workflow_id(2): waiting})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
+    assert await run_poll(acts) == ["dataset #2 r40 ineligible"]
+    assert datasets.gets == [] and len(datasets.lists) <= 2
+
+
+async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
+    """Review Focus 5: at the timeout the waiters are dropped, a stage job still running finishes, and ready
+    follows from the groups that remain."""
+    # a real-time timeout of ~5 s: the test server cannot skip time while await_job is blocked on the gate
+    short = PlanResult(True, [], PLAN.pool, 10, levels=[1, 2, 4], patch=256, timeout_days=6e-5)
+    m = Mocks(plan=short, unbound={"bcss"}, gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("nudge_dataset") and m.of("await"), m=m)  # bcss waits on mia-data, u937's job runs
+        for _ in range(400):
+            state = await h.query(MiaBuffer.status)
+            if dataset(state, "bcss").status == "dropped":
+                break
+            await asyncio.sleep(0.05)
+        assert dataset(state, "bcss").status == "dropped" and dataset(state, "u937").status == "staging"
+        assert "needs-human" not in m.stages
+        m.gate.set()
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"

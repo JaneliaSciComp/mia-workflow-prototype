@@ -279,9 +279,9 @@ class MiaBuffer:
             if not self._ready_now():
                 below = self._below()  # before the drops: the message names what the human waited for
                 await self._drop_waiting(tasks, f"still {{status}} after {state.timeout_days:g} days")
+                # the waiters are gone; what is left is a stage job or a registration, bounded by the walltime
+                await workflow.wait_condition(lambda: self._ready_now() or all(task.done() for task in tasks))
                 if not self._ready_now():
-                    for task in tasks:
-                        task.cancel()
                     return await self._finish(
                         "needs-human",
                         f"after {state.timeout_days:g} days these weighting groups are below ready.min_fraction "

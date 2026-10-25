@@ -132,6 +132,13 @@ def volume_bodies(
             refuse(index, volume, why)
         elif scope != "patch" and (why := check_sample(volume.get("intensity_sample"), _channels(volume))):
             refuse(index, volume, f"{why}; re-stage with the current harness for normalize.scope {scope}")
+        elif scope == "dataset" and volumes and _channels(volume) != _channels(volumes[0]):
+            refuse(
+                index,
+                volume,
+                f"{_channels(volume)} channel(s) where the record's first volume has {_channels(volumes[0])}: "
+                "dataset-scope bounds need one channel count",
+            )
         else:
             volumes.append(volume)
     total_planes = sum(_planes(volume) for volume in volumes) or 1

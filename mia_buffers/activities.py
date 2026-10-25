@@ -27,8 +27,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, neutralize
-from autodev.jobs import JobSpec
-from mia_data.activities import _job_json, _text, _texts, mia_permanent_errors, write_atomic
+from autodev.jobs import JobSpec, read_untrusted
+from mia_data.activities import _loads, _text, _texts, mia_permanent_errors, write_atomic
 from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 ROUND_RE = re.compile(r"i\d+-e\d+")
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
+STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
@@ -495,7 +496,7 @@ class Activities:
     @mia_permanent_errors
     async def read_stage(self, round_id: str, record: str) -> StageResult:
         """The stage job's stage.json, reduced; tolerant of any shape."""
-        report = _job_json(self._staged_dir(round_id, record), "stage.json")
+        report = _stage_json(self._staged_dir(round_id, record))
         if not isinstance(report, dict):
             return StageResult(False, errors=["stage.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
@@ -569,7 +570,7 @@ class Activities:
     async def register_dataset(self, round_id: str, record: str, buffer_id: str) -> RegisterResult:
         """`PUT volumes/<vol>` for every volume the stage job wrote for this record."""
         staged = self._staged_dir(round_id, record)
-        report = _job_json(staged, "stage.json")
+        report = _stage_json(staged)
         if not isinstance(report, dict):
             return RegisterResult(refused={record: "stage.json is missing, unreadable or not a JSON object"})
         result = RegisterResult()
@@ -586,6 +587,11 @@ class Activities:
                 else:
                     result.refused[volume_id] = _response_error(response)
         return result
+
+
+def _stage_json(staged: Path) -> Any:
+    """The stage job's stage.json (untrusted job output, read within STAGE_JSON_LIMIT), or None."""
+    return _loads(read_untrusted(staged, "stage.json", STAGE_JSON_LIMIT))
 
 
 def _response_error(response: Any) -> str:

@@ -388,6 +388,25 @@ async def test_register_dataset_against_live_service(acts, server):  # noqa: F81
     assert status["config"]["spec_name"] == "microscopy-foundation-pretrain" and status["volumes"] == 1
 
 
+async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):  # noqa: F811
+    """Review (milestone 4): 30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
+    1 MiB cap the generic job-JSON reader uses; read_stage and register_dataset must still read it."""
+    acts.cfg.service.url = server
+    await acts.plan(7, ROUND, await admitted(acts))
+    staged = write_stage_json(staged_dir(acts, U937))
+    report = json.loads((staged / "stage.json").read_text())
+    base = report["volumes"][0]
+    sample = [[float(v) for v in range(4096)] for _ in range(3)]
+    report["volumes"] = [{**base, "path": f"v{i}.zarr", "intensity_sample": sample} for i in range(30)]
+    (staged / "stage.json").write_text(json.dumps(report, indent=2))
+    assert (staged / "stage.json").stat().st_size > 1 << 20
+    result = await acts.read_stage(ROUND, U937)
+    assert result.ok and result.volumes == 30 and result.errors == []
+    await acts.create_buffer(ROUND, ROUND)
+    registered = await acts.register_dataset(ROUND, U937, ROUND)
+    assert len(registered.registered) == 30 and registered.refused == {}
+
+
 # -- labels and comments
 
 
