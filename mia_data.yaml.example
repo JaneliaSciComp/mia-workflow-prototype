@@ -1,7 +1,7 @@
 deployment: mia-data
 github:
   data_repo: JaneliaSciComp/mia-workflow-data
-  trusted_bots: []       # app logins ("name[bot]") whose data:go counts without write access: the buffer worker's
+  trusted_bots: []       # app logins whose data:go counts without write access, quoted: ["mia-autodev[bot]"] (the buffer worker)
   snippets_repo: JaneliaSciComp/mia-snippets
   catalog_repo: AI-HHMI/mia-agentic-search
   auth: token            # token | app (app needs app_id, installation_id, private_key_path)
