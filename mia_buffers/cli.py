@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from autodev.auth import bot_login
-from autodev.cli import _client, _setup_logging
+from autodev.cli import _client, _setup_logging, apply_schedule
 from mia_data.cli import _gh, _github_clients
 
 from .config import HUMAN_LABELS, STAGES, load_config
@@ -134,12 +134,10 @@ async def cmd_schedule(cfg: Config) -> int:
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
-        ScheduleAlreadyRunningError,
         ScheduleIntervalSpec,
         ScheduleOverlapPolicy,
         SchedulePolicy,
         ScheduleSpec,
-        ScheduleUpdate,
     )
 
     from .workflows import MiaBufferPoll
@@ -153,12 +151,7 @@ async def cmd_schedule(cfg: Config) -> int:
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
     )
-    try:
-        await client.create_schedule(schedule_id, schedule)
-        print(f"created schedule {schedule_id}")
-    except ScheduleAlreadyRunningError:
-        await client.get_schedule_handle(schedule_id).update(lambda _: ScheduleUpdate(schedule=schedule))
-        print(f"updated schedule {schedule_id}")
+    print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
     return 0
 
 

@@ -31,3 +31,42 @@ def test_csub_problems_roots_are_path_prefixes():
     assert any("allowed_roots" in m for m in _csub_problems(cfg, probe))
     probe.allowed_roots = ["/x"]
     assert _csub_problems(cfg, probe) == []
+
+
+async def test_apply_schedule_updates_when_the_server_says_already_registered():
+    """A plain ALREADY_EXISTS (no WorkflowExecutionAlreadyStartedFailure detail, as newer servers and the proxy
+    answer) must lead to an update, like the SDK's ScheduleAlreadyRunningError does."""
+    from temporalio.client import ScheduleAlreadyRunningError
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from autodev.cli import apply_schedule
+
+    class Handle:
+        updates: list = []
+
+        async def update(self, fn):
+            self.updates.append(fn)
+
+    class Client:
+        def __init__(self, error):
+            self.error, self.created = error, []
+
+        async def create_schedule(self, schedule_id, schedule):
+            if self.error:
+                raise self.error
+            self.created.append(schedule_id)
+
+        def get_workflow_handle(self, *_):
+            raise AssertionError
+
+        def get_schedule_handle(self, schedule_id):
+            return Handle()
+
+    plain = RPCError('schedule "autodev-x-poll" is already registered', RPCStatusCode.ALREADY_EXISTS, b"")
+    assert await apply_schedule(Client(plain), "autodev-x-poll", object()) == "updated"
+    assert await apply_schedule(Client(ScheduleAlreadyRunningError()), "autodev-x-poll", object()) == "updated"
+    assert len(Handle.updates) == 2
+    fresh = Client(None)
+    assert await apply_schedule(fresh, "autodev-x-poll", object()) == "created" and fresh.created == ["autodev-x-poll"]
+    with pytest.raises(RPCError):  # any other failure still surfaces
+        await apply_schedule(Client(RPCError("down", RPCStatusCode.UNAVAILABLE, b"")), "autodev-x-poll", object())
