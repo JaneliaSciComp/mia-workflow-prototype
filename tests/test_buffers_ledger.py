@@ -53,3 +53,20 @@ def test_frozen_lists(tmp_path):
     assert led.frozen("b", "val") == []
     led.extend_frozen("b", "val", [{"volume": "a", "seq": 0}, {"volume": "a", "seq": 1}])
     assert [d["seq"] for d in led.frozen("b", "val")] == [0, 1]
+
+
+def test_assets_and_refs(tmp_path):
+    """The registry: what exists on disk (by kind and key) and which buffers reference it."""
+    led = Ledger(tmp_path / "l.sqlite")
+    assert led.asset("staged", "/s/p256/u937") is None and led.assets("staged") == []
+    led.put_asset("staged", "/s/p256/u937", {"record": "u937", "binding_hash": "b1"})
+    led.put_asset("staged", "/s/p256/u937", {"record": "u937", "binding_hash": "b2"})  # upsert
+    assert led.asset("staged", "/s/p256/u937") == {"record": "u937", "binding_hash": "b2"}
+    for buffer in ("buf-1", "buf-1", "buf-2"):
+        led.add_ref(buffer, "staged", "/s/p256/u937")
+    led.add_ref("buf-2", "raw", "u937")  # a reference may precede the asset's own row
+    assert led.refs("staged", "/s/p256/u937") == ["buf-1", "buf-2"] and led.refs("raw", "u937") == ["buf-2"]
+    assert led.assets("staged") == [
+        {"key": "/s/p256/u937", "data": {"record": "u937", "binding_hash": "b2"}, "refs": ["buf-1", "buf-2"]}
+    ]
+    assert led.assets("raw") == [{"key": "u937", "data": None, "refs": ["buf-2"]}]

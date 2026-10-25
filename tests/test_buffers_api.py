@@ -209,3 +209,31 @@ def test_descriptor_carries_normalize(tmp_path):
     assert all(d["normalize"] == bounds for d in descriptors)  # only a has train planes
     test = call(s, "GET", "/buffers/b/split/test", {"from": "0", "n": "1", "consumer": cid})[1]["descriptors"]
     assert test and test[0]["volume"] == "c" and test[0]["normalize"] is None  # c registered without bounds
+
+
+def test_assets_registry_and_refs_from_registered_volumes(tmp_path):
+    """`PUT/GET assets/<kind>/<key>` keep what exists on disk; registering a volume references its staged
+    directory and its record's raw cache for the buffer, so a retire can count what is still in use."""
+    from urllib.parse import quote
+
+    s = svc(tmp_path)
+    key = quote("/staged/a", safe="")
+    assert call(s, "GET", f"/assets/staged/{key}")[0] == 404
+    assert call(s, "PUT", f"/assets/staged/{key}", payload=[1])[0] == 422  # a JSON object, nothing else
+    assert call(s, "PUT", f"/assets/staged/{key}", payload={"record": "rec", "ok": True})[0] == 200
+    status, out, _ = call(s, "GET", f"/assets/staged/{key}")
+    assert status == 200 and out == {
+        "kind": "staged",
+        "key": "/staged/a",
+        "data": {"record": "rec", "ok": True},
+        "refs": [],
+    }
+    assert call(s, "PUT", "/buffers/b", payload=CFG)[0] == 200
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload=body())[0] == 200  # path /staged/a/v0.zarr, record rec
+    assert call(s, "GET", f"/assets/staged/{key}")[1]["refs"] == ["b"]
+    assert call(s, "GET", "/assets/raw/rec")[1] == {"kind": "raw", "key": "rec", "data": None, "refs": ["b"]}
+    assert call(s, "GET", "/assets/staged")[1] == {
+        "kind": "staged",
+        "assets": [{"key": "/staged/a", "data": {"record": "rec", "ok": True}, "refs": ["b"]}],
+    }
+    assert call(s, "GET", "/assets/nope/x")[0] == 404

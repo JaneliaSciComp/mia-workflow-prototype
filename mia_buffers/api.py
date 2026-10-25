@@ -12,7 +12,7 @@ import random
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -116,6 +116,9 @@ ROUTES = [
     ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next"),
     ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split"),
     ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status"),
+    ("PUT", re.compile(r"^/assets/([a-z]+)/(.+)$"), "put_asset"),
+    ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset"),
+    ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets"),
 ]
 
 
@@ -190,7 +193,30 @@ class BufferService:
         if reason:
             raise HttpError(422, reason)
         self.ledger.put_volume(buffer, volume)
+        self.ledger.add_ref(buffer, "staged", str(PurePosixPath(volume.path).parent))  # the staged directory
+        self.ledger.add_ref(buffer, "raw", volume.record)  # the record's raw cache
         return 200, {"buffer": buffer, "volume": volume_id}, {}
+
+    # --- the registry: what exists on disk, and which buffers use it -----------------------------
+
+    def _put_asset(self, kind: str, key: str, *, query: dict[str, str], body: bytes) -> Response:
+        try:
+            data = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not isinstance(data, dict):
+            raise HttpError(422, "an asset is a JSON object")
+        self.ledger.put_asset(kind, key, data)
+        return 200, {"kind": kind, "key": key}, {}
+
+    def _get_asset(self, kind: str, key: str, *, query: dict[str, str], body: bytes) -> Response:
+        data, refs = self.ledger.asset(kind, key), self.ledger.refs(kind, key)
+        if data is None and not refs:
+            raise HttpError(404, f"no {kind} asset {key}")
+        return 200, {"kind": kind, "key": key, "data": data, "refs": refs}, {}
+
+    def _list_assets(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"kind": kind, "assets": self.ledger.assets(kind)}, {}
 
     def _add_consumer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)

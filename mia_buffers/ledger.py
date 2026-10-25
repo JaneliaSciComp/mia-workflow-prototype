@@ -1,4 +1,8 @@
-"""The buffer ledger: one SQLite file holding buffers, their volumes, consumers, every draw and the frozen lists.
+"""The buffer ledger: one SQLite file holding buffers, their volumes, consumers, every draw and the frozen lists,
+plus the registry: what exists on disk (`assets`, by kind and key: a staged directory, a record's raw cache) and
+which buffers reference it (`refs`), so a buffer can reuse what an earlier round staged and a retire can count
+what is still in use. The registry is an index over the on-disk manifests (stage.json, files.json), rebuildable
+from them; the files stay the source of truth.
 
 Spec v0.5 §5 and §9.5: the ledger is the record of a run; replaying a run means replaying its descriptors.
 """
@@ -23,6 +27,8 @@ CREATE TABLE IF NOT EXISTS draws (buffer TEXT, seq INTEGER, consumer TEXT, descr
                                   PRIMARY KEY (buffer, seq));
 CREATE TABLE IF NOT EXISTS frozen (buffer TEXT, split TEXT, idx INTEGER, descriptor TEXT NOT NULL,
                                    PRIMARY KEY (buffer, split, idx));
+CREATE TABLE IF NOT EXISTS assets (kind TEXT, key TEXT, data TEXT NOT NULL, updated REAL, PRIMARY KEY (kind, key));
+CREATE TABLE IF NOT EXISTS refs (buffer TEXT, kind TEXT, key TEXT, PRIMARY KEY (buffer, kind, key));
 """
 
 
@@ -66,6 +72,42 @@ class Ledger:
         with self._lock:
             rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
         return [_volume_from(json.loads(row[0])) for row in rows]
+
+    # --- the registry ------------------------------------------------------------------------
+
+    def put_asset(self, kind: str, key: str, data: dict) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO assets VALUES (?, ?, ?, ?)", (kind, key, json.dumps(data), time.time())
+            )
+
+    def asset(self, kind: str, key: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT data FROM assets WHERE kind = ? AND key = ?", (kind, key)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def add_ref(self, buffer: str, kind: str, key: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", (buffer, kind, key))
+
+    def refs(self, kind: str, key: str) -> list[str]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT buffer FROM refs WHERE kind = ? AND key = ? ORDER BY buffer", (kind, key)
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def assets(self, kind: str) -> list[dict]:
+        """Every key of `kind` that has a row or a reference: {key, data (None without a row), refs}."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, data FROM assets WHERE kind = ? UNION SELECT DISTINCT key, NULL FROM refs "
+                "WHERE kind = ? AND key NOT IN (SELECT key FROM assets WHERE kind = ?) ORDER BY key",
+                (kind, kind, kind),
+            ).fetchall()
+        return [
+            {"key": key, "data": json.loads(data) if data else None, "refs": self.refs(kind, key)} for key, data in rows
+        ]
 
     def add_consumer(self, buffer: str, info: dict) -> str:
         consumer_id = uuid.uuid4().hex
