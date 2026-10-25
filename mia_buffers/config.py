@@ -40,9 +40,11 @@ _ENV_OVERRIDES = {
 
 class GitHubCfg(mia_data_config.GitHubCfg):
     """mia-data's GitHub section with the issue repo named `buffers_repo` in the YAML (it stays `data_repo` on
-    the object so mia-data's helpers, which post to `data_repo`, work unchanged)."""
+    the object so mia-data's helpers, which post to `data_repo`, work unchanged) and mia-data's own issue repo as
+    `datasets_repo`, where a dataset without a binding gets its `data:go` (spec §3 step 1)."""
 
     data_repo: str = Field(alias="buffers_repo")
+    datasets_repo: str  # mia-data's issue repo (mia_data.yaml `data_repo`)
     catalog_git_url: str | None = None  # clone URL override for the catalog mirror (default: GitHub https)
 
     @property

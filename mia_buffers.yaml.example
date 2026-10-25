@@ -2,6 +2,7 @@
 deployment: mia-buffers
 github:
   buffers_repo: JaneliaSciComp/mia-buffers     # one issue per buffer spec; humans add buffer:go / buffer:approve
+  datasets_repo: JaneliaSciComp/mia-workflow-data  # mia-data's issue repo: a dataset without a binding gets data:go there
   snippets_repo: JaneliaSciComp/mia-snippets
   catalog_repo: AI-HHMI/mia-agentic-search
   auth: token            # token | app (app needs app_id, installation_id, private_key_path)

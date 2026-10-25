@@ -12,7 +12,12 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
     harness = tmp_path / "harness"
     harness.mkdir(exist_ok=True)
     data = {
-        "github": {"buffers_repo": "o/buffers", "snippets_repo": "o/snippets", "catalog_repo": "o/catalog"},
+        "github": {
+            "buffers_repo": "o/buffers",
+            "datasets_repo": "o/data",
+            "snippets_repo": "o/snippets",
+            "catalog_repo": "o/catalog",
+        },
         "paths": {
             "state_dir": str(tmp_path / "state"),
             "work_root": str(tmp_path / "work"),
@@ -70,7 +75,7 @@ def test_load_config_reads_env_path(tmp_path, monkeypatch):
     (tmp_path / "harness").mkdir()
     path = tmp_path / "b.yaml"
     path.write_text(
-        "github: {buffers_repo: o/b, snippets_repo: o/s, catalog_repo: o/c}\n"
+        "github: {buffers_repo: o/b, datasets_repo: o/d, snippets_repo: o/s, catalog_repo: o/c}\n"
         f"paths: {{state_dir: {tmp_path}/state, work_root: {tmp_path}/work, storage_root: {tmp_path}/store,"
         f" raw_root: {tmp_path}/raw, staged_root: {tmp_path}/staged}}\n"
         f"harness: {{dir: {tmp_path}/harness}}\nservice: {{url: http://svc:1}}\n"
@@ -88,3 +93,12 @@ def test_example_config_loads(monkeypatch):
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     cfg = load_config(PROJECT_DIR / "mia_buffers.yaml.example")
     assert cfg.github.buffers_repo == "JaneliaSciComp/mia-buffers" and cfg.label("go") == "buffer:go"
+
+
+def test_config_requires_datasets_repo(tmp_path):
+    with pytest.raises(ValidationError, match="datasets_repo"):
+        make_cfg(
+            tmp_path,
+            github={"buffers_repo": "o/b", "snippets_repo": "o/s", "catalog_repo": "o/c", "datasets_repo": None},
+        )
+    assert make_cfg(tmp_path).github.datasets_repo == "o/data"

@@ -183,6 +183,27 @@ def test_render_plan_comment_truncates():
     assert len(body) <= 61_000 and "truncated" in body and "https://b/w" in body
 
 
+def test_plan_comment_lists_dropped_records():
+    rows = [
+        {
+            "id": rid,
+            "modality_group": "TEM",
+            "weight": 0.5,
+            "splits": {"train": 1},
+            "notes": [],
+            "admitted": True,
+            "fit": {"ok": True},
+        }
+        for rid in ("u937", "bcss")
+    ]
+    plan = {"spec_name": "s", "spec_hash": "h" * 64, "catalog_ref": REF, "errors": [], "warnings": [], "rows": rows}
+    body = render_plan_comment(plan, None, dropped={"bcss": "data:ineligible on o/data#5"})
+    assert "| `bcss` |" not in body and "| `u937` |" in body  # the table keeps only the remaining pool
+    assert "**Dropped**" in body and "- `bcss`: data:ineligible on o/data#5" in body
+    assert "1 in the pool of 2 seen" in body
+    assert "**Dropped**" not in render_plan_comment(plan, None)
+
+
 # -- bindings and the manual drop
 
 

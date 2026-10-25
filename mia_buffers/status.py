@@ -17,11 +17,13 @@ def _voxel(row: dict) -> str:
     return f"{cell} (assumed)" if cell and row.get("assumed") else cell
 
 
-def render_plan_comment(plan: dict, link: str | None) -> str:
+def render_plan_comment(plan: dict, link: str | None, dropped: dict[str, str] | None = None) -> str:
     """The plan as an issue comment: errors, warnings, the pool as a table (cut at COMMENT_LIMIT), a link to
-    the browsable copy of plan.md and plan.json."""
+    the browsable copy of plan.md and plan.json. `dropped` (record id -> reason) lists datasets that left the
+    pool during sourcing; they are kept out of the table and the count."""
     rows = plan.get("rows") or []
-    pool = [row for row in rows if _in_pool(row)]
+    dropped = dropped or {}
+    pool = [row for row in rows if _in_pool(row) and row.get("id") not in dropped]
     head = [
         f"**Plan** for `{safe_text(plan.get('spec_name'))}` · spec `{safe_text(str(plan.get('spec_hash'))[:12])}` · "
         f"catalog `{safe_text(str(plan.get('catalog_ref') or 'unpinned')[:12])}`",
@@ -33,6 +35,8 @@ def render_plan_comment(plan: dict, link: str | None) -> str:
         head += ["**Errors**", "", *(f"- {safe_text(error)}" for error in plan["errors"]), ""]
     if plan.get("warnings"):
         head += ["**Warnings**", "", *(f"- {safe_text(warning)}" for warning in plan["warnings"]), ""]
+    if dropped:
+        head += ["**Dropped**", "", *(f"- `{safe_text(rid)}`: {safe_text(why)}" for rid, why in dropped.items()), ""]
     tail = render_links({"Full plan": link}) if link else ""
     table = ["| id | modality | voxel nm | weight | splits | notes |", "|---|---|---|---|---|---|"]
     budget = COMMENT_LIMIT - len("\n".join(head)) - len(tail) - 200

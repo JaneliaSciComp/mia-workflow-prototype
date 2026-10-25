@@ -110,8 +110,22 @@ class SourcingLimits:
 
 
 @dataclass
+class DatasetIssue:
+    """What `nudge_dataset` found or did on the dataset's mia-data issue: its number, its `data:<stage>` (or
+    `ineligible`, `new`), whether `data:go` was added now, and a note for the issue comment."""
+
+    number: int
+    stage: str
+    nudged: bool
+    note: str = ""
+
+
+@dataclass
 class DatasetStatus:
-    """Where one dataset of the pool is in sourcing: pending | waiting-drop | staging | servable | failed."""
+    """Where one dataset of the pool is in sourcing:
+    pending | waiting-dataset | waiting-drop | staging | servable | failed | dropped.
+    `waiting-dataset`: no approved binding yet, mia-data is working on `issue` (spec §3 step 1); `dropped`: left out
+    of the plan (ineligible, or still waiting at the timeout) and of the ready denominator."""
 
     record: str
     group: str
@@ -119,6 +133,7 @@ class DatasetStatus:
     status: str = "pending"
     volumes: int = 0
     reason: str = ""
+    issue: int | None = None  # the dataset's issue number in the datasets repo, once looked up
 
 
 @dataclass
