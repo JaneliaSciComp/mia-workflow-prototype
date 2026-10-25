@@ -203,7 +203,10 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-async def apply_schedule(client: Any, schedule_id: str, schedule: Any) -> str:
+SCHEDULE_RETRY_SECONDS = 2.0  # between attempts while a just-started Temporal server is still acquiring shards
+
+
+async def apply_schedule(client: Any, schedule_id: str, schedule: Any, attempts: int = 30) -> str:
     """Create the schedule, update it when it exists, or delete and recreate it when it exists but cannot be
     updated. Returns "created", "updated" or "recreated".
 
@@ -211,8 +214,31 @@ async def apply_schedule(client: Any, schedule_id: str, schedule: Any) -> str:
     WorkflowExecutionAlreadyStartedFailure detail; newer servers (and the HTTPS proxy) answer a plain ALREADY_EXISTS
     ("schedule ... is already registered"), which is the same situation. Temporal runs each schedule as an internal
     workflow; when that workflow is wedged (a failed workflow task after a server upgrade, say) describe and update
-    fail with "Unable to query workflow", and the only repair is a fresh schedule. A poll schedule holds no state
-    worth keeping, so that is done here."""
+    fail with FAILED_PRECONDITION "Unable to query workflow", and the only repair is a fresh schedule. A poll
+    schedule holds no state worth keeping, so that is done here. A server that is still starting answers INTERNAL
+    ("shard status unknown"), UNAVAILABLE or NOT_FOUND for a namespace that exists; those are retried for about
+    `attempts` × SCHEDULE_RETRY_SECONDS and never delete anything."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    transient = {
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNAVAILABLE,
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.NOT_FOUND,
+    }
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _apply_schedule_once(client, schedule_id, schedule)
+        except RPCError as error:
+            if error.status not in transient or attempt == attempts:
+                raise
+            log.warning("schedule %s: %s; retrying (%d/%d)", schedule_id, error.message, attempt, attempts)
+            await asyncio.sleep(SCHEDULE_RETRY_SECONDS)
+    raise AssertionError("unreachable")
+
+
+async def _apply_schedule_once(client: Any, schedule_id: str, schedule: Any) -> str:
     from temporalio.client import ScheduleAlreadyRunningError, ScheduleUpdate
     from temporalio.service import RPCError, RPCStatusCode
 
@@ -229,7 +255,9 @@ async def apply_schedule(client: Any, schedule_id: str, schedule: Any) -> str:
         await handle.update(lambda _: ScheduleUpdate(schedule=schedule))
         return "updated"
     except RPCError as error:
-        log.warning("schedule %s cannot be updated (%s); deleting and creating it again", schedule_id, error)
+        if error.status != RPCStatusCode.FAILED_PRECONDITION:
+            raise
+        log.warning("schedule %s cannot be updated (%s); deleting and creating it again", schedule_id, error.message)
     await handle.delete()
     await client.create_schedule(schedule_id, schedule)
     return "recreated"
