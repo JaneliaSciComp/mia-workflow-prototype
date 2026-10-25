@@ -55,6 +55,7 @@ workflow issues, `test_replay_*` fails. When the change is intentional, guard th
 ```
 AUTODEV_RECORD_HISTORY=1 pixi run pytest tests/test_autodev_workflows.py -k recorded_history
 MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay
+MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay
 ```
 
 **Keep the workflows thin.** Decisions that only need data in hand (`decide.py`, `crop_test.judge`) are plain
@@ -109,7 +110,7 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    ```python
    from mia_buffers.client import BufferDataset
 
-   URL, TENSORIZERS = "http://host:8765", "<mia-snippets checkout>"   # or export MIA_BUFFERS_TENSORIZERS
+   URL, TENSORIZERS = "http://host:8765", "<mia-snippets checkout>"  # or export MIA_BUFFERS_TENSORIZERS
    train_ds = BufferDataset(URL, "<id>", "train", n_samples=4000, tensorizers=TENSORIZERS)
    val_ds = BufferDataset(URL, "<id>", "val", tensorizers=TENSORIZERS)
    ```
@@ -145,12 +146,45 @@ mia-data's, `raw_root` may be mia-data's `<work_root>/_cache` so downloads are s
    instead: the issue gets a comment listing `incoming/<name>` ← url pairs, a human places the files under
    `raw_root/<record>/incoming/`, the poller notices and the worker verifies them (regular, non-empty files),
    moves them into the cache under the harness's key and lists them in `raw_root/<record>/files.json`, which the
-   harness reads instead of a HEAD request. Each dataset ends `servable` or `failed`, with a comment.
+   harness reads instead of a HEAD request. A dataset with no binding under `storage_root` is handed to mia-data
+   (next section). Each dataset ends `servable`, `failed` or `dropped`, with a comment.
 5. **Ready.** When every weighting group's servable share reaches the spec's `ready.min_fraction` (default 1.0),
    the issue moves to `buffer:ready` with the buffer id and the `BufferDataset` cell to paste; the remaining
    datasets keep sourcing and join as they finish. If the threshold is not met after
    `sourcing.dataset_timeout_days` (default 14) the issue goes `buffer:needs-human` naming the groups below it.
 
-Not in milestone 3: bindings are placed by hand under `storage_root` until mia-data publishes them (milestone 4,
-with `data:go` for unmatched datasets); no tensorizer develop path; `idle` and `retired` are labels only
-(milestone 5).
+Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are labels only (milestone 5).
+
+## Datasets without a binding, and normalisation statistics (milestone 4)
+
+**Operator setup.** `mia_buffers.yaml` names mia-data's issue repo as `github.datasets_repo`. mia-data's own
+`mia_data.yaml` lists the buffer worker's bot login in `github.trusted_bots` (`<app slug>[bot]`; both deployments
+run as the same GitHub App, so it is mia-data's own login) so its poller accepts a `data:go` the buffer adds. mia-data
+no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
+`record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.
+
+**The hand-off.** When `read_binding` finds no `<storage_root>/<dataset folder>/binding.yaml`, the worker's
+`nudge_dataset` looks the record up in the datasets repo by mia-data's marker (`<!-- mia-data:record=<id> -->`),
+opens the issue if there is none (mia-data's usual body, pinned to the buffer's catalog ref) and adds `data:go`
+unless the issue is already in progress (`data:matching … cropping`), `data:done` or `data:ineligible`. The dataset
+sits in `waiting-dataset` with a comment on the buffer issue naming the dataset issue. mia-data runs its normal
+round there: match, smoke, test crops, a human's `data:approve`, production crops, and at `publish_crops` it now
+also copies the approved binding to `<dataset folder>/binding.yaml` and records its sha256 in `manifest.json`
+(`"binding": {"sha256": …}`, `null` when none). The buffer poller watches that file and the dataset issue's
+labels and signals `dataset_update(record, "binding" | "ineligible")`; a binding resumes the normal path (drop or
+stage job), an ineligible dataset is **dropped**: it leaves the plan and the ready denominator, the buffer issue
+gets a comment and the plan is re-posted with a **Dropped** list. The same happens to every dataset still
+`waiting-dataset` or `waiting-drop` when `sourcing.dataset_timeout_days` fires; if the remaining groups then meet
+`ready.min_fraction` the issue goes `buffer:ready`, else `buffer:needs-human` naming the groups that were below.
+A dataset issue that is `data:done` without a published binding (a run from before this change) is not relabelled:
+the comment says to add `data:go` on it by hand, and the timeout drops it otherwise.
+
+**Statistics.** `harness stage` records, per raw volume and channel, a sorted sample of up to 4,096 level-0
+values from 8 random patch boxes (`stage.json` → `volumes[].intensity_sample`). At registration, for
+`sampling.normalize.scope: volume`, each volume body carries `normalize: {lo: [per channel], hi: [per channel]}`
+at the spec's percentile range from its own sample; for `scope: dataset` the samples of the record's volumes are
+pooled first; for `scope: patch` (the default) the field is `null`. Descriptors carry the volume's `normalize`,
+`BufferDataset` passes it to the tensorizer as `stats` (with `scope` from the buffer config), and `muvit-2d` then
+scales by those bounds instead of the patch's own percentiles (`meta.normalize_scope` says which). A staged
+directory from before this change has no sample: with a non-`patch` scope its volumes are refused at
+registration with a reason that says to re-stage.

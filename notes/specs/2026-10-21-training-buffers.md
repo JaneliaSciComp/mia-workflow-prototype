@@ -1,6 +1,6 @@
 # MIA training buffers: spec → datasets → raw cache → multi-resolution crops served on demand — Spec
 
-**Status:** draft v0.6 · 2026-10-24 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
+**Status:** draft v0.7 · 2026-10-24 · architecture only, not yet approved. v0.1 (commit `35f388e`) pre-tensorised
 shards into a disk window; v0.2 (superseded) emitted miao configs over an OME-Zarr corpus; v0.3 (commit `79e6cb8`)
 followed the ML lead's flow: download raw data, serve crops directly from it where chunking allows, stage to
 OME-Zarr where it does not, one service chooses every crop. v0.4 validates v0.3 against the lead's MuViT demo
@@ -8,7 +8,8 @@ notebook and three diverse 2D datasets (§11): a crop becomes a multi-resolution
 staging to an NGFF pyramid becomes the one serving path for v1, and the batch contract follows MuViT, not miao. v0.5
 takes the lead's answers to §8.2 and §8.3: missing metadata is guessed, for now by baked-in tables (§2, §9.8), later
 by an ingestion agent. v0.6 records milestone 3 as built (§3: download inside the stage job, the manual drop through
-`files.json`; §9.1: the issue repo). The v0.4 diagrams are at [MIA training buffers v0.4](https://claude.ai/artifact/Nqk7xz3jQajtPAFqw1296i). The
+`files.json`; §9.1: the issue repo). v0.7 records milestone 4 as built (§3 step 1 and the recipe statistics, §6.1–6.2;
+mia-data's downloads-state coupling removed, since its demo rules are not a constraint). The v0.4 diagrams are at [MIA training buffers v0.4](https://claude.ai/artifact/Nqk7xz3jQajtPAFqw1296i). The
 v0.1 diagrams at [MIA Training Buffers](https://claude.ai/artifact/NpL68fp7iVfpQ9EWApz6oj) are stale except
 figures 1, 2 and 6 in outline.
 **Inputs:** the spec instance
@@ -146,6 +147,14 @@ For each dataset in the data pool, three independent activities run under the on
 1. **Binding.** Read `<dataset folder>/binding.yaml` written by mia-data's publication (a small mia-data change,
    §6). If the dataset issue is not `data:done`, add `data:go` (the buffer bot is a trusted labeler) and wait on the
    poller's `dataset_update`. Timeout or `data:ineligible` drops the dataset and re-posts the plan.
+   *As built in milestone 4 (2026-10-24):* `nudge_dataset` finds the dataset issue by mia-data's record marker and
+   opens it when there is none (mia-data's issue body, pinned to the buffer's catalog ref; mia-data admits any record
+   on the catalog's main, the lead's downloads state is no longer required). `data:go` is added unless the issue is in
+   progress, `data:done` or ineligible; the dataset waits as `waiting-dataset` with the issue number and dataset folder
+   in its status, and the buffer poller signals `dataset_update(record, binding|ineligible)` from the published
+   `binding.yaml` or the issue's labels. A dropped dataset leaves the ready denominator; the plan comment is re-posted
+   with a **Dropped** list. The one buffer-level timeout (`sourcing.dataset_timeout_days`) drops every dataset still
+   waiting on a human or on mia-data, then announces ready if the remaining groups allow it, else needs-human.
 2. **Download.** A plain job fetches the binding's files into `raw_root/<record-id>/` with the harness `io` (hosts
    limited to the dataset's, validators recorded, CRCs checked, resumable per file). The job writes
    `files.json`: url, path, size, validators. Large datasets stream to the cache over several jobs under
@@ -178,7 +187,11 @@ The sourcing step also writes the dataset's **recipe** (§4): binding, split key
 spec's `sampling` block with its params, statistics for `normalize.scope: volume|dataset`, and the harness pin. A
 volume is **servable** when it has a recipe and a verified pyramid. The worker registers servable volumes with the
 service (`PUT volumes`), with their weights, split-key values and plane count, and the service begins drawing from
-them.
+them. *As built in milestone 4:* the statistics are a sorted per-channel sample of level-0 values the stage job keeps
+in `stage.json` (`intensity_sample`, ≤4,096 values from 8 patch boxes per channel); registration turns it into
+`normalize: {lo, hi}` per channel at the spec's range, per volume or pooled over the record's volumes, carried on
+the volume row and every descriptor; `muvit-2d` scales by those bounds when given (`stats` param). The rest of the
+recipe (binding, split key, tensorizer params, harness pin) is as milestones 2–3 left it.
 
 ## 4. Snippets and harnesses: composition
 
@@ -237,7 +250,11 @@ way, so a run can be reproduced from the ledger alone.
 
 1. **mia-data publication writes the approved binding** to `<dataset folder>/binding.yaml` with its sha256 in the
    manifest (wire-format rule: new field with a default). Buffers read bindings from there, never from comments.
-2. **mia-data trusts the buffer bot** for `data:go`.
+   *Built 2026-10-24:* `publish_crops` takes the round's approved binding and `publish()` copies it beside the crops;
+   `manifest.json` carries `"binding": {"sha256": …}` or `null`. mia-data also admits records absent from the catalog's
+   downloads state (`record_commit` = main's head) and `render_issue` accepts an entry holding only `record_commit`.
+2. **mia-data trusts the buffer bot** for `data:go`. *Built 2026-10-24:* `github.trusted_bots` in `mia_data.yaml`, a
+   list of `name[bot]` logins whose label counts without a permission lookup, honoured by `deliver_label`.
 3. **mia-snippets** gains `tensorizers/<name>/` (same CI rules as `snippets/`: one new directory per PR, no
    edits), the harness API types `Stack`, `TensorSpec`, `Sample`, the harnesses `stage`, `tensorize`,
    `test-tensorizer` (§4), and a built-in OME-Zarr pyramid reader with an axis map. Reader snippets are
@@ -326,7 +343,7 @@ never taken from the spec.
 | 1 | harness API, `stage`, OME-Zarr pyramid reader, `tensorize`, the `muvit-2d` tensorizer | the U937 and BCSS records stage from their raw files; the lead's existing crop links; `tensorize` on a descriptor yields a sample that passes `MuViTDataset._sanity_check` and matches the notebook's `img` and `bbox` for the same centre and levels; a tensorizer output mismatching `describe()` fails the harness |
 | 2 | `buffer-api` + local-mode `BufferDataset` against hand-registered volumes | the demo notebook's training cells run on the two staged datasets with the spec's weights; val is identical across epochs; two consumers share one distribution; a killed consumer costs a delay only. *2026-10-23: done against the staged U937 volume (`mia-buffers serve`, `register`, `BufferDataset`; `docs/development.md`): frozen val identical across epochs, disjoint planes per split, two consumers with distinct draws, 10.8 samples/s in one process; the notebook's torch cells were not run here (no torch in this environment), BCSS awaits its manual drop.* |
 | 3 | `MiaBuffer`/`MiaBufferPoll`: go → plan → approve → sourcing (download or manual drop, stage, register) → ready, with datasets already `data:done` | an issue reaches `buffer:ready` progressively as datasets become servable; BCSS waits in the manual-drop sub-state and joins after the drop; a redelivered `go` does nothing  *2026-10-24: built (`mia_buffers.workflows`, `activities`, `poll`; `docs/development.md`). Verified on Temporal's test server with mocked activities (progressive ready, manual drop, stale and busy labels, timeout, replay of a recorded history) and on real data without a worker (no Temporal server or csub broker on the dev host): issue #1 of `JaneliaSciComp/mia-buffers` admitted and planned (pool 421 of 1,940, 4 manual, 14 groups, 18 s); the U937 binding read from `storage_root`; its stage job command run by hand with the job's environment (35 s from the cache, 0 bytes fetched, 32 + 32 checks, `files.json` written) and again with no hosts allowed (30 s, served by `files.json`); registered through the activities and consumed at 13.4 samples/s, val identical across epochs; the BCSS drop verified and keyed, its stage job then failing for want of a `png-pairs` reader snippet, which is milestone 4's `data:go`. The GitHub App installation must be extended to the new repo before the worker runs as the bot.* |
-| 4 | sourcing through mia-data (`data:go`), binding publication, statistics for `normalize.scope: volume/dataset` | a spec naming an unmatched dataset reaches ready after the human approval on the dataset issue |
+| 4 | sourcing through mia-data (`data:go`), binding publication, statistics for `normalize.scope: volume/dataset` | a spec naming an unmatched dataset reaches ready after the human approval on the dataset issue *2026-10-24: built (`nudge_dataset`, `dataset_update`, drops; mia-data publishes `binding.yaml`; `intensity_sample` → `normalize` bounds; `docs/development.md`). Verified on Temporal's test server with mocked activities (wait for the binding then stage, ineligible → dropped and plan re-posted, late update ignored, timeout drops the waiters and reaches ready, the recorded history replays) and by hand on U937 (see the verification note below). BCSS, which needs a `png-pairs` reader snippet, is left to the live run as the end-to-end test of the hand-off.* |
 | 5 | retire, reference-counted caches, root quota, operations (`status`, `check`) | an idle buffer is retired with notice; a shared dataset survives; a full root queues sourcing with a comment |
 | 6 | remote mode: service crop workers, `GET crops/<seq>` | a client with no cache mount trains from tensors over HTTP |
 
