@@ -43,9 +43,21 @@ async def test_apply_schedule_updates_when_the_server_says_already_registered():
 
     class Handle:
         updates: list = []
+        deleted: list = []
+        broken = False  # True: the server's scheduler workflow has a failed task; describe/update fail
 
         async def update(self, fn):
+            if self.broken:
+                raise RPCError(
+                    "Unable to query workflow due to Workflow Task in failed state.",
+                    RPCStatusCode.FAILED_PRECONDITION,
+                    b"",
+                )
             self.updates.append(fn)
+
+        async def delete(self):
+            Handle.deleted.append(1)
+            Handle.broken = False
 
     class Client:
         def __init__(self, error):
@@ -53,7 +65,8 @@ async def test_apply_schedule_updates_when_the_server_says_already_registered():
 
         async def create_schedule(self, schedule_id, schedule):
             if self.error:
-                raise self.error
+                error, self.error = self.error, None  # exists once; after a delete the create succeeds
+                raise error
             self.created.append(schedule_id)
 
         def get_workflow_handle(self, *_):
@@ -70,3 +83,7 @@ async def test_apply_schedule_updates_when_the_server_says_already_registered():
     assert await apply_schedule(fresh, "autodev-x-poll", object()) == "created" and fresh.created == ["autodev-x-poll"]
     with pytest.raises(RPCError):  # any other failure still surfaces
         await apply_schedule(Client(RPCError("down", RPCStatusCode.UNAVAILABLE, b"")), "autodev-x-poll", object())
+    Handle.broken = True  # the schedule exists but its scheduler workflow is wedged: delete it and create afresh
+    wedged = Client(plain)
+    assert await apply_schedule(wedged, "autodev-x-poll", object()) == "recreated"
+    assert Handle.deleted == [1] and wedged.created == ["autodev-x-poll"] and len(Handle.updates) == 2

@@ -204,11 +204,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
 
 
 async def apply_schedule(client: Any, schedule_id: str, schedule: Any) -> str:
-    """Create the schedule, or update it when it exists. Returns "created" or "updated".
+    """Create the schedule, update it when it exists, or delete and recreate it when it exists but cannot be
+    updated. Returns "created", "updated" or "recreated".
 
     The SDK raises ScheduleAlreadyRunningError only when the ALREADY_EXISTS answer carries the
     WorkflowExecutionAlreadyStartedFailure detail; newer servers (and the HTTPS proxy) answer a plain ALREADY_EXISTS
-    ("schedule ... is already registered"), which is the same situation."""
+    ("schedule ... is already registered"), which is the same situation. Temporal runs each schedule as an internal
+    workflow; when that workflow is wedged (a failed workflow task after a server upgrade, say) describe and update
+    fail with "Unable to query workflow", and the only repair is a fresh schedule. A poll schedule holds no state
+    worth keeping, so that is done here."""
     from temporalio.client import ScheduleAlreadyRunningError, ScheduleUpdate
     from temporalio.service import RPCError, RPCStatusCode
 
@@ -220,8 +224,15 @@ async def apply_schedule(client: Any, schedule_id: str, schedule: Any) -> str:
     except RPCError as error:
         if error.status != RPCStatusCode.ALREADY_EXISTS:
             raise
-    await client.get_schedule_handle(schedule_id).update(lambda _: ScheduleUpdate(schedule=schedule))
-    return "updated"
+    handle = client.get_schedule_handle(schedule_id)
+    try:
+        await handle.update(lambda _: ScheduleUpdate(schedule=schedule))
+        return "updated"
+    except RPCError as error:
+        log.warning("schedule %s cannot be updated (%s); deleting and creating it again", schedule_id, error)
+    await handle.delete()
+    await client.create_schedule(schedule_id, schedule)
+    return "recreated"
 
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
