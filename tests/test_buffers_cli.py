@@ -1,9 +1,11 @@
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
+from mia_buffers import cli
 from mia_buffers.cli import catalog_head, load_records, main
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
@@ -126,3 +128,49 @@ def test_init_labels_creates_buffer_labels(tmp_path, monkeypatch, capsys):
     names = [name for _, name, _ in created]
     assert len(names) == 10 and {"buffer:new", "buffer:ready", "buffer:go", "buffer:approve"} <= set(names)
     assert all(repo == "o/buffers" for repo, _, _ in created) and "created buffer:go" in capsys.readouterr().out
+
+
+class _CheckGitHub:
+    def __init__(self, repo):
+        self.repo = repo
+
+    async def request(self, method, path):
+        if self.repo == "o/catalog":
+            raise RuntimeError("404")
+        return SimpleNamespace(json=lambda: {"full_name": self.repo})
+
+    async def aclose(self):
+        pass
+
+
+async def _temporal_down(cfg):
+    raise RuntimeError("down")
+
+
+def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch, capsys):
+    from test_buffers_config import make_cfg
+
+    cfg = make_cfg(
+        tmp_path,
+        paths={"local_root": str(tmp_path / "local")},
+        service={"url": "http://svc:1", "token_file": str(tmp_path / "tok")},
+    )
+    for d in ("state", "work", "raw", "staged", "storage"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    (tmp_path / "tok").write_text("t")
+    (tmp_path / "tok").chmod(0o600)
+    tdir = cfg.harness.dir / "tensorizers" / cfg.sourcing.tensorizer
+    tdir.mkdir(parents=True)
+    (tdir / "tensorizer.yaml").write_text("name: x\n")
+    monkeypatch.setattr(cli, "load_config", lambda path=None, service=None: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    monkeypatch.setattr(cli, "_gh", lambda cfg_, repo, tokens=None: _CheckGitHub(repo))
+    monkeypatch.setattr(cli, "_client", _temporal_down)
+    monkeypatch.setattr(cli, "harness_pin", lambda cfg_: ("a" * 40, "b" * 64))
+    monkeypatch.setattr(cli, "require_local_dir", lambda p: p.mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(cli.httpx, "get", lambda url, timeout: SimpleNamespace(status_code=404))
+    assert cli.main(["check"]) == 1
+    rows = capsys.readouterr().out.rstrip("\n").split("\n")
+    assert [r[:3] for r in rows] == ["ok ", "ok ", "ok ", "BAD", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
+    assert rows[3].startswith("BAD  github catalog") and "down" in rows[4]
+    assert rows[9].startswith("ok   buffer-api") and "http://svc:1" in rows[9]

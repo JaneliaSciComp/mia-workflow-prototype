@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -13,9 +14,13 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
+
 from autodev.auth import bot_login
-from autodev.cli import _client, _setup_logging, apply_schedule
+from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
+from mia_core.fs import require_local_dir, require_secret_file
 from mia_data.cli import _gh, _github_clients
+from mia_data.jobspec import harness_pin
 
 from .config import HUMAN_LABELS, STAGES, load_config
 from .plan import build_plan, load_records
@@ -167,11 +172,95 @@ async def cmd_init_labels(cfg: Config) -> int:
     return 0
 
 
+async def cmd_check(cfg: Config) -> int:
+    """Try every external dependency and print one ok/BAD line per check."""
+
+    def repo_check(repo: str):
+        async def check():
+            gh = _gh(cfg, repo)
+            try:
+                info = (await gh.request("GET", f"/repos/{repo}")).json()
+            finally:
+                await gh.aclose()
+            return f"{info['full_name']} as {await bot_login(cfg)}"
+
+        return check
+
+    def write_probe(directory: Path) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe_file = directory / ".write-test"
+        probe_file.touch()
+        probe_file.unlink()
+
+    async def temporal():
+        from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
+
+        client = await _client(cfg)
+        await client.workflow_service.describe_namespace(DescribeNamespaceRequest(namespace=cfg.temporal.namespace))
+        return f"{cfg.temporal.address} ns={cfg.temporal.namespace}"
+
+    async def dirs():
+        paths = cfg.paths
+        written = (paths.state_dir, paths.work_root, paths.raw_root, paths.staged_root)
+        for directory in written:
+            write_probe(directory)
+        if not os.access(paths.storage_root, os.R_OK):
+            raise RuntimeError(f"{paths.storage_root} is not readable")
+        return ", ".join(str(directory) for directory in (*written, paths.storage_root))
+
+    async def local_root():
+        if cfg.paths.local_root is None:
+            raise RuntimeError("set paths.local_root in mia.yaml (host-local disk)")
+        require_local_dir(cfg.paths.local_root)
+        write_probe(cfg.paths.local_root / "locks")
+        return str(cfg.paths.local_root)
+
+    async def service_token():
+        if cfg.service.token_file is None:
+            raise RuntimeError("set service.token_file in mia.yaml and run `mia init-token`")
+        require_secret_file(cfg.service.token_file)
+        return str(cfg.service.token_file)
+
+    async def harness():
+        commit, digest = harness_pin(cfg)
+        tensorizer = cfg.harness.dir / "tensorizers" / cfg.sourcing.tensorizer / "tensorizer.yaml"
+        if not tensorizer.is_file():
+            raise RuntimeError(f"{tensorizer} is missing")
+        return f"{commit[:12]} env {digest[:12]} tensorizer {cfg.sourcing.tensorizer}"
+
+    async def buffer_api():
+        url = f"{cfg.service.url}/buffers/_check_/status"
+        status = httpx.get(url, timeout=10).status_code
+        if status not in (200, 404):  # 404: a reachable service does not know this buffer
+            raise RuntimeError(f"{url} answered {status}")
+        return cfg.service.url
+
+    repos = [
+        (f"github {kind}", repo_check(getattr(cfg.github, f"{kind}_repo")))
+        for kind in ("buffers", "datasets", "snippets", "catalog")
+    ]
+    # ponytail: no csub row; mia-data's check covers the same broker policy. Add one when the deployments get
+    # separate policies.
+    return await run_checks(
+        [
+            *repos,
+            ("temporal", temporal),
+            ("directories", dirs),
+            ("local root", local_root),
+            ("service token", service_token),
+            ("harness", harness),
+            ("buffer-api", buffer_api),
+        ]
+    )
+
+
 def _deployment(args: argparse.Namespace) -> int:
     """Run a command that needs mia_buffers.yaml and Temporal."""
     cfg = load_config(args.config)
     _setup_logging(cfg, args.command if args.command == "worker" else None)
-    command = {"worker": cmd_worker, "schedule": cmd_schedule, "init-labels": cmd_init_labels}[args.command]
+    command = {"worker": cmd_worker, "schedule": cmd_schedule, "init-labels": cmd_init_labels, "check": cmd_check}[
+        args.command
+    ]
     return asyncio.run(command(cfg))
 
 
@@ -207,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         ("worker", "run the Temporal workers (main and await queues)"),
         ("schedule", "create or update the poll Schedule"),
         ("init-labels", "create the buffer:* labels on the issue repo"),
+        ("check", "verify GitHub repos, Temporal, directories, the local root, the token, the harness and buffer-api"),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument(
