@@ -63,7 +63,8 @@ class Manifest(BaseModel):
 def load_manifest(path: str | os.PathLike | None = None) -> Manifest:
     """Load and validate mia.yaml ($MIA_CONFIG; $MIA_MANIFEST is the deprecated name), exiting with a readable
     message if it is missing or invalid."""
-    path = manifest_path(path or os.environ.get("MIA_CONFIG") or os.environ.get("MIA_MANIFEST"))
+    # absolute: the worker runs from its state dir and mounts this file
+    path = manifest_path(path or os.environ.get("MIA_CONFIG") or os.environ.get("MIA_MANIFEST")).expanduser().resolve()
     data = read_manifest(path)
     try:
         return Manifest(**{**data, "path": path})

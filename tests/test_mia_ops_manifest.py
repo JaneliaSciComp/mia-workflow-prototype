@@ -75,3 +75,10 @@ def test_load_manifest_prefers_mia_config_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MIA_CONFIG", str(p))
     monkeypatch.delenv("MIA_MANIFEST", raising=False)
     assert load_manifest().path == p
+
+
+def test_load_manifest_resolves_a_relative_path(tmp_path, monkeypatch):
+    (tmp_path / "m.yaml").write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
+    monkeypatch.chdir(tmp_path)
+    m = load_manifest("m.yaml")
+    assert m.path.is_absolute() and m.path == (tmp_path / "m.yaml").resolve()
