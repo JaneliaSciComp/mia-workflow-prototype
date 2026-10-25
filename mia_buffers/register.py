@@ -119,7 +119,7 @@ def volume_bodies(
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
     scope = spec.sampling.normalize.scope
-    volumes = []
+    volumes: list[dict] = []
 
     def refuse(index: int, volume: object, why: str) -> None:
         if refused is None:
