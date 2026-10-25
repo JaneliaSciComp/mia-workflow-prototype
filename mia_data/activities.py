@@ -14,7 +14,6 @@ import functools
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 from collections.abc import Awaitable, Callable
@@ -25,8 +24,13 @@ import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from autodev.activities import PERMANENT_CSUB, neutralize, permanent_errors
-from autodev.jobs import JobSpec, read_untrusted
+from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.jobs import JobSpec
+from mia_core.untrusted import loads as _loads
+from mia_core.untrusted import neutralize, read_untrusted
+from mia_core.untrusted import text as _text
+from mia_core.untrusted import texts as _texts
+from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
@@ -114,38 +118,11 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     return cast(Fn, wrapper)
 
 
-def write_atomic(path: Path, data: str | bytes) -> None:
-    """Write via a temp file and rename, so a crash never leaves a half-written file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data.encode() if isinstance(data, str) else data)
-    os.replace(tmp, path)
-
-
-def _text(value: Any, limit: int = 2000) -> str:
-    """A job-reported value as a bounded string ("" for None)."""
-    return "" if value is None else str(value)[:limit]
-
-
-def _texts(value: Any, limit: int = 20) -> list[str]:
-    """A job-reported value as a bounded list of bounded strings (a scalar becomes a one-item list)."""
-    items = value if isinstance(value, list) else [] if value is None else [value]
-    return [_text(item, 500) for item in items[:limit]]
-
-
 def _small_dict(value: Any, limit: int = 16384) -> dict | None:
     """Job-reported JSON goes into workflow history only as a small dict (the result fields are typed dict)."""
     try:
         return value if isinstance(value, dict) and len(json.dumps(value)) <= limit else None
     except (TypeError, ValueError):
-        return None
-
-
-def _loads(text: str | bytes | None) -> Any:
-    """json.loads that returns None instead of raising."""
-    try:
-        return json.loads(text or "null")
-    except (ValueError, RecursionError):
         return None
 
 

@@ -19,6 +19,9 @@ from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
+from mia_core.untrusted import SECRET_RE as SECRET_RE
+from mia_core.untrusted import neutralize as neutralize
+
 from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
@@ -61,18 +64,6 @@ log = logging.getLogger(__name__)
 # carry invalid_request. transport_error, lsf_error etc. may pass on retry, so they are left retryable.
 PERMANENT_CSUB = {"policy_violation", "invalid_request"}
 PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside the GitHub client
-# ponytail: known secret shapes plus our own token (see neutralize); not a general secret scanner.
-SECRET_RE = re.compile(r"sk-ant-[\w-]+|gh[pousr]_\w+|github_pat_\w+|eyJ[\w-]+\.[\w-]+\.[\w-]+")
-
-
-def neutralize(text: str, token: str | None = None) -> str:
-    """Make agent-written text safe to post on GitHub.
-
-    It must not be able to forge our `<!-- autodev: ... -->` markers, nor leak a credential that a
-    prompt-injected agent printed (e.g. from ~/.claude/.credentials.json)."""
-    if token:
-        text = text.replace(token, "[redacted]")
-    return SECRET_RE.sub("[redacted]", text).replace("<!--", "&lt;!--")
 
 
 def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:

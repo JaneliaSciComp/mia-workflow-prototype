@@ -26,9 +26,10 @@ import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from autodev.activities import PERMANENT_CSUB, neutralize
-from autodev.jobs import JobSpec, read_untrusted
-from mia_data.activities import _loads, _text, _texts, mia_permanent_errors, write_atomic
+from autodev.activities import PERMANENT_CSUB
+from autodev.jobs import JobSpec
+from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
+from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
@@ -531,9 +532,9 @@ class Activities:
         result = StageResult(
             report.get("ok") is True,
             len(volumes) if isinstance(volumes, list) else 0,
-            _texts(report.get("errors")),
+            texts(report.get("errors")),
             fetched if type(fetched) is int and fetched >= 0 else 0,
-            _text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
+            text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
         )
         await self._record_assets(round_id, record, result)
         return result
@@ -643,7 +644,7 @@ class Activities:
 
 def _stage_json(staged: Path) -> Any:
     """The stage job's stage.json (untrusted job output, read within STAGE_JSON_LIMIT), or None."""
-    return _loads(read_untrusted(staged, "stage.json", STAGE_JSON_LIMIT))
+    return loads(read_untrusted(staged, "stage.json", STAGE_JSON_LIMIT))
 
 
 def _response_error(response: Any) -> str:
@@ -651,5 +652,5 @@ def _response_error(response: Any) -> str:
     try:
         body = response.json()
     except ValueError:
-        return _text(response.text, 500)
-    return _text(body.get("error", response.text) if isinstance(body, dict) else response.text, 500)
+        return text(response.text, 500)
+    return text(body.get("error", response.text) if isinstance(body, dict) else response.text, 500)

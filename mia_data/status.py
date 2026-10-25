@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from autodev.activities import neutralize
+from mia_core.untrusted import neutralize
 
 
 def safe_text(value: Any) -> str:

@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from autodev.jobs import read_untrusted
+from mia_core.untrusted import read_untrusted
 
 CROP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 MAX_FILE = 64 << 20  # a crop file is a 256x256 PNG or a small JSON
