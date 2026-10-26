@@ -265,7 +265,7 @@ def test_lifecycle_fields_and_defaults(): ...  # plan.auto_approve False; sourci
     is still taken in `admit` for `record.yaml`.
   - `create_buffer(round_id, buffer_id)`: `buffer_config(..., recipe=recipe_for(spec, tensorizer=cfg.sourcing.tensorizer,
     harness_commit=pins.harness_commit, env_digest=pins.env_digest), plan_hash=<from the round's plan.json text>)`;
-    then best-effort `registry.event(buffer_id, "approved", issue=issue, detail="")`.
+    It writes no event: `set_stage("sourcing")` writes `approved`.
   - `_building_dir(round_id, record) -> Path` = `<staged_root>/<levels key>/<record>/.building-<artifact>-<job key>`
     (the stage job key, `job_key(issue, round_id, record)`); `submit` sets `args.out` to it (the directory is
     created by `prepare_stage`); `read_stage(round_id, record)`: read `stage.json` from the building dir when it
@@ -277,9 +277,8 @@ def test_lifecycle_fields_and_defaults(): ...  # plan.auto_approve False; sourci
   - `set_stage(...)`: after the label swap, best-effort `registry.event(state.buffer_id or round_id, kind,
     issue=issue, event_id=None, detail=detail[:200])` with kind = `{"planning": "created", "plan-review":
     "planned", "sourcing": "approved", "ready": "ready", "idle": "idle", "retired": "retired", "needs-human":
-    "needs-human"}[stage]` when the stage is in that map; `sourcing` is skipped when `create_buffer` already wrote
-    `approved` for this buffer (check `latest_event`), keep it simple: `create_buffer` does NOT write the event;
-    `set_stage("sourcing")` does.
+    "needs-human"}[stage]` when the stage is in that map (the buffer id is the round id, so a buffer's events start with
+    `created` from `planning`).
   - `retire_buffer(round_id, buffer_id) -> dict` → `registry.retire(buffer_id)` (raises on failure: the workflow
     retries).
   - `raw_ready(round_id, record) -> bool` → `raw_status(...).ready` (for `degraded`).
