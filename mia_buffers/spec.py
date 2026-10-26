@@ -236,14 +236,23 @@ class Spec(_Strict):
         return None if block is None else block.model_dump(exclude_none=True)
 
 
-def load_spec(path: Path) -> Spec:
+def load_spec_text(text: str) -> Spec:
+    """Validate spec YAML text (a file's, or a `POST /plan` body's)."""
     try:
-        data = yaml.safe_load(path.read_text())
-        if "warnings" in (data or {}):
+        data = yaml.safe_load(text)
+        if isinstance(data, dict) and "warnings" in data:
             raise SpecError("warnings is not a spec field")
         return Spec.model_validate(data)
     except (yaml.YAMLError, ValidationError) as error:
         raise SpecError(str(error)) from error
+
+
+def load_spec(path: Path) -> Spec:
+    return load_spec_text(path.read_text())
+
+
+def spec_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def spec_hash(path: Path) -> str:

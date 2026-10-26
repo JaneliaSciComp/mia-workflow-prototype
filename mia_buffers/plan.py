@@ -19,6 +19,7 @@ from .specmap import Facts, facts
 
 MANUAL_DROP_NOTE = "download_method other: needs a manual drop (spec v0.4 §3)"
 UNREADABLE = "_unreadable"  # set by cli.load_records on a file that is not a YAML mapping
+NOT_PREPARED = "not prepared"  # the rule of a fitting row whose dataset is not prepared (server-side plans only)
 
 
 def _cell(text: object) -> str:
@@ -80,8 +81,13 @@ class Plan:
     def rows_by_id(self) -> dict[str, Row]:
         return {row.id: row for row in self.rows}
 
-    def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+    def to_dict(self, states: dict[str, str] | None = None) -> dict:
+        """The plan as JSON; with `states` (record id → dataset state) each row also carries `prepared`."""
+        data = dataclasses.asdict(self)
+        if states is not None:
+            for row in data["rows"]:
+                row["prepared"] = states.get(row["id"], "unprepared")
+        return data
 
     def render_markdown(self) -> str:
         lines = [
@@ -121,6 +127,14 @@ class Plan:
                 splits,
             ]
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
+        not_prepared = [row.id for row in self.rows if row.rule == NOT_PREPARED]
+        if not_prepared:
+            lines += [
+                "",
+                f"## Not prepared ({len(not_prepared)})",
+                "",
+                *(f"- {_cell(row_id)}" for row_id in not_prepared),
+            ]
         return "\n".join(lines) + "\n"
 
 
@@ -277,7 +291,15 @@ def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
     return records
 
 
-def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: list[tuple[str, dict]]) -> Plan:
+def build_plan(
+    spec: Spec,
+    spec_hash: str,
+    catalog_ref: str | None,
+    records: list[tuple[str, dict]],
+    prepared: set[str] | None = None,
+) -> Plan:
+    """Fit, weigh and split the records the spec admits. With `prepared` (the ids of prepared datasets), a row
+    that fits but is not prepared is out of the pool with the rule `not prepared`; None skips that rule."""
     all_facts: list[Facts] = []
     rows: list[Row] = []
     for path, record in sorted(records, key=lambda item: item[0]):
@@ -311,6 +333,8 @@ def build_plan(spec: Spec, spec_hash: str, catalog_ref: str | None, records: lis
                 row.channel_recipe = recipes["gray" if spec.sampling.patch.c == 1 else "rgb"]
             if row.fit.ok:
                 row.positions = positions(f, spec)
+                if prepared is not None and row.id not in prepared:
+                    row.admitted, row.rule = False, NOT_PREPARED
             if f.download_method == "other":
                 row.notes.append(MANUAL_DROP_NOTE)
         rows.append(row)

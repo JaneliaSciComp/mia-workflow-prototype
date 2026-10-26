@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mia_buffers.spec import Spec, SpecError, load_spec, spec_hash
+from mia_buffers.spec import Spec, SpecError, load_spec, load_spec_text, spec_hash, spec_text_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
 
@@ -70,3 +70,9 @@ def test_ready_fraction_bounds(tmp_path, edit):
     path.write_text(yaml.safe_dump(_merge(yaml.safe_load((FIXTURES / "spec.yaml").read_text()), edit)))
     with pytest.raises(SpecError, match="min_fraction"):
         load_spec(path)
+
+
+def test_load_spec_text_matches_load_spec():
+    path = FIXTURES / "spec.yaml"
+    assert load_spec_text(path.read_text()) == load_spec(path)
+    assert spec_text_hash(path.read_text()) == spec_hash(path)

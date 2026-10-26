@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from mia_data.publish import Conflict, publish, reindex
+from mia_data.publish import Conflict, prepared_row, publish, reindex
 
 AGE = 3600
 
@@ -154,3 +154,28 @@ def test_manifest_without_binding_says_null(tmp_path):
     src, verified = _src(tmp_path)
     publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)
     assert json.loads((tmp_path / "ds" / "manifest.json").read_text())["binding"] is None
+
+
+def test_prepared_row_requires_matching_manifest(tmp_path):
+    ds = tmp_path / "confocal-human-u937"
+    ds.mkdir()
+    binding = b"record: u937\nsnippets_commit: 4c1d\n"
+    (ds / "binding.yaml").write_bytes(binding)
+    assert prepared_row(ds) is None  # no manifest yet
+    (ds / "manifest.json").write_text(json.dumps({"crops": [], "count": 3, "binding": {"sha256": "0" * 64}}))
+    assert prepared_row(ds) is None  # a stale manifest: a new binding, crops not re-verified
+    src, verified = _src(tmp_path)
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)
+    row = prepared_row(ds)
+    assert row is not None and row.pop("published_at").endswith("+00:00")
+    assert row == {
+        "state": "prepared",
+        "record": "u937",
+        "folder": "confocal-human-u937",
+        "binding_hash": hashlib.sha256(binding).hexdigest(),
+        "binding_commit": "4c1d",
+        "crops": 2,
+    }
+    (ds / "binding.yaml").write_bytes(b"snippets_commit: 4c1d\n")  # no record
+    reindex(ds, {})
+    assert prepared_row(ds) is None

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mia_buffers.plan import Fit, Plan, build_plan, fit, positions, split_counts, weights
+from mia_buffers.plan import NOT_PREPARED, Fit, Plan, build_plan, fit, positions, split_counts, weights
 from mia_buffers.spec import Spec, load_spec
 from mia_buffers.specmap import Facts, facts
 
@@ -219,3 +219,16 @@ def test_policy_error_lists_are_capped(spec_2d_mixed):
         "4",
         "… 3 more",
     ]
+
+
+def test_not_prepared_rows_are_out_with_their_rule(spec_2d):
+    plan = build_plan(spec_2d, "h", None, records(), prepared={U937})
+    rows = plan.rows_by_id
+    assert rows[U937].in_pool and rows[BCSS].rule == NOT_PREPARED and not rows[BCSS].in_pool
+    assert rows[BCSS].fit is not None and rows[BCSS].fit.ok and rows[BCSS].weight == 0.0 and rows[BCSS].splits == {}
+    assert plan.valid and rows[U937].weight == 1.0
+    assert "## Not prepared (1)" in plan.render_markdown()
+    assert build_plan(spec_2d, "h", None, records()).rows_by_id[BCSS].in_pool  # None: rule not applied
+    by_id = {row["id"]: row for row in plan.to_dict({U937: "prepared"})["rows"]}
+    assert by_id[U937]["prepared"] == "prepared" and by_id[BCSS]["prepared"] == "unprepared"
+    assert "prepared" not in plan.to_dict()["rows"][0]

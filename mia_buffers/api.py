@@ -20,11 +20,16 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .ledger import Ledger
+from .plan import build_plan
 from .sampler import Level, Volume, draw, fits, servable
+from .spec import SpecError, load_spec_text, spec_text_hash
+from .sync import scan_storage
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
+DATASET_STATES = ("in-progress", "prepared", "ineligible", "needs-human")  # no row = unprepared
+CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 Response = tuple[int, dict | None, dict[str, str]]
 
 
@@ -84,6 +89,25 @@ class ConsumerBody(_Strict):
     mode: Literal["local", "remote"] = "local"
 
 
+class RecordBody(_Strict):
+    path: str
+    record: dict
+
+    @model_validator(mode="after")
+    def _has_id(self) -> RecordBody:
+        if not isinstance(self.record.get("id"), str):
+            raise ValueError(f"{self.path}: the record has no string id")
+        return self
+
+
+class RecordsBody(_Strict):
+    records: list[RecordBody]
+
+
+class PlanBody(_Strict):
+    spec: str  # the spec's YAML text
+
+
 class HttpError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -121,18 +145,29 @@ ROUTES = [
     ("PUT", re.compile(r"^/assets/([a-z]+)/(.+)$"), "put_asset", "worker"),
     ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset", "read"),
     ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets", "read"),
+    ("PUT", re.compile(r"^/records/([^/]+)$"), "put_records", "worker"),
+    ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
+    ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
+    ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
+    ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
+    ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
+    ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
 ]
 
 
 class BufferService:
     """Routes → ledger operations. One train rng per buffer, seeded from the config; frozen lists seeded per split."""
 
-    def __init__(self, ledger: Ledger, stale_s: float = 300.0, *, token: str | None = None):
+    def __init__(
+        self, ledger: Ledger, stale_s: float = 300.0, *, token: str | None = None, storage_root: Path | None = None
+    ):
         self.ledger = ledger
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
+        self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
+        self._sync_lock = threading.Lock()
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if self.token is None:
@@ -230,6 +265,66 @@ class BufferService:
 
     def _list_assets(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"kind": kind, "assets": self.ledger.assets(kind)}, {}
+
+    # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
+
+    def _put_records(self, ref: str, *, query: dict[str, str], body: bytes) -> Response:
+        if not CATALOG_REF_RE.match(ref):
+            raise HttpError(422, f"ref {ref!r} is not a 40-hex commit")
+        records = [(item.path, item.record) for item in _parse(RecordsBody, body).records]
+        return 200, {"ref": ref, "count": self.ledger.put_records(ref, records)}, {}
+
+    def _catalogs(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"catalogs": self.ledger.catalogs()}, {}
+
+    def _put_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        try:
+            fields = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not isinstance(fields, dict):
+            raise HttpError(422, "a dataset is a JSON object")
+        if "state" in fields and fields["state"] not in DATASET_STATES:
+            raise HttpError(422, f"state must be one of {list(DATASET_STATES)}, got {fields['state']!r}")
+        return 200, self.ledger.put_dataset(record, fields), {}
+
+    def _get_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.dataset(record)
+        if row is None:
+            raise HttpError(404, f"no dataset row for {record}")
+        return 200, row, {}
+
+    def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
+
+    def _plan(self, *, query: dict[str, str], body: bytes) -> Response:
+        text = _parse(PlanBody, body).spec
+        try:
+            spec = load_spec_text(text)
+        except SpecError as error:
+            raise HttpError(422, str(error)) from None
+        ref = spec.catalog.ref
+        records = self.ledger.records(ref)
+        if not records:
+            raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
+        states = {row["id"]: row.get("state", "unprepared") for row in self.ledger.datasets()}
+        prepared = {record for record, state in states.items() if state == "prepared"}
+        plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared)
+        return 200, plan.to_dict(states), {}
+
+    def _sync_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
+        root = self.storage_root
+        if root is None:
+            raise HttpError(503, "the service has no storage_root")
+        if not self._sync_lock.acquire(blocking=False):
+            raise HttpError(409, "a datasets sync is running")
+        try:
+            # an unmounted or empty storage_root would demote every prepared row
+            if not (root.is_dir() and any(root.iterdir())):
+                raise HttpError(503, f"storage_root {root} is missing or empty; not syncing")
+            return 200, self.ledger.sync_datasets(scan_storage(root)), {}
+        finally:
+            self._sync_lock.release()
 
     def _add_consumer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)

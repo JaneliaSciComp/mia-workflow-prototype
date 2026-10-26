@@ -15,13 +15,17 @@ import re
 import shutil
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from mia_core.untrusted import read_untrusted
+import yaml
+
+from mia_core.untrusted import loads, read_untrusted
 
 CROP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 MAX_FILE = 64 << 20  # a crop file is a 256x256 PNG or a small JSON
+MAX_INDEX_FILE = 1 << 20  # binding.yaml or manifest.json, read by the service's scan of storage_root
 
 
 class Conflict(RuntimeError):
@@ -148,3 +152,32 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
     tmp.write_text(json.dumps({"crops": crops, "count": len(crops), "binding": binding}, indent=1))
     os.replace(tmp, dataset_dir / "manifest.json")
     return len(crops)
+
+
+def prepared_row(dataset_dir: Path) -> dict | None:
+    """The registry row of a prepared dataset folder, or None: prepared means a binding.yaml naming its record and
+    a manifest.json whose binding sha256 is that file's (a newer binding with crops not yet re-verified is not)."""
+    binding_bytes = read_untrusted(dataset_dir, "binding.yaml", MAX_INDEX_FILE, binary=True)
+    manifest = loads(read_untrusted(dataset_dir, "manifest.json", MAX_INDEX_FILE))
+    if binding_bytes is None or not isinstance(manifest, dict):
+        return None
+    binding_hash = hashlib.sha256(binding_bytes).hexdigest()
+    manifest_binding = manifest.get("binding")
+    if not isinstance(manifest_binding, dict) or manifest_binding.get("sha256") != binding_hash:
+        return None
+    try:
+        binding = yaml.safe_load(binding_bytes)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(binding, dict) or not isinstance(binding.get("record"), str):
+        return None
+    published = datetime.fromtimestamp((dataset_dir / "manifest.json").stat().st_mtime, UTC)
+    return {
+        "state": "prepared",
+        "record": binding["record"],
+        "folder": dataset_dir.name,
+        "binding_hash": binding_hash,
+        "binding_commit": binding.get("snippets_commit"),
+        "crops": count if isinstance(count := manifest.get("count"), int) else 0,  # one odd folder must not stop a scan
+        "published_at": published.isoformat(),
+    }

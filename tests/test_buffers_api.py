@@ -1,12 +1,30 @@
 """buffer-api: spec v0.5 §5 routes over the ledger, through handle() and once over a real socket."""
 
 import json
+import re
 import threading
 
 import httpx
+import yaml
 
 from mia_buffers.api import BufferService, make_server
 from mia_buffers.ledger import Ledger
+from mia_buffers.plan import load_records
+from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
+from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
+from tests.test_buffers_sync import write_prepared
+
+
+def _spec_2d_text() -> str:
+    """The fixture spec restricted to 2D, as the `spec_2d` fixture builds it, as YAML text."""
+    data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
+    data["select"]["where"]["dims"] = {"in": ["2D"]}
+    data["select"]["where"]["annotations"]["source"] = "any"
+    data["select"]["exclude"].update(ids=[ONE_CH], reasons={ONE_CH: "one channel"})
+    return yaml.safe_dump(data)
+
+
+SPEC_2D_TEXT = _spec_2d_text()
 
 CFG = {
     "spec_name": "s",
@@ -259,3 +277,65 @@ def test_assets_registry_and_refs_from_registered_volumes(tmp_path):
         "assets": [{"key": "/staged/a", "data": {"record": "rec", "ok": True}, "refs": ["b"]}],
     }
     assert call(s, "GET", "/assets/nope/x")[0] == 404
+
+
+def test_records_datasets_and_plan(tmp_path):
+    s = svc(tmp_path)
+    ref = "a" * 40
+    records = [{"path": p, "record": r} for p, r in load_records(FIXTURE_CATALOG)]
+    assert call(s, "PUT", f"/records/{ref}", payload={"records": records})[1]["count"] == len(records)
+    assert call(s, "PUT", "/records/main", payload={"records": []})[0] == 422
+    assert call(s, "PUT", f"/records/{ref}", payload={"records": [{"path": "p"}]})[0] == 422
+    assert call(s, "GET", "/catalogs")[1]["catalogs"][0]["ref"] == ref
+    text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {ref}", SPEC_2D_TEXT)  # the 2D fixture spec's text, at the synced ref
+    status, out, _ = call(s, "POST", "/plan", payload={"spec": text})
+    assert status == 200 and all(row["prepared"] == "unprepared" for row in out["rows"])
+    assert all(row["rule"] == "not prepared" for row in out["rows"] if row["fit"] and row["fit"]["ok"])
+    assert call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "crops": 16})[1]["crops"] == 16
+    assert call(s, "PUT", f"/datasets/{U937}", payload={"state": "nope"})[0] == 422
+    assert call(s, "PUT", f"/datasets/{U937}", payload=["state"])[0] == 422
+    assert call(s, "GET", f"/datasets/{U937}")[1]["state"] == "prepared"
+    assert call(s, "GET", "/datasets/absent")[0] == 404
+    assert [d["id"] for d in call(s, "GET", "/datasets", {"state": "prepared"})[1]["datasets"]] == [U937]
+    out = call(s, "POST", "/plan", payload={"spec": text})[1]
+    by_id = {row["id"]: row for row in out["rows"]}
+    assert by_id[U937]["prepared"] == "prepared" and by_id[U937]["admitted"] and by_id[U937]["weight"] > 0
+    status, out, _ = call(s, "POST", "/plan", payload={"spec": SPEC_2D_TEXT})  # the fixture's own ref is not synced
+    assert status == 409 and "mia-buffers catalog sync --ref ab6a013d5da39c80651ddc845915d034b2eae82a" in out["error"]
+    assert call(s, "POST", "/plan", payload={"spec": "schema_version: 2"})[0] == 422
+
+
+def test_sync_datasets_route(tmp_path):
+    root = tmp_path / "crops"
+    write_prepared(root / "confocal-human-u937", U937)
+    write_prepared(root / "tem-mouse-stale", "stale", match=False)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), storage_root=root)
+    s.ledger.put_dataset("busy", {"state": "in-progress"})
+    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 1, "demoted": 0}
+    assert call(s, "GET", "/datasets/stale")[0] == 404 and call(s, "GET", "/datasets/busy")[1]["state"] == "in-progress"
+    assert call(s, "GET", f"/datasets/{U937}")[1]["folder"] == "confocal-human-u937"
+    assert call(s, "POST", "/sync/datasets")[0] == 200
+    assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("POST", "/sync/datasets", {}, b"")[0] == 503
+    worker = BufferService(Ledger(tmp_path / "l3.sqlite"), token="t", storage_root=root)
+    assert worker.handle("POST", "/sync/datasets", {}, b"")[0] == 401
+
+
+def test_sync_refuses_a_missing_or_empty_storage_root(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_dataset("rec", {"state": "prepared", "folder": "rec"})
+    for root in (tmp_path / "unmounted", tmp_path / "empty"):
+        if root.name == "empty":
+            root.mkdir()
+        status, out, _ = call(BufferService(led, storage_root=root), "POST", "/sync/datasets")
+        assert status == 503 and out == {"error": f"storage_root {root} is missing or empty; not syncing"}
+    assert led.dataset("rec")["state"] == "prepared"
+
+
+def test_sync_409_while_running(tmp_path):
+    root = tmp_path / "crops"
+    write_prepared(root / "u937", U937)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), storage_root=root)
+    with s._sync_lock:
+        status, out, _ = call(s, "POST", "/sync/datasets")
+    assert status == 409 and out == {"error": "a datasets sync is running"}
+    assert s.ledger.datasets() == []
