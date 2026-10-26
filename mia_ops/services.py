@@ -302,6 +302,7 @@ class Temporal:
         for _ in range(60):
             if self.healthy():
                 print(f"temporal: started at {self.address}")
+                self._reported = True
                 return
             time.sleep(1)
         sys.exit(f"temporal: did not come up; see {self.log}")
