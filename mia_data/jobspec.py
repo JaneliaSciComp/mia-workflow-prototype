@@ -22,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from importlib.resources import files
 from pathlib import Path
 from string import Template
@@ -117,7 +118,7 @@ def archive_snapshot(
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with lock_dir(cfg).hold("snapshot", sha, _lock_owner(cfg), ttl_s=900, timeout_s=3600):  # one per sha at a time
+    with _snapshot_lock(cfg, sha):  # one fetch + extract per sha at a time
         if dest.exists():
             return dest
         repo = Mirror(cfg.paths.state_dir / "mirror" / mirror, git_url, tokens)
@@ -162,6 +163,10 @@ def archive_snapshot(
         return dest
 
 
+SNAPSHOT_LOCK_TTL_S = 900
+SNAPSHOT_LOCK_TIMEOUT_S = 3600
+
+
 def lock_dir(cfg: Config) -> LockDir:
     """The lock files on this host's local disk: `<paths.local_root>/locks/<kind>/<key>`."""
     if cfg.paths.local_root is None:
@@ -169,8 +174,12 @@ def lock_dir(cfg: Config) -> LockDir:
     return LockDir(cfg.paths.local_root / "locks")
 
 
-def _lock_owner(cfg: Config) -> str:
-    return f"{cfg.deployment} pid {os.getpid()}"
+def _snapshot_lock(cfg: Config, key: str) -> AbstractContextManager[None]:
+    """Blocks until this process holds the snapshot lock for `key` (a commit SHA)."""
+    # ponytail: `hold` does not heartbeat, so an extraction longer than 900 s could be taken over; the rename of
+    # the tmp dir to `dest` stays atomic. Upgrade: heartbeat from a thread.
+    owner = f"{cfg.deployment} pid {os.getpid()}"
+    return lock_dir(cfg).hold("snapshot", key, owner, ttl_s=SNAPSHOT_LOCK_TTL_S, timeout_s=SNAPSHOT_LOCK_TIMEOUT_S)
 
 
 def _env_digest(cfg: Config) -> str:
@@ -195,9 +204,7 @@ def harness_snapshot(cfg: Config, commit: str) -> Path:
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with lock_dir(cfg).hold(
-        "snapshot", commit, _lock_owner(cfg), ttl_s=900, timeout_s=3600
-    ):  # one per commit at a time
+    with _snapshot_lock(cfg, commit):  # one extract per commit at a time
         if dest.exists():
             return dest
         tmp = dest.with_name(f".{commit}.tmp")
