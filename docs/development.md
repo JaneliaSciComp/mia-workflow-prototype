@@ -266,13 +266,20 @@ builds untouched for `quota.hold_hours`.
 by the largest-remainder rule. Registration applies the row and never reads the spec. A plan written before D has no
 `split`; registration then falls back to the spec's fractions and seed with a logged warning.
 
-**Idle, keep, retire.** The keeper reads `GET /buffers` for each ready or idle buffer of a round. No consumer seen
-and no newer event for `idle.hours` (spec, default 72) signals `idle`: the issue gets `buffer:idle`. `buffer:keep`
-returns it to ready. After `retire_after_days` (spec, default 14) of idleness the keeper signals `retire`, as does a
-`buffer:retire` label. Retire calls `DELETE /buffers/<id>/refs`: the buffer's refs are released (the keeper may evict
-the data once the quota asks) and its draws are gzipped to `<state_dir>/archive/<buffer>.draws.jsonl.gz`, then
-deleted. Volumes and the config stay for the page. Both thresholds travel in the buffer config. Run
-`mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`. `GET /buffers` lists each buffer
+**Idle, keep, retire.** The keeper reads `GET /buffers` for each ready or idle buffer of a round (one buffer's
+failure, such as buffer-api refusing its status, is an error entry; the others are still watched; a config stored
+before D reads with the defaults). No consumer seen and no newer event for `idle.hours` (spec, default 72) signals
+`idle`: the issue gets `buffer:idle`. `buffer:keep` returns it to ready. After `retire_after_days` (spec, default
+14) of idleness, and only when no consumer was seen since the idle event, the keeper signals `retire`; the workflow
+acts on it only while the stage is `idle` (a keep since makes it stale). A `buffer:retire` label retires a ready or
+idle buffer. Retire calls `DELETE /buffers/<id>/refs`: the buffer's refs are released (the keeper may evict the data
+once the quota asks) and its draws are gzipped to `<state_dir>/archive/<buffer>.draws.jsonl.gz`, from a read-only
+connection outside the service's lock, then deleted up to the last seq seen at the start (a draw recorded meanwhile
+stays for the next retire). The worker then writes the `retired` event, after which `next`, `split` and
+`POST consumers` answer `410 buffer retired`. Volumes and the config stay for the page. Both thresholds travel in
+the buffer config. Run `mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`.
+`mia exec mia-buffers retire <buffer>` does the registry half by hand (refs and archive; it writes no event and
+leaves the issue's stage alone) and exits 1 when buffer-api refuses. `GET /buffers` lists each buffer
 with its latest event, volume and `missing` counts, servable volumes per split, the newest consumer `last_seen` and
 today's draws.
 
@@ -285,16 +292,31 @@ The rebuild runs alongside the ready loop: a `go` or a retire abandons it. The i
 weighting group falls below `ready.min_fraction`; a record whose raw cache is gone fails.
 
 **Whose signal.** The keeper's `idle`, `retire` and `degraded` name the buffer they are about; the workflow ignores
-one about another buffer (an earlier round's, left registered by a `go` from ready, never idles by itself). A
-`buffer:keep` or `buffer:retire` label while there is no ready or idle buffer (planning, review, sourcing, stragglers
-still sourcing, or a finished workflow) is refused with a comment at once.
+one about another buffer, but for a superseded one: a `go` from ready or idle records the buffer it leaves
+registered in `BufferState.superseded`, and the keeper's `retire` of it releases it (comment "superseded buffer
+`<id>` retired: refs released"); its `idle` writes nothing, so a buffer superseded while ready never idles by
+itself. A `buffer:keep` or `buffer:retire` label while there is no ready or idle buffer is refused with a comment at
+once: while datasets source (before ready, or stragglers after it) with "N datasets still sourcing; add
+`buffer:<label>` again once they settle", in planning, review or a finished workflow with "this issue has no ready
+or idle buffer".
+
+**Rebuilds of a shared artifact.** Two buffers whose datasets share an artifact both see it degraded; the first to
+take the raw lock rebuilds it. The second asks buffer-api again under the lock and registers the rebuilt pyramid
+as it is. A failed build next to a published artifact (not a rebuild of it) leaves that artifact's row `ready`. The
+keeper's `.building-*` sweep spares a build whose artifact row says `staging`, whatever its age; still, keep
+`quota.hold_hours` above the queue wait plus the stage walltime, for a build whose row write was lost.
 
 **One ticker.** Lock and quota waits share one timer per round: it ticks every `poll_minutes`, doubling while no
 dataset changes status, to at most 30 minutes, and runs only while someone waits. mia-data keeps its own backoff.
 
 **Restart.** The lifecycle sits behind `workflow.patched("d-lifecycle")` and the ticker behind `"d-tick"`, so a
-restart mid-round is safe; a round admitted before it finishes on the C path. `buffer_history_d.json` is the new
-replay fixture, the older three are untouched.
+restart mid-round is safe; a round admitted before it finishes on the C path. A run started before D does not answer
+`buffer:keep` or `buffer:retire` until it rolls over. Restart buffer-api before the worker, or with it: an old
+service rejects the new buffer config keys (`recipe`, `plan_hash`, `idle_hours`, `retire_after_days`,
+`auto_approve`), and rolling buffer-api back once D configs are stored breaks the routes that read them. Before the
+first D round, check the live issue's spec: a non-empty `splits.stratify_by` is now a plan error.
+`buffer_history_d.json` and `buffer_history_d_rebuild.json` (the degraded path) are the new replay fixtures, the
+older three are untouched; re-record each with the scoped `-k` in its test's docstring.
 
 ## Running a buffer from an issue (milestone 3)
 
