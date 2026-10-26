@@ -181,10 +181,14 @@ class Ledger:
         return newest[0] if newest else None
 
     def buffers(self) -> list[dict]:
-        """One summary per buffer, from stored rows only (never a stat): servable excludes volumes flagged missing."""
+        """One summary per buffer, from stored rows only (never a stat): servable excludes volumes flagged missing. A
+        buffer with events but no config yet (planned, never sourced) is listed with `config: None`."""
         midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         with self._lock:
-            configs = self._db.execute("SELECT id, config FROM buffers ORDER BY id").fetchall()
+            configs = self._db.execute(
+                "SELECT id, config FROM buffers UNION "
+                "SELECT DISTINCT buffer, NULL FROM buffer_events WHERE buffer NOT IN (SELECT id FROM buffers) ORDER BY 1"
+            ).fetchall()
         out = []
         for buffer, config in configs:
             volumes = self.volumes(buffer)
@@ -199,7 +203,7 @@ class Ledger:
             out.append(
                 {
                     "id": buffer,
-                    "config": json.loads(config),
+                    "config": json.loads(config) if config is not None else None,
                     "latest_event": self.latest_event(buffer),
                     "volumes": len(volumes),
                     "missing": sum(volume.missing for volume in volumes),
@@ -273,12 +277,21 @@ class Ledger:
         return [days[day] for day in sorted(days)]
 
     def last_hour(self, buffer: str) -> dict:
-        """{draws}: the buffer's draws in the last hour (the empty answers are the service's, kept in memory)."""
+        """{draws, requests}: the buffer's draws in the last hour and the `next` requests that served them (one `ts`
+        per request: record_draws stamps a request's draws together). The empty answers are the service's, in memory.
+        """
+        # ponytail: a successful `split` request records no draw, so it is not counted; count it in the service like
+        # the empty answers if the health line ever needs val/test traffic
+        since = time.time() - 3600
         with self._lock:
             (draws,) = self._db.execute(
-                "SELECT COUNT(*) FROM draws WHERE buffer = ? AND ts >= ?", (buffer, time.time() - 3600)
+                "SELECT COUNT(*) FROM draws WHERE buffer = ? AND ts >= ?", (buffer, since)
             ).fetchone()
-        return {"draws": draws}
+            (requests,) = self._db.execute(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT consumer, ts FROM draws WHERE buffer = ? AND ts >= ?)",
+                (buffer, since),
+            ).fetchone()
+        return {"draws": draws, "requests": requests}
 
     def put_kv(self, key: str, value: dict) -> None:
         with self._lock:

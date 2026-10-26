@@ -392,11 +392,15 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
   `prep:` labels (the service cannot list issues).
 
 Actions: Download spec YAML (a file), Open buffer issue and Request preparation (prefilled
-`https://github.com/<buffers_repo>/issues/new?title=&body=` links; the human adds `buffer:go` / `prep:go`). A link
+`https://github.com/<buffers_repo>/issues/new?labels=&title=&body=` links carrying `buffer:go` / `prep:go`; GitHub
+applies a label only for people with triage rights, so the body also asks for it). Open buffer issue is disabled
+while the plan has errors (with them as the reason; "request preparation first" when only unprepared records fit),
+and a record's landing link is shown only for an `http(s)` URL. A link
 over 8 KB falls back to a "copy YAML" button and a notice. With an empty registry the views say so ("No catalog
 synced; run `mia-buffers catalog sync`.").
 
-**Health line.** `empty / (draws + empty)` over the last hour, against the buffer's `health.max_empty_fraction`;
+**Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served draws,
+one `ts` each; a successful `split` call is not counted), against the buffer's `health.max_empty_fraction`;
 nothing acts on it. The empty count of the last hour is in memory, so a buffer-api restart resets it.
 
 **Restart order.** buffer-api first, then the worker: `BufferConfig` gained `max_empty_fraction` (default 0.05) and is

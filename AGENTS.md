@@ -37,6 +37,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
 - **A buffer never asks mia-data for a dataset; a `prep:go` issue does.** `MiaBuffer` fails an unprepared record;
   `MiaPrep` opens the `data:go` issues and follows them through the registry.
+- **The page is read-only and holds no token.** Its only actions are GitHub links; a route the page needs is a read
+  route (`tests/test_buffers_ui.py` enforces it).
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 
@@ -45,6 +47,3 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 Descriptive names (no single-letter attributes), a plain-language line on each module, class and non-obvious
 method, type hints on object parameters, line length 120. Mark deliberate shortcuts with a `# ponytail:` comment
 naming the ceiling and the upgrade path.
-
-- **The page is read-only and holds no token.** Its only actions are GitHub links; a route the page needs is a read
-  route (`tests/test_buffers_ui.py` enforces it).

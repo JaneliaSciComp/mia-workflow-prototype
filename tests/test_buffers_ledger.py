@@ -287,6 +287,12 @@ def test_buffers_summary_and_missing_flag(tmp_path):
     }
     ledger.set_volume_missing("b1", "c", False, "/staged/c")
     assert ledger.buffers()[0]["servable"] == {"train": 2}
+    ledger.add_event("b0", "planned", issue=3, event_id=None, detail="")  # planned, never sourced: no config yet
+    ledger.add_event("b1", "idle", issue=1, event_id=None, detail="")  # a configured buffer is listed once
+    planned, *rest = ledger.buffers()
+    assert [row["id"] for row in rest] == ["b1", "b2"]
+    assert planned["id"] == "b0" and planned["config"] is None and planned["latest_event"]["kind"] == "planned"
+    assert (planned["volumes"], planned["draws_today"], planned["servable"]) == (0, 0, {})
 
 
 def test_retire_keeps_a_draw_recorded_while_the_archive_is_written(tmp_path, monkeypatch):
@@ -322,7 +328,8 @@ def test_usage_counts_empty_answers_and_merges_live_draws(tmp_path):
     led.record_draws("b", "c1", [{"volume": "a"}, {"volume": "a"}])
     led.record_draws("b", "c2", [{"volume": "a"}])
     assert led.usage("b")[1] == {"day": day, "draws": 3, "consumers": 2, "empty": 2}
-    assert led.last_hour("b") == {"draws": 3} and led.last_hour("other") == {"draws": 0}
+    assert led.last_hour("b") == {"draws": 3, "requests": 2}  # two requests, three crops
+    assert led.last_hour("other") == {"draws": 0, "requests": 0}
     assert led.retire("b", tmp_path / "archive")["draws"] == 3
     assert led.usage("b")[1] == {"day": day, "draws": 3, "consumers": 2, "empty": 2}  # materialised, empty kept
     led.record_draws("b", "c3", [{"volume": "a"}])  # a draw after the retire adds to the materialised day

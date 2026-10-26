@@ -22,7 +22,8 @@ def requested_paths() -> set[tuple[str, str]]:
     found = set()
     for call in re.finditer(r"\b(?:api|load)\(\s*([\"'`])(/[^\"'`]*)\1", PAGE):
         path = re.sub(r"\$\{[^}]*\}", "x", call.group(2))
-        method = "POST" if 'method: "POST"' in PAGE[call.end() : call.end() + 40] else "GET"
+        options = re.match(r"\s*,\s*\{\s*method:\s*\"(\w+)\"", PAGE[call.end() :])
+        method = options.group(1) if options else "GET"
         found.add((method, path))
     return found
 
@@ -51,6 +52,8 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
 
 def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
     assert not re.search(r"authorization|bearer", PAGE, re.I)
+    assert not re.search(r"https?://\$\{", PAGE), "a host built from a template could be any host"
+    assert len(re.findall(r"\bfetch\(", PAGE)) == 1, "every request goes through api()"
     hosts = set(re.findall(r"https?://[^/\"'`$\s)]+/?", PAGE))
     allowed = {"https://github.com/", "https://fonts.googleapis.com/", "http://www.w3.org/"}
     assert {h if h.endswith("/") else h + "/" for h in hosts} <= allowed

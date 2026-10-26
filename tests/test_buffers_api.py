@@ -739,7 +739,7 @@ def test_usage_live_and_materialised(tmp_path, monkeypatch):
     assert status == 200 and out == {
         "buffer": "b",
         "days": expected,
-        "last_hour": {"draws": 4, "empty": 2},
+        "last_hour": {"draws": 4, "requests": 2, "empty": 2},  # requests and empty answers share a unit
         "max_empty_fraction": 0.05,
     }
     assert worker(s, "DELETE", "/buffers/b/refs")[1]["draws"] == 6

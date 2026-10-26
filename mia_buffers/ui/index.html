@@ -84,7 +84,7 @@ input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
 
 /* chart cards */
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:14px;margin-bottom:14px}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
 .grid2 .card{margin-bottom:0}
 .card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
@@ -237,7 +237,8 @@ const short = (s, n) => s ? String(s).slice(0, n || 8) : "";
 const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
 const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for (const [k,v] of Object.entries(attrs||{})) { if (v == null || v === false) continue; if (k==="class") n.className=v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? "" : v); } for (const k of kids) if (k != null && k !== false) n.append(k); return n; };
 const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k,v] of Object.entries(attrs||{})) n.setAttribute(k,v); return n; };
-const link = (href, text) => href ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
+// catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
+const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
 const pill = (text, kind) => el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
 const GOOD = new Set(["prepared","ready","servable","pool"]);
 const BAD = new Set(["failed","needs-human","missing","blocked","evicted","ineligible","stale"]);
@@ -413,11 +414,13 @@ async function copyText(text) {
     let ok = false; try { ok = document.execCommand("copy"); } catch { ok = false; } area.remove(); return ok;
   }
 }
-function issueAction(container, label, repo, title, intro, yaml, disabledReason) {
-  if (disabledReason) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: disabledReason }, label)); return; }
-  if (!repo) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: "GET /meta names no repo" }, label)); return; }
+function issueAction(container, label, repo, title, intro, yaml, labels, disabledReason) {
+  const disabled = reason => container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: reason }, label), el("span", { class: "small" }, reason));
+  if (disabledReason) return disabled(disabledReason);
+  if (!repo) return disabled("GET /meta names no repo");
   const body = `${intro}\n\n\`\`\`yaml\n${yaml}\`\`\`\n`;
-  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}`;
+  // the label is applied only for people with triage rights on the repo; the body sentence covers everyone else
+  const base = `https://github.com/${repo}/issues/new?labels=${encodeURIComponent(labels)}&title=${encodeURIComponent(title)}`;
   const url = `${base}&body=${encodeURIComponent(body)}`;
   if (url.length <= MAX_URL) { container.replaceChildren(el("a", { class: "btn", href: url, target: "_blank", rel: "noopener" }, label)); return; }
   const status = el("span", { class: "small" });
@@ -540,14 +543,28 @@ function viewRows() {
     && (!C.rawCached || x.raw?.data?.state === "ready")
     && (!C.stagedGeom || x.staged.some(a => a.data?.levels_key === key && stagedUsable(a))));
 }
+// Why a buffer issue for the current spec would be refused by the planner, or null when the plan is clean.
+function bufferBlocker() {
+  if (!S.ref) return "no catalog synced";
+  if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;
+  if (!S.plan) return "planning…";
+  const errors = S.plan.errors || [];
+  if (!errors.length) return null;
+  const waiting = (S.plan.rows || []).filter(r => r.rule === NOT_PREPARED).length;
+  if (errors.includes("no dataset admitted") && waiting) return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared: request preparation first`;
+  return "the plan has errors: " + errors.join("; ");
+}
 function renderActions() {
   const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
   issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
-    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Add the \`buffer:go\` label to plan it.`, yaml, S.ref ? null : "no catalog synced");
-  const todo = viewRows().filter(x => x.fits && x.prepared !== "prepared").map(x => x.id);
+    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Add the \`buffer:go\` label to plan it.`, yaml, "buffer:go", bufferBlocker());
+  // the Unprepared tile's rows: in progress is already on its way
+  const todo = viewRows().filter(x => x.fits && x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
+  const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records"
+    : C.rawCached || C.stagedGeom ? "no unprepared record passes the registry toggles" : "every fitting record is prepared or in progress";
   issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
     `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Add the \`prep:go\` label to hand them to mia-data.`,
-    toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : "every fitting record is prepared");
+    toPrepYaml(todo, S.ref, S.meta.catalog_repo), "prep:go", !S.plan ? "no plan yet" : todo.length ? null : none);
 }
 function renderPlanMessages() {
   const box = $("planMsgs"); box.replaceChildren();
@@ -566,7 +583,7 @@ function renderDatasets() {
   const fitting = rows.filter(x => x.fits), pool = rows.filter(x => x.inPool);
   const count = state => fitting.filter(x => x.prepared === state).length;
   const prepared = count("prepared"), inProgress = count("in-progress"), unprepared = fitting.length - prepared - inProgress;
-  const bytes = fitting.reduce((a, x) => a + (x.bytes || 0), 0);
+  const bytes = fitting.reduce((a, x) => a + (x.bytes || 0), 0), poolBytes = pool.reduce((a, x) => a + (x.bytes || 0), 0);
   const toFetch = fitting.filter(x => x.raw?.data?.state !== "ready").reduce((a, x) => a + (x.bytes || 0), 0);
   const dimsIn = [...new Set(fitting.map(x => x.dims))].sort();
   const top = pool.reduce((m, x) => Math.max(m, x.weight || 0), 0);
@@ -575,7 +592,7 @@ function renderDatasets() {
     tile("Prepared", num(prepared), "the buffer's pool today"),
     tile("In progress", num(inProgress), "mia-data is preparing them"),
     tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human · ${num(count("ineligible"))} ineligible`),
-    tile("Raw bytes to download", fmtBytes(toFetch), `of ${fmtBytes(bytes)} for every fitting dataset; the rest is cached`),
+    tile("Raw bytes", `${fmtBytes(poolBytes)} / ${fmtBytes(bytes)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(toFetch)} not in the raw cache`),
     tile("Dimensionalities", dimsIn.length ? dimsIn.join(" · ") : "none", dimsIn.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
     tile("Capacity", fmt(fitting.reduce((a, x) => a + (x.positions || 0), 0)), "non-overlapping coarsest crops in the fitting datasets"),
     tile("Top dataset share", pool.length ? pct(top) : "—", "of the crops drawn from the prepared pool"));
@@ -607,11 +624,12 @@ async function viewDatasets() {
 // ---- buffers
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
-async function viewBuffers(id) {
-  const root = $("buffersBody");
-  if (id) return viewBuffer(root, id);
-  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+async function viewBuffers(id, refresh) {
+  const root = $("buffersBody"), hash = location.hash;
+  if (id) return viewBuffer(root, id, refresh);
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   const out = await load("/buffers");
+  if (location.hash !== hash) return;  // the reader moved on while this loaded
   const buffers = out?.buffers || [];
   root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer; open one for its events, status board, volumes, consumers and usage."),
     table([
@@ -630,7 +648,7 @@ function sparkline(days) {
   if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");
   const W = 560, H = 130, left = 40, right = 8, top = 10, bottom = 22, plotW = W - left - right, plotH = H - top - bottom;
   const max = Math.max(1, ...days.map(d => Math.max(d.draws || 0, d.empty || 0)));
-  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Draws per day, and empty answers per day" });
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Crops drawn per day, and requests answered empty per day" });
   svg.append(svgEl("line", { x1: left, x2: W - right, y1: top + plotH, y2: top + plotH, class: "base" }));
   const t = svgEl("text", { x: left - 6, y: top + 8, "text-anchor": "end", class: "tick" }); t.textContent = fmt(max); svg.append(t);
   const slot = plotW / days.length, bw = Math.max(2, Math.min(18, slot * 0.7));
@@ -639,22 +657,23 @@ function sparkline(days) {
     svg.append(svgEl("rect", { x, y: top + plotH - h, width: bw, height: h, fill: "var(--accent)", rx: 2 }));
     if (d.empty) svg.append(svgEl("rect", { x: x + bw / 2 - 1, y: top + plotH - he, width: 2, height: he, fill: "var(--warn)" }));
     const hit = svgEl("rect", { x: left + slot * i, y: top, width: slot, height: plotH + bottom, fill: "transparent" }); svg.append(hit);
-    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " draws" }, { k: "var(--warn)", b: num(d.empty || 0), t: " empty answers" }, { t: `${num(d.consumers || 0)} consumers` }]);
+    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: " requests answered empty" }, { t: `${num(d.consumers || 0)} consumers` }]);
   });
   for (const [i, anchor] of [[0, "start"], [days.length - 1, "end"]]) { const l = svgEl("text", { x: i ? W - right : left, y: H - 6, "text-anchor": anchor, class: "tick" }); l.textContent = days[i].day; svg.append(l); }
-  return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "draws"), el("span", {}, el("i", { style: "background:var(--warn)" }), "empty answers (204)")), svg);
+  return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "crops drawn"), el("span", {}, el("i", { style: "background:var(--warn)" }), "requests answered empty (204)")), svg);
 }
 function healthLine(usage) {
   if (!usage) return el("div", { class: "small" }, "usage did not load");
-  const h = usage.last_hour || {}, total = (h.draws || 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
+  const h = usage.last_hour || {}, total = (h.requests ?? h.draws ?? 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
   if (!total) return el("div", { class: "health" }, `no requests in the last hour (degraded above ${pct(limit)} empty)`);
   const frac = (h.empty || 0) / total, bad = frac > limit;
   return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${num(total)} requests were empty (limit ${pct(limit)})`);
 }
-async function viewBuffer(root, id) {
-  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  const e = encodeURIComponent(id);
+async function viewBuffer(root, id, refresh) {
+  const hash = location.hash, e = encodeURIComponent(id);
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   const [status, board, events, usage] = await Promise.all([load(`/buffers/${e}/status`), load(`/buffers/${e}/datasets`), load(`/buffers/${e}/events`), load(`/usage/${e}`)]);
+  if (location.hash !== hash) return;  // a slow load of a buffer the reader already left
   const meta = S.meta, cfg = status?.config || {}, evs = (events?.events || []).slice().sort((a, b) => b.seq - a.seq);
   const retired = evs.find(x => x.kind === "retired");
   const archive = retired && (/archive (\S+)/.exec(retired.detail || "") || [])[1];
@@ -670,7 +689,7 @@ async function viewBuffer(root, id) {
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
     retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
     el("section", { class: "grid2" },
-      card("Usage", "Draws per day, and the requests answered empty.", healthLine(usage), sparkline(days.slice(-60)),
+      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", healthLine(usage), sparkline(days.slice(-60)),
         retired ? table([{ label: "day", cell: d => d.day }, { label: "draws", num: true, cell: d => num(d.draws) }, { label: "consumers", num: true, cell: d => num(d.consumers) }, { label: "empty", num: true, cell: d => num(d.empty) }], days, "no usage rows") : null),
       card("Config", null, status ? kv([
         ["spec", cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog", code(cfg.catalog_ref, 12)],
@@ -703,7 +722,7 @@ async function viewBuffer(root, id) {
 function meter(label, used, quota) {
   const over = quota > 0 && used > quota;
   return el("div", {}, el("div", { class: "label small" }, label),
-    el("div", { class: "meter" + (over ? " over" : ""), role: "meter", "aria-valuemin": "0", "aria-valuemax": String(quota || 0), "aria-valuenow": String(used || 0), "aria-label": label },
+    el("div", { class: "meter" + (over ? " over" : ""), role: "meter", "aria-valuemin": "0", "aria-valuemax": String(quota > 0 ? quota : used || 1), "aria-valuenow": String(used || 0), "aria-label": label },
       el("i", { style: `width:${quota > 0 ? Math.min(100, used / quota * 100) : 0}%` })),
     el("div", { class: "small" }, quota > 0 ? `${fmtBytes(used)} of ${fmtBytes(quota)} (${pct(used / quota)})` : `${fmtBytes(used)} · unlimited`));
 }
@@ -767,13 +786,19 @@ async function viewPreparation() {
 
 // ---- shell: top bar, theme, hash routing
 const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation };
+const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
+let refreshTimer = 0;
 function route() {
   const [name, ...rest] = location.hash.slice(1).split("/");
   const view = VIEWS[name] ? name : "datasets";
+  let arg = rest.join("/");
+  try { arg = decodeURIComponent(arg); } catch { /* a malformed escape: use the raw text */ }
   document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
   document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
   hideTip();
-  VIEWS[view](rest.length ? decodeURIComponent(rest.join("/")) : "");
+  clearInterval(refreshTimer);
+  if (view === "buffers") refreshTimer = setInterval(() => { hideTip(); VIEWS.buffers(arg, true); }, REFRESH_MS);
+  VIEWS[view](arg);
 }
 function renderTopbar() {
   const c = S.catalogs[0];
@@ -796,6 +821,8 @@ async function boot() {
   S.ref = S.catalogs[0]?.ref || null;
   renderTopbar();
   window.addEventListener("hashchange", route);
+  // a click on the current tab changes no hash: reload the view by hand
+  document.querySelectorAll("[data-tab]").forEach(a => a.addEventListener("click", () => { if (a.getAttribute("href") === location.hash) route(); }));
   route();
 }
 boot();
