@@ -170,8 +170,11 @@ renamed aside as `<key>.stale-<time>`. mia-data takes it around smoke and truste
 `mia-data <round> smoke|crop`); mia-buffers from before the fetch through the stage (owner
 `mia-buffers <round> <record>`), released while the dataset is blocked on quota and re-taken after; the keeper
 takes it (owner `keeper`) before evicting a record's assets and skips a held record. Snapshot extraction uses
-`snapshot/<sha>`. `GET /locks` lists the holders. Hand-run harness commands bypass all of this: run them only on
-records no round is touching. `assets sync` on a host other than the workers' sees none of their locks.
+`snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for quota) polls after
+`poll_minutes`, doubling each try up to 30 minutes. A re-take that had to wait for another owner re-reads the
+binding and the raw cache before going on. Hand-run harness commands bypass all of this: run them only on records
+no round is touching. `assets sync` on a host other than the workers' sees none of their locks, so there it refuses
+to run without `--dry-run`.
 
 **The fetch phase.** Per dataset the worker runs `harness fetch binding.yaml --record record.yaml --out fetch.json`
 with the cache read-write, the byte cap `limits.fetch_bytes` and the walltime `limits.fetch_walltime_min`, up to
@@ -183,39 +186,50 @@ is reused ("staged by <holder> while this buffer waited").
 **Offline staging.** The stage then runs offline (cache read-only, no hosts), unless a URL streams: then the stage
 keeps the cache read-write and the hosts. A dropped (hand-placed) dataset stages offline. Datasets are sourced heaviest
 first. Dataset statuses gain `waiting-lock`, `fetching` and `blocked` (quota); `blocked` and `waiting-drop` are dropped
-at `sourcing.dataset_timeout_days`, `waiting-lock` is not.
+at `sourcing.dataset_timeout_days`, `waiting-lock` is not. A blocked dataset holds no fetch slot (it waits for quota
+first) and re-checks the quota once it has waited for one. `check_quota` records `wanted` (the record's catalog size)
+and `blocked_at` on the raw row; the next fetch clears them. A fetch still partial after its attempts names the last
+job's id, state and exit code; `mia-buffers check` verifies the harness checkout has `harness fetch`.
 
 **Asset rows.** `state` is one of `fetching`, `staging`, `waiting-drop`, `ready`, `partial`, `missing`, `evicted`;
 rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `stream` (URLs that stream) and `files`.
 `PUT /assets/<kind>/<key>` merges fields into the row. `GET /assets/<kind>?state=&record=` filters and adds a `bytes`
 total. `POST /sync/assets` (worker token) scans the roots, skips a missing or empty root, lists `.building-*`
-directories and sets staged `last_used` from the draws.
+directories (staged builds and eviction asides in both roots) and sets staged `last_used` from the draws; a row
+without `last_used` gets its first scan's time. `raw_status` and a reusable staged find touch `last_used`.
 
 **The keeper.** `MiaCacheKeeper` runs on the schedule `<deployment>-keeper` every `keeper.minutes`
 (`mia-buffers schedule`, which `mia up` runs). One pass:
 
-1. datasets sync, assets sync, and a catalog sync of `main` when older than `keeper.catalog_sync_hours` (mark file
-   `<state_dir>/keeper/catalog-synced-at`);
+1. datasets sync and assets sync (each with a 10-minute timeout);
 2. stale builds: a `fetching` or `staging` row whose csub job is gone becomes `partial` or `missing`;
 3. `.building-*` directories older than `quota.hold_hours` are removed;
-4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes`, oldest `last_used` first, free
+4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes` (for raw, minus the largest
+   `wanted` of a fetch blocked within `hold_hours` when that is more than the headroom), oldest `last_used` first, free
    assets only: no refs, `ready`, unused for `hold_hours`, and for raw no mia-data round in progress on the record and
    the record's lock not held. An evicted row keeps `state: evicted`, `bytes: 0`. A directory is renamed to
-   `.building-evicted-*` before removal, so a half-removed artifact is never reused.
+   `.building-evicted-*` before removal, so a half-removed artifact is never reused;
+5. a catalog sync of `main` when older than `keeper.catalog_sync_hours` (mark file
+   `<state_dir>/keeper/catalog-synced-at`).
+
+The activity heartbeats every minute from a background task, whatever step it is in.
 
 `quota.*_bytes: 0` means unlimited (the default). When nothing is evictable and a root is still over quota, the keeper
 posts one comment on the newest open buffer issue. Only the buffers worker's keeper deletes under the roots; buffer-api
 never does.
 
 ```
-mia exec mia-buffers assets sync --dry-run   # report what a pass would do, delete nothing
-mia exec mia-buffers assets sync             # a pass by hand
+mia exec mia-buffers assets sync --dry-run   # report what a pass would do (see below)
+mia exec mia-buffers assets sync             # a pass by hand; refused on a host without <local_root>/locks
 ```
 
-**Deploying.** The workflow changes sit behind `workflow.patched("c-cache")` (buffers) and `"c-raw-lock"` (mia-data);
-rounds admitted before the restart finish on the old path. Replay fixtures: the old ones are untouched, `*_c.json` are
-recorded with the scoped `-k` commands named in their tests. Restart mia-data and mia-buffers with no buffer round in
-`buffer:sourcing` and no dataset round in a job; `mia up` applies the keeper schedule.
+`--dry-run` still runs the two syncs (reads and idempotent writes) and the catalog sync with its mark, but deletes
+nothing and writes no eviction, stale-build or over-quota state.
+
+**Deploying.** The workflow changes sit behind `workflow.patched("c-cache")` (buffers) and `"c-raw-lock"` (mia-data),
+so a restart in the middle of a round is safe: a round admitted before it finishes on the old path, staging with the
+cache read-write and without the raw lock until it ends. Replay fixtures: the old ones are untouched, `*_c.json` are
+recorded with the scoped `-k` commands named in their tests. `mia up` applies the keeper schedule.
 
 ## Running a buffer from an issue (milestone 3)
 

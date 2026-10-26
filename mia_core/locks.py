@@ -92,6 +92,9 @@ class LockDir:
                 moved = self._read(aside, kind, key)
                 if moved is None or (moved.owner, moved.heartbeat_at) != (observed.owner, observed.heartbeat_at):
                     # another taker got in first and we moved its live lock: put it back and lose
+                    # ponytail: a third taker that links in between our replace and this link-back wins, and the
+                    # moved lock's owner then holds a lock whose file is gone (it learns at its next heartbeat);
+                    # three takers within microseconds of a stale lock. Upgrade: renameat2(RENAME_NOREPLACE).
                     with contextlib.suppress(FileExistsError):
                         os.link(aside, path)
                     aside.unlink(missing_ok=True)

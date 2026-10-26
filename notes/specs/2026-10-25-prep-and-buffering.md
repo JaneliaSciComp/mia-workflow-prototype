@@ -675,6 +675,11 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 - The keeper takes the record's lock before evicting its assets (closes the §5.4 gap).
 - The lock is released while a dataset is `blocked` (§5.2), and a dataset that becomes
   blocked after the day limit is dropped.
+- Lock and quota waits back off: `poll_minutes`, doubling each try, at most 30 minutes (both workers).
+- A blocked dataset waits for quota without a fetch slot; after waiting for the slot it re-checks the quota.
+- The keeper evicts raw down to `quota - max(headroom, demand)`: `demand` is the largest `wanted` that
+  `check_quota` recorded on a raw row blocked within `hold_hours` (closes the §5.2/§5.4 gap).
+- A row from before `last_used` gets its `scanned_at` at the next scan, so the hold rule protects it.
 
 
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
