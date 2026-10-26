@@ -26,7 +26,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
-from mia_core.registry import Registry, best_effort
+from mia_core.registry import Registry
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -307,18 +307,17 @@ class Activities:
         return {**fields, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
-        """Put the dataset's row to the registry; never raises (a missing pins file or a down service is logged)."""
+        """Put the dataset's row to the registry; never raises: a missing pins file, a catalog record of the wrong
+        shape (it is untrusted) or a down service is logged and the stage goes on."""
         try:
             record = self._pins(round_id).record
         except (ValueError, OSError) as err:
             log.warning("round %s: registry write skipped: %s", round_id, err)
             return
-        # the module logger: best_effort takes a Logger, not activity.logger's adapter
-        best_effort(
-            lambda: registry.put_dataset(record, **self.dataset_fields(issue, round_id, stage)),
-            f"dataset {record}",
-            log,
-        )
+        try:
+            registry.put_dataset(record, **self.dataset_fields(issue, round_id, stage))
+        except Exception:
+            log.exception("%s: registry write skipped", record)
 
     async def _snapshot(self, sha: str) -> Path:
         return await asyncio.to_thread(snapshot, self.cfg, sha, self.gh_snippets.tokens)

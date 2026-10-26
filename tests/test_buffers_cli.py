@@ -188,7 +188,6 @@ def test_serve_takes_config_only(capsys):
 def _sync_cfg(tmp_path, monkeypatch):
     from test_buffers_config import make_cfg
 
-    from mia_buffers.config import Config  # noqa: F401
     from mia_core.registry import Registry
 
     (tmp_path / "tok").write_text("t")

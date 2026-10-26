@@ -253,6 +253,19 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     assert len(t.data.comments[1]) == 1 and "why" in t.data.comments[1][0]["body"]
 
 
+async def test_set_stage_with_a_malformed_record_still_comments(tmp_path, caplog):
+    t = _setup(tmp_path)
+    t.data.issues[1]["labels"] = [{"name": "data:new"}]
+    seen = _registry_seen(t)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
+    record_file.write_text(yaml.safe_dump({"imaging": "x"}))  # untrusted catalog data of the wrong shape
+    await t.a.set_stage(1, "needs-human", state, "why")
+    assert seen == [] and "rec-1: registry write skipped" in caplog.text
+    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:needs-human"]
+    assert len(t.data.comments[1]) == 1 and "why" in t.data.comments[1][0]["body"]
+
+
 async def test_comment_can_carry_the_binding(tmp_path):
     t = _setup(tmp_path)
     b = tmp_path / "b.yaml"
