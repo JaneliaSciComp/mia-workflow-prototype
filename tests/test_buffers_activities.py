@@ -537,6 +537,8 @@ async def test_refuse_label_removes_and_explains(acts):
     acts.gh.issues[7]["labels"].append({"name": "buffer:approve"})
     await acts.refuse_label(7, "buffer:approve", "it is older than the plan", "12")
     assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in acts.gh.comments[7][0]["body"]
+    await acts.refuse_label(7, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
+    assert (7, "prep:go") in acts.gh.removed and "Ignoring `prep:go`: busy" in acts.gh.comments[7][1]["body"]
     with pytest.raises(ApplicationError):
         await acts.refuse_label(7, "data:go", "x", "12")
 

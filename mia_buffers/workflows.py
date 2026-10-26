@@ -4,8 +4,9 @@
 against the catalog, a human approves the plan, then every dataset of the pool is sourced in parallel (a stage
 job, or a manual drop first) and registered with buffer-api as it becomes servable; the issue is `ready` once
 every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining. A dataset with no
-approved binding is handed to mia-data (`data:go` on its dataset issue) and waits for the poller's
-`dataset_update`; one that ends ineligible, or is still waiting at the timeout, is dropped from the plan.
+approved binding fails (`e-prep`): `MiaPrep` follows a `prep:go` preparation request, which hands its records to
+mia-data (`data:go` on their dataset issues) and polls the registry until each is prepared. A run from before
+`e-prep` still hands such a dataset to mia-data itself and waits for the poller's `dataset_update`.
 
 Workflow code does no I/O: every GitHub, filesystem, cluster and service interaction is an activity called by
 name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
@@ -39,6 +40,9 @@ with workflow.unsafe.imports_passed_through():
         FetchResult,
         KeeperReport,
         PlanResult,
+        PrepOutcome,
+        PrepPins,
+        PrepState,
         QuotaCheck,
         RawStatus,
         RegisterResult,
@@ -68,6 +72,9 @@ IDLE = (
 )
 RETIRED = "Retired: refs released; draws archived to {path}"
 RAW_GONE = "pyramid missing and raw cache gone"
+NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
+PREP_GO = "prep:go"
+PREP_SETTLED = ("prepared", "ineligible", "needs-human")  # registry states a preparation request stops following
 
 
 class RoundFailed(Exception):
@@ -100,6 +107,12 @@ def _abandoned(dataset: DatasetStatus) -> bool:
 
 def _rollover_due() -> bool:
     return workflow.info().is_continue_as_new_suggested()
+
+
+def _prep_requests() -> bool:
+    """e-prep: a record without a binding fails its dataset, for a `prep:go` issue prepares it; a run from before
+    hands it to mia-data and waits."""
+    return workflow.patched("e-prep")
 
 
 def _parse_time(iso: str | None) -> datetime | None:
@@ -761,6 +774,8 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
+            if _prep_requests():
+                return await self._fail(dataset, NOT_PREPARED)
             if not await self._await_dataset(dataset):
                 return  # dropped
             binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
@@ -810,6 +825,8 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
+            if _prep_requests():
+                return await self._fail(dataset, NOT_PREPARED)
             if not await self._await_dataset(dataset):
                 return  # dropped
             binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
@@ -1197,6 +1214,123 @@ class MiaBuffer:
             heartbeat_timeout=timedelta(minutes=3),
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
         )
+
+
+@workflow.defn(name="MiaPrep")
+class MiaPrep:
+    """One preparation request issue: each `prep:go` hands the records it names to mia-data and follows them in
+    the registry to `prep:done` (each prepared or ineligible) or `prep:needs-human`. One round at a time."""
+
+    @workflow.init
+    def __init__(self, state: PrepState) -> None:
+        self.state = state
+        self.go_events: list[LabelEvent] = []
+
+    @workflow.signal
+    def go(self, event: LabelEvent) -> None:
+        self.go_events.append(event)
+
+    @workflow.query
+    def status(self) -> PrepState:
+        return self.state
+
+    @workflow.run
+    async def run(self, state: PrepState) -> None:
+        rounds = 0
+        while True:
+            await workflow.wait_condition(lambda: bool(self.go_events) or _rollover_due())
+            if not self.go_events:
+                workflow.continue_as_new(self.state)  # idle, nothing queued
+            event = self.go_events.pop(0)
+            if self._seen(event):  # redelivery
+                continue
+            rounds += 1
+            try:
+                await self._round(event)
+            except ActivityError as error:  # an activity gave up (a bad request, the registry down too long)
+                await self._stage("needs-human", error_message(error))
+            await self._refuse_queued()
+            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self.go_events:
+                workflow.continue_as_new(self.state)
+
+    async def _act(self, name: str, *args: Any, seconds: int = 300, result_type: Any = None) -> Any:
+        """Run an activity with a per-attempt timeout and a six-hour retry budget."""
+        return await workflow.execute_activity(
+            name,
+            args=list(args),
+            start_to_close_timeout=timedelta(seconds=seconds),
+            schedule_to_close_timeout=timedelta(hours=6),
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            result_type=result_type,
+        )
+
+    def _seen(self, event: LabelEvent) -> bool:
+        if event.event_id in self.state.handled:
+            return True
+        self.state.handled = (self.state.handled + [event.event_id])[-50:]
+        return False
+
+    async def _stage(self, stage: str, detail: str = "") -> None:
+        """Swap the `prep:<stage>` label; the round's last one is best effort (the state says it either way)."""
+        self.state.stage = stage
+        try:
+            await self._act("set_prep_stage", self.state.issue, stage, self.state, detail)
+        except ActivityError as error:
+            if stage == "requested":
+                raise
+            workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
+
+    async def _refuse_queued(self) -> None:
+        """A go while a round runs is busy; one this run handled already is a redelivery."""
+        queued, self.go_events = self.go_events, []
+        for event in queued:
+            if self._seen(event):
+                continue
+            try:
+                await self._act("refuse_label", self.state.issue, PREP_GO, BUSY, event.event_id)
+            except ActivityError as error:  # best effort: the event is handled either way
+                workflow.logger.warning(
+                    "issue #%d: could not refuse %s: %s", self.state.issue, event.event_id, error_message(error)
+                )
+
+    async def _round(self, event: LabelEvent) -> None:
+        """Admit, nudge each record, then poll the registry until every record settles or the request times out."""
+        state = self.state
+        state.round_id = f"p{state.issue}-e{event.event_id}"
+        state.pins, state.outcomes, state.settled = None, [], {}
+        started = workflow.now()
+        pins = state.pins = await self._act(
+            "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
+        )
+        await self._stage("requested")
+        for record in pins.records:  # one at a time: each may open an issue in the datasets repo
+            outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
+            state.outcomes.append(outcome)
+            if outcome.outcome in PREP_SETTLED:
+                state.settled[record] = outcome.outcome
+        await self._act("comment_prep", state.issue, state.round_id, state.outcomes)
+        poll_minutes = (await self._act("limits", result_type=SourcingLimits)).poll_minutes
+        deadline, tries = started + timedelta(days=pins.timeout_days), 0
+        last: dict[str, str] = {}  # the latest registry state of each unsettled record
+        while (unsettled := [record for record in pins.records if record not in state.settled]) and (
+            workflow.now() < deadline
+        ):
+            await workflow.sleep(min(_backoff(poll_minutes, tries), deadline - workflow.now()))
+            tries += 1
+            await self._refuse_queued()  # ponytail: a busy go waits for the next poll (MAX_POLL_MINUTES at most)
+            last = await self._act("prep_status", unsettled, result_type=dict[str, str])
+            state.settled |= {record: value for record, value in last.items() if value in PREP_SETTLED}
+        prepared = [record for record in pins.records if state.settled.get(record) == "prepared"]
+        stuck = [record for record in pins.records if state.settled.get(record, "") not in ("prepared", "ineligible")]
+        if not stuck:
+            return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
+        humans = [f"`{record}`" for record in stuck if state.settled.get(record) == "needs-human"]
+        waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
+        detail = "; ".join(
+            ([f"needs a human on its dataset issue: {', '.join(humans)}"] if humans else [])
+            + ([f"not prepared after {pins.timeout_days:g} days: {', '.join(waiting)}"] if waiting else [])
+        )
+        await self._stage("needs-human", detail)
 
 
 @workflow.defn(name="MiaBufferPoll")

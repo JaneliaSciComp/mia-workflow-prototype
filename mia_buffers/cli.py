@@ -108,12 +108,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
     from autodev.jobs import CsubJobs
 
-    from . import workflows
     from .activities import Activities
-    from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper
-
-    # MiaPrep is registered once the prep workflow exists (getattr: an import of a missing name fails mypy)
-    prep = [workflow] if (workflow := getattr(workflows, "MiaPrep", None)) else []
+    from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep
 
     client = await _client(cfg)
     clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
@@ -129,7 +125,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, *prep],
+        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep],
         activities=activities.all(),
         max_concurrent_activities=8,
     )

@@ -45,7 +45,7 @@ from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
 from .api import BufferConfig
-from .config import HUMAN_LABELS, PREP_STAGES, STAGES
+from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
@@ -644,7 +644,10 @@ class Activities:
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
         """Remove a human label we won't act on and say why, once per event."""
-        if label not in {self.cfg.label(kind) for kind in HUMAN_LABELS} or not re.fullmatch(r"\d+", str(event_id)):
+        humans = {self.cfg.label(kind) for kind in HUMAN_LABELS} | {
+            self.cfg.prep_label(kind) for kind in PREP_HUMAN_LABELS
+        }
+        if label not in humans or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         await self.gh_issues.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
