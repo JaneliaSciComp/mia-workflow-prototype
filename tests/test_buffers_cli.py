@@ -183,3 +183,53 @@ def test_serve_takes_config_only(capsys):
         main(["serve", "--help"])
     out = capsys.readouterr().out
     assert "--config" in out and "--port" not in out
+
+
+def _sync_cfg(tmp_path, monkeypatch):
+    from test_buffers_config import make_cfg
+
+    from mia_buffers.config import Config  # noqa: F401
+    from mia_core.registry import Registry
+
+    (tmp_path / "tok").write_text("t")
+    (tmp_path / "tok").chmod(0o600)
+    cfg = make_cfg(tmp_path, service={"url": "http://svc:1", "token_file": str(tmp_path / "tok")})
+    monkeypatch.setattr(cli, "load_config", lambda path=None: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    return Registry
+
+
+def test_catalog_sync_loads_the_snapshot_into_the_registry(tmp_path, monkeypatch, capsys):
+    from mia_helpers import FakeGH as BaseGH
+
+    class FakeGH(BaseGH):
+        async def aclose(self):
+            pass
+
+    registry = _sync_cfg(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cli, "catalog_snapshot", lambda cfg_, ref, tokens: Path(__file__).parent / "fixtures/buffers/catalog"
+    )
+    monkeypatch.setattr(cli, "_gh", lambda cfg_, repo: FakeGH(repo, refs={"main": "c" * 40}))
+    sent = []
+    monkeypatch.setattr(registry, "put_records", lambda self, ref, records: sent.append((ref, len(records))) or {})
+    assert cli.main(["catalog", "sync"]) == 0 and sent == [("c" * 40, 6)]
+    assert cli.main(["catalog", "sync", "--ref", "d" * 40]) == 0 and sent[-1][0] == "d" * 40
+    assert "synced" in capsys.readouterr().out
+
+
+def test_datasets_sync_reports_counts_and_409(tmp_path, monkeypatch, capsys):
+    from mia_core.registry import RegistryError
+
+    registry = _sync_cfg(tmp_path, monkeypatch)
+    monkeypatch.setattr(registry, "sync_datasets", lambda self: {"prepared": 2, "demoted": 0})
+    assert cli.main(["datasets", "sync"]) == 0
+    out = capsys.readouterr().out
+    assert "2" in out and "prepared" in out and "demoted" in out
+
+    def busy(self):
+        raise RegistryError(409, "a datasets sync is running")
+
+    monkeypatch.setattr(registry, "sync_datasets", busy)
+    assert cli.main(["datasets", "sync"]) == 1
+    assert "try again" in capsys.readouterr().err

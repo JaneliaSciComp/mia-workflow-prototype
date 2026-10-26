@@ -79,7 +79,16 @@ def server(tmp_path):
     srv.shutdown()
 
 
-def test_register_end_to_end(tmp_path, spec_2d, server):  # noqa: F811
+@pytest.fixture
+def token_server(tmp_path):
+    """A buffer-api that wants the worker token `t` on its worker routes."""
+    srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t"), "127.0.0.1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
     root = tmp_path / "staged"
     write_stage_json(root / "u937")
     write_stage_json(root / "tiny", extent=512)
@@ -95,10 +104,13 @@ def test_register_end_to_end(tmp_path, spec_2d, server):  # noqa: F811
             {**ROW, "id": "unfit", "fit": {"ok": False}},
         ],
     }
-    out = register(server, "demo", plan, spec_2d, root, tensorizer="muvit-2d", split_sizes={"val": 4, "test": 4})
+    sizes = {"val": 4, "test": 4}
+    with pytest.raises(httpx.HTTPStatusError):  # worker routes need the token
+        register(token_server, "demo", plan, spec_2d, root, tensorizer="muvit-2d", split_sizes=sizes)
+    out = register(token_server, "demo", plan, spec_2d, root, tensorizer="muvit-2d", split_sizes=sizes, token="t")
     assert out["registered"] == ["u937/v0.zarr"] and out["skipped"] == {"bcss": "not staged"}
     assert out["refused"] == {"tiny/v0.zarr": "footprint 1024 exceeds 512×512"}
-    status = httpx.get(f"{server}/buffers/demo/status").json()
+    status = httpx.get(f"{token_server}/buffers/demo/status").json()
     assert status["servable"] == {"test": 1, "train": 1, "val": 1} and status["config"]["split_sizes"] == {
         "val": 4,
         "test": 4,

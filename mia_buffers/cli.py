@@ -19,10 +19,12 @@ import httpx
 from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from mia_core.fs import require_local_dir, require_secret_file
+from mia_core.registry import Registry, RegistryError, read_token
 from mia_data.cli import _gh, _github_clients
 from mia_data.jobspec import harness_pin
 
 from .config import HUMAN_LABELS, STAGES, load_config
+from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records
 from .spec import SpecError, load_spec, spec_hash
 
@@ -74,6 +76,11 @@ def _register(args: argparse.Namespace) -> int:
     except SpecError as error:
         print(f"spec refused: {error}", file=sys.stderr)
         return 1
+    try:
+        token = read_token(args.token_file) if args.token_file else None
+    except RegistryError as error:
+        print(error.message, file=sys.stderr)
+        return 1
     out = register(
         args.url,
         args.buffer,
@@ -82,12 +89,13 @@ def _register(args: argparse.Namespace) -> int:
         args.staged_root,
         tensorizer=args.tensorizer,
         split_sizes={"val": args.val_size, "test": args.test_size},
+        token=token,
     )
     print(json.dumps(out, indent=1))
     return 0 if out["registered"] else 2
 
 
-async def cmd_worker(cfg: Config) -> int:
+async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int:
     """Run the Temporal workers until SIGTERM: one for the workflows and short activities, one for the job waits."""
     from temporalio.worker import Worker
 
@@ -134,7 +142,7 @@ async def cmd_worker(cfg: Config) -> int:
     return 0
 
 
-async def cmd_schedule(cfg: Config) -> int:
+async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> int:
     """Create or update the Temporal schedule that runs MiaBufferPoll every poll interval."""
     from temporalio.client import (
         Schedule,
@@ -160,7 +168,7 @@ async def cmd_schedule(cfg: Config) -> int:
     return 0
 
 
-async def cmd_init_labels(cfg: Config) -> int:
+async def cmd_init_labels(cfg: Config, args: argparse.Namespace | None = None) -> int:
     """Create the stage and human labels (`buffer:*`) on the issue repo."""
     gh = _gh(cfg, cfg.github.buffers_repo)
     try:
@@ -172,7 +180,7 @@ async def cmd_init_labels(cfg: Config) -> int:
     return 0
 
 
-async def cmd_check(cfg: Config) -> int:
+async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
     """Try every external dependency and print one ok/BAD line per check."""
 
     def repo_check(repo: str):
@@ -254,14 +262,50 @@ async def cmd_check(cfg: Config) -> int:
     )
 
 
+async def cmd_catalog_sync(cfg: Config, args: argparse.Namespace) -> int:
+    """Load the catalog repo's records at `--ref` (default: main's head) into the registry."""
+    gh = _gh(cfg, cfg.github.catalog_repo)
+    try:
+        ref = args.ref or await gh.get_ref_sha("main")
+        snapshot = await asyncio.to_thread(catalog_snapshot, cfg, ref, gh.tokens)
+    finally:
+        await gh.aclose()
+    records = load_records(snapshot)
+    try:
+        with Registry.from_config(cfg.service) as registry:
+            registry.put_records(ref, records)
+    except RegistryError as error:
+        print(error.message, file=sys.stderr)
+        return 1
+    print(f"synced {ref} ({len(records)} records)")
+    return 0
+
+
+async def cmd_datasets_sync(cfg: Config, args: argparse.Namespace) -> int:
+    """Ask buffer-api to rescan mia-data's published datasets and reconcile its registry."""
+    try:
+        with Registry.from_config(cfg.service) as registry:
+            counts = registry.sync_datasets()
+    except RegistryError as error:
+        print("a datasets sync is running; try again" if error.status == 409 else error.message, file=sys.stderr)
+        return 1
+    print(", ".join(f"{name} {count}" for name, count in counts.items()))
+    return 0
+
+
 def _deployment(args: argparse.Namespace) -> int:
     """Run a command that needs mia_buffers.yaml and Temporal."""
     cfg = load_config(args.config)
     _setup_logging(cfg, args.command if args.command == "worker" else None)
-    command = {"worker": cmd_worker, "schedule": cmd_schedule, "init-labels": cmd_init_labels, "check": cmd_check}[
-        args.command
-    ]
-    return asyncio.run(command(cfg))
+    command = {
+        "worker": cmd_worker,
+        "schedule": cmd_schedule,
+        "init-labels": cmd_init_labels,
+        "check": cmd_check,
+        "catalog": cmd_catalog_sync,
+        "datasets": cmd_datasets_sync,
+    }[args.command]
+    return asyncio.run(command(cfg, args))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--staged-root", type=Path, required=True, help="<root>/<record id>/stage.json per record")
     reg.add_argument("--url", required=True, help="buffer-api base URL")
     reg.add_argument("--buffer", required=True, help="buffer id")
+    reg.add_argument("--token-file", type=Path, help="the service's worker token (needed when buffer-api has one)")
     reg.add_argument("--tensorizer", default="muvit-2d")
     reg.add_argument("--val-size", type=int, default=256, help="frozen val list length")
     reg.add_argument("--test-size", type=int, default=256, help="frozen test list length")
@@ -301,6 +346,13 @@ def main(argv: list[str] | None = None) -> int:
         if name == "schedule":
             command.add_argument("action", choices=["apply"])
         command.set_defaults(func=_serve if name == "serve" else _deployment)
+    for name, help_text in (("catalog", "the catalog repo's records"), ("datasets", "mia-data's published datasets")):
+        group = sub.add_parser(name, help=f"sync {help_text} into buffer-api's registry")
+        sync = group.add_subparsers(dest="action", required=True).add_parser("sync", help=f"sync {help_text}")
+        sync.add_argument("--config", help="path to mia.yaml (default: $MIA_CONFIG or ./mia.yaml)")
+        if name == "catalog":
+            sync.add_argument("--ref", help="catalog commit to load (default: head of main)")
+        sync.set_defaults(func=_deployment)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

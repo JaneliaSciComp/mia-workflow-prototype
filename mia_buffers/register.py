@@ -193,11 +193,21 @@ def _channels(volume: dict) -> int:
 
 
 def register(
-    url: str, buffer: str, plan: dict, spec: Spec, staged_root: Path, *, tensorizer: str, split_sizes: dict[str, int]
+    url: str,
+    buffer: str,
+    plan: dict,
+    spec: Spec,
+    staged_root: Path,
+    *,
+    tensorizer: str,
+    split_sizes: dict[str, int],
+    token: str | None = None,
 ) -> dict:
-    """Create the buffer and register every pooled, staged volume; returns registered / skipped / refused."""
+    """Create the buffer and register every pooled, staged volume (with the worker `token`, when the service
+    wants one); returns registered / skipped / refused."""
     out: dict = {"registered": [], "skipped": {}, "refused": {}}
-    with httpx.Client(base_url=url, timeout=30.0) as client:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with httpx.Client(base_url=url, timeout=30.0, headers=headers) as client:
         client.put(
             f"/buffers/{buffer}", json=buffer_config(plan, spec, tensorizer=tensorizer, split_sizes=split_sizes)
         ).raise_for_status()
