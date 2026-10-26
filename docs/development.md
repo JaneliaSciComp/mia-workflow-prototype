@@ -115,9 +115,11 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    `<local_root>/service/buffers.sqlite`, backups under `<state_dir>/backups/` every `keeper.minutes`, and every
    worker write needs the token from `service.token_file`. It holds no credentials and never reads pixels.
 4. **Register.** `mia-buffers register plan.json <spec> --staged-root <staged root> --url http://host:8765
-   --buffer <id> [--val-size 256 --test-size 256]` creates the buffer and registers every pooled, staged volume;
-   planes are split train/val/test by the spec's fractions (split key = volume plus plane). Unstaged records are
-   listed as skipped, volumes the coarsest crop does not fit as refused.
+   --buffer <id> --config mia.yaml [--plan-hash <hash>] [--val-size 256 --test-size 256]` creates the buffer and
+   registers every pooled, staged volume. Planes are split by each plan row's `split` policy (see "The buffer's
+   life after ready"; split key = volume plus plane). The buffer pins its recipe (tensorizer, params, the harness
+   commit and env digest read from the configuration's harness pin) and the plan's hash (default: sha256 of the plan
+   file's text). Unstaged records are listed as skipped, volumes the coarsest crop does not fit as refused.
 5. **Consume.** In an environment with the harness importable (the mia-snippets `harness/` pixi env, with this
    repository on `PYTHONPATH`), plus torch and muvit for training, the demo notebook's dataset cell becomes
 
@@ -230,6 +232,61 @@ nothing and writes no eviction, stale-build or over-quota state.
 so a restart in the middle of a round is safe: a round admitted before it finishes on the old path, staging with the
 cache read-write and without the raw lock until it ends. Replay fixtures: the old ones are untouched, `*_c.json` are
 recorded with the scoped `-k` commands named in their tests. `mia up` applies the keeper schedule.
+
+## The buffer's life after ready (milestone D)
+
+**Plan from the registry.** The `plan` activity reads the catalog's records and the set of prepared datasets from
+buffer-api, so the plan, the page and the worker agree on "prepared". A record that fits the spec but is not prepared
+is out of the pool with the rule `not prepared` (`sourcing.unprepared: skip` is the only value). When the registry has
+never seen the round's catalog ref, the activity syncs it first; the git snapshot under `work_root/_catalog/<ref>`
+stays because jobs read `record.yaml` from it. `plan.auto_approve: true` in the spec starts sourcing on `go` with a
+comment instead of waiting for `buffer:approve`. The plan's hash (sha256 of the `plan.json` text) goes to the buffer.
+
+**The status board and events.** The workflow writes one row per dataset on every status change
+(`PUT /buffers/<id>/datasets/<record>`, `GET /buffers/<id>/datasets`; the ten `DatasetStatus` values), and each stage
+label posts a lifecycle event (`POST`/`GET /buffers/<id>/events`; kinds `created`, `planned`, `approved`, `ready`,
+`idle`, `retired`, `needs-human`). Events need no buffer config: `created` and `planned` precede registration.
+`GET /records?ref=` serves the catalog's records (default: the latest synced ref).
+
+**Publish by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`, never
+the final directory. When `stage.json` says `ok`, the worker writes the `artifact` block into it (every input the
+artifact id hashes), then renames the build to `<artifact>`. The published directory is never written again. A rebuild
+lands under the same id through the same rename; a retry that finds the final directory reuses it. A failed build
+left in place before D is moved aside as `.building-stale-<artifact>-<ns>`; the keeper's `.building-*` sweep removes
+builds untouched for `quota.hold_hours`.
+
+**The recipe pin.** `PUT /buffers/<id>` carries `recipe` (tensorizer, params, `harness_commit`, `env_digest`) and
+`plan_hash`. `BufferDataset` compares the recipe's `harness_commit` with its checkout (`MIA_HARNESS_COMMIT`, else
+`git rev-parse HEAD` in the tensorizers directory) and raises on a difference.
+`BufferDataset(..., allow_recipe_mismatch=True)` warns instead and records the checkout's commit in each sample's
+`meta["harness_commit"]`.
+
+**The split policy.** Each pool row of the plan carries `split = {policy, fractions, seed}`: `holdout` (a record in
+`splits.holdout_ids`) puts every plane in test, `fractions` is a shuffle seeded by `splits.seed` and the volume id, cut
+by the largest-remainder rule. Registration applies the row and never reads the spec. A plan written before D has no
+`split`; registration then falls back to the spec's fractions and seed with a logged warning.
+
+**Idle, keep, retire.** The keeper reads `GET /buffers` for each ready or idle buffer of a round. No consumer seen
+and no newer event for `idle.hours` (spec, default 72) signals `idle`: the issue gets `buffer:idle`. `buffer:keep`
+returns it to ready. After `retire_after_days` (spec, default 14) of idleness the keeper signals `retire`, as does a
+`buffer:retire` label. Retire calls `DELETE /buffers/<id>/refs`: the buffer's refs are released (the keeper may evict
+the data once the quota asks) and its draws are gzipped to `<state_dir>/archive/<buffer>.draws.jsonl.gz`, then
+deleted. Volumes and the config stay for the page. Both thresholds travel in the buffer config. Run
+`mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`. `GET /buffers` lists each buffer
+with its latest event, volume and `missing` counts, servable volumes per split, the newest consumer `last_seen` and
+today's draws.
+
+**Degraded.** `GET /buffers/<id>/status` stats each volume's pyramid directory (when the service has a staged root)
+and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records, reason)`. The
+workflow stages those records again from the raw cache when it is `ready`, under the same artifact id, and goes
+`needs-human` only if a weighting group falls below `ready.min_fraction`; a record whose raw cache is gone fails.
+
+**One ticker.** Lock and quota waits share one timer per round: it ticks every `poll_minutes`, doubling while no
+dataset changes status, to at most 30 minutes, and runs only while someone waits. mia-data keeps its own backoff.
+
+**Restart.** The lifecycle sits behind `workflow.patched("d-lifecycle")` and the ticker behind `"d-tick"`, so a
+restart mid-round is safe; a round admitted before it finishes on the C path. `buffer_history_d.json` is the new
+replay fixture, the older three are untouched.
 
 ## Running a buffer from an issue (milestone 3)
 

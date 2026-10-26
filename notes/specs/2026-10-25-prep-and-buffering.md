@@ -682,6 +682,37 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 - A row from before `last_used` gets its `scanned_at` at the next scan, so the hold rule protects it.
 
 
+**Built in D (2026-10-26).** Deviations from this spec and rulings made during the build:
+
+- Every workflow change sits behind `workflow.patched` (`d-lifecycle`, `d-tick`); `buffer_history_d.json` is new,
+  the three older fixtures are untouched.
+- `degraded` carries the records: the keeper signals `degraded(records, reason)`, the workflow, which knows the
+  groups and `ready.min_fraction`, re-stages them from the raw cache and goes `needs-human` only below the floor.
+- Idle and retire are detected by the keeper from `GET /buffers` and delivered as signals; `buffer:keep` and
+  `buffer:retire` come from the poller like `go`. The thresholds travel in the buffer config.
+- `health.max_empty_fraction` is accepted by the spec model and reported nowhere yet (F's page shows it).
+- `usage` rows are F: a retire archives the draws to `<state_dir>/archive/<buffer>.draws.jsonl.gz` and deletes
+  them, and `GET /buffers` counts today's draws live.
+- The plan reads records and the prepared set from the registry (syncing the ref when it lacks it); the git
+  snapshot stays because jobs read `record.yaml` from it.
+- `plan_hash` is the sha256 of the `plan.json` text; `spec_hash` is unchanged.
+- The hand `register` CLI pins the recipe from the harness pin of `--config` and takes `--plan-hash` or hashes
+  the plan file.
+- `sourcing.unprepared: skip` is the only value; the field is validated.
+- One ticker per round (`poll_minutes`, doubling while no dataset made progress, at most 30 minutes) replaces the C
+  backoff timers in the lock and quota waits; it runs only while a dataset waits. mia-data keeps its backoff.
+- The state also keeps `idle_hours` and `retire_after_days` (from the `plan` result) so the idle comment can
+  name them.
+- A failed build left in the final directory before D is moved aside as `.building-stale-<artifact>-<ns>` on
+  publish.
+- `GET /buffers/<id>/status` stats pyramids only when the service has a staged root (a dev service has none).
+- A plan row without `split` (a plan.json written before D) falls back to the spec's fractions and seed with a
+  logged warning, instead of failing registration.
+- The events routes do not require the buffer's config: `created` and `planned` precede `create_buffer`.
+- A retire appends to an existing archive; `seq` restarts at 1 after a retire.
+- Lifecycle signals that arrive while stragglers still source wait until the stragglers settle. After a `go`
+  during ready or idle the old buffer stays registered, and the keeper's signals carry no buffer id.
+
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 
 ## 11. Open questions (defaults in bold)
