@@ -612,6 +612,16 @@ async def test_check_quota(acts, server):
     assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=20)
     acts.cfg.quota.raw_bytes = 110
     assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=20)
+    # a resumed fetch: the record's own partial cache is not counted twice (other 60 + own 30 + expected 50)
+    real.put_asset("raw", "other-record", {"bytes": 60})
+    real.put_asset("raw", U937, {"bytes": 30, "state": "partial"})
+    for row in plan["rows"]:
+        row["bytes"] = 50 if row["id"] == U937 else row["bytes"]
+    plan_path.write_text(json.dumps(plan))
+    acts.cfg.quota.raw_bytes = 100
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=50)
+    acts.cfg.quota.raw_bytes = 110
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=50)
 
 
 async def test_prepare_fetch_makes_a_workspace_per_attempt(acts):

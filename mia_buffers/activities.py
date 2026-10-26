@@ -669,13 +669,18 @@ class Activities:
     @mia_permanent_errors
     async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
         """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
-        limit). A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        limit). The record's own row is left out of the total, so a resumed fetch does not count its partial
+        cache twice. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
         limit = int(self.cfg.quota.raw_bytes)
         if limit == 0:
             return QuotaCheck(True)
         expected = int(self._row(round_id, record).get("bytes") or 0)
-        used = int((await asyncio.to_thread(self.registry.assets, "raw"))["bytes"])
-        over_by = used + expected - limit
+        listing = await asyncio.to_thread(self.registry.assets, "raw")
+        own = next((asset.get("data") or {} for asset in listing["assets"] if asset.get("key") == record), {})
+        counted = own.get("state") not in ("missing", "evicted")  # the rows the registry's `bytes` total sums
+        own_bytes = own.get("bytes")
+        own_bytes = own_bytes if counted and type(own_bytes) is int else 0
+        over_by = int(listing["bytes"]) - own_bytes + expected - limit
         return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
 
     @activity.defn(name="prepare_fetch")
