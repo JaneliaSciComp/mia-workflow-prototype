@@ -768,3 +768,26 @@ Milestones A, B and C are independent of each other; D needs B and C; E needs B;
    for now**; if a second worker host is ever wanted, the registry lease in §5.5 is the swap, callers unchanged.
 9. **Which local disk.** `/scratch` on the service host is local XFS; whether it is purged on a schedule decides
    whether the hourly SQLite backup is a safety net or the actual store. **Assume durable until told otherwise.**
+
+**Built in F (2026-10-26).** Deviations from this spec and rulings made during the build:
+
+- `GET /meta` exposes the repo names, root URLs, quotas and keeper cadence (names, not credentials); this relaxes
+  "never `github`" for the service to names only.
+- The keeper's last pass is stored by the worker with `PUT /keeper` (a `kv` table) and read with `GET /keeper`; one
+  best-effort PUT per pass.
+- Usage rows are materialised on retire and computed live for an unretired buffer; `204` answers are counted per
+  `(buffer, day)`. A day present in both sums the two (materialised alone would zero a day holding only a `204` row).
+  `GET /usage/<buffer>` adds `last_hour` and `max_empty_fraction`; nothing acts on it. The last-hour empty count is
+  in memory.
+- The buffer's spec YAML is not stored; the page shows the config and links to the issue.
+- Open `prep:*` issues cannot be listed without GitHub access; the page shows the registry's `in-progress` and
+  `needs-human` rows and a GitHub search link.
+- "Buffers using it" comes from the `refs` on `GET /assets/raw`. The composed spec covers the page's controls; the
+  rest takes the grammar's defaults, and the same text goes to `POST /plan`.
+- The issue links set no labels; the human adds `buffer:go` / `prep:go`.
+- The volumes card shows the union of `status.draws` keys and `missing` (no route lists volumes).
+- Needs-human rows show `reason` when present, else "see the issue" (mia-data writes no reason).
+- Two readings of "pool": the counts, the modality chart and Request preparation use every fitting dataset (in the
+  pool or `not prepared`); weight share and the heaviest list use the prepared pool, the only rows the plan weighs.
+- No browser test in CI: the route-coverage test, the service tests and an operator run cover the page.
+- Restart buffer-api before the worker (`max_empty_fraction` on the strict `BufferConfig`).

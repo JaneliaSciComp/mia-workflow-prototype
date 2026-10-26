@@ -45,3 +45,6 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 Descriptive names (no single-letter attributes), a plain-language line on each module, class and non-obvious
 method, type hints on object parameters, line length 120. Mark deliberate shortcuts with a `# ponytail:` comment
 naming the ceiling and the upgrade path.
+
+- **The page is read-only and holds no token.** Its only actions are GitHub links; a route the page needs is a read
+  route (`tests/test_buffers_ui.py` enforces it).

@@ -375,6 +375,34 @@ poller. `prep_history.json` and `buffer_history_e.json` are the new replay fixtu
 pins the pre-E `waiting-dataset` path (recorded with `_prep_requests` patched off, replayed with the real one); the
 older buffer fixtures are untouched.
 
+## The page (milestone F)
+
+buffer-api serves one read-only page at `/` on `service.url` (static files under `/ui/`). It holds no token: it
+fetches only read routes (and `POST /plan`, which carries the spec text and writes nothing), and every action that
+needs an identity is a GitHub link. `tests/test_buffers_ui.py` fails if the page requests a route that does not
+exist or is a worker route, uses an `Authorization` header, or calls a host other than github.com and Google Fonts.
+
+- **Datasets** reads `/meta`, `/catalogs`, `/records?ref=`, `/datasets`, `/assets/raw|staged` and runs the controls'
+  spec through `POST /plan` (debounced 300 ms): fit funnel, charts, records table.
+- **Buffers** reads `/buffers`, then per buffer `/buffers/<id>/status`, `/events`, `/datasets` and `/usage/<id>`
+  (config, health line, daily draws, board, consumers).
+- **Cache** reads `/assets/*`, `/locks`, `/keeper` and the quotas from `/meta`: meters, tables, the keeper card
+  (the last pass the worker stored with `PUT /keeper`, or "has not reported a pass yet").
+- **Preparation** reads `/datasets`: in-progress and needs-human rows with issue links, plus a GitHub search for
+  `prep:` labels (the service cannot list issues).
+
+Actions: Download spec YAML (a file), Open buffer issue and Request preparation (prefilled
+`https://github.com/<buffers_repo>/issues/new?title=&body=` links; the human adds `buffer:go` / `prep:go`). A link
+over 8 KB falls back to a "copy YAML" button and a notice. With an empty registry the views say so ("No catalog
+synced; run `mia-buffers catalog sync`.").
+
+**Health line.** `empty / (draws + empty)` over the last hour, against the buffer's `health.max_empty_fraction`;
+nothing acts on it. The empty count of the last hour is in memory, so a buffer-api restart resets it.
+
+**Restart order.** buffer-api first, then the worker: `BufferConfig` gained `max_empty_fraction` (default 0.05) and is
+strict, so a new worker against an old buffer-api gets 422 on `PUT /buffers/<id>`. Existing ledgers gain the `usage`
+and `kv` tables on open.
+
 ## Running a buffer from an issue (milestone 3)
 
 The deployment reads its `mia-buffers` block of `mia.yaml` (`mia.yaml.example`; `buffers_repo` is the issue repo, `storage_root` is
