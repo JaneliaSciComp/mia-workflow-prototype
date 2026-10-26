@@ -76,7 +76,9 @@ def _where(where: Where, f: Facts) -> str | None:
             return f"annotation source {f.annotation_source or 'unknown'} not in {_allowed(source)}"
     largest = f.largest_raw
     if where.min_size_voxels and largest is not None and largest.voxels < where.min_size_voxels:
-        return f"largest raw array has {largest.voxels} voxels < min_size_voxels {where.min_size_voxels}"
+        return (
+            f"largest raw array under min_size_voxels {where.min_size_voxels}"  # no per-record text: rules are counted
+        )
     return None
 
 

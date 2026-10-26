@@ -35,7 +35,7 @@ def test_example_spec_over_fixture_catalog(spec):
     assert decisions["synthetic-em-2d-dup"].rule == "license unknown and allow_unknown is false"
     assert decisions["synthetic-em-2d-1ch"].rule == "admitted"
     assert decisions["janelia-hemibrain-v1-2-fib-sem-connectome"].rule == "admitted"
-    assert decisions[MITOLAB].rule == "largest raw array has 50176 voxels < min_size_voxels 1000000.0"
+    assert decisions[MITOLAB].rule == "largest raw array under min_size_voxels 1000000.0"
 
 
 def test_dedup_keeps_first_by_path(spec):

@@ -196,6 +196,9 @@ def test_render_plan_comment_truncates():
         "https://b/w",
     )
     assert len(body) <= 61_000 and "truncated" in body and "https://b/w" in body
+    assert "of 3000 seen" in body  # an older plan.json, every record a row
+    plan = {"spec_name": "s", "spec_hash": "h", "catalog_ref": REF, "errors": [], "rows": rows[:2], "n_seen": 1940}
+    assert "2 in the pool of 1940 seen" in render_plan_comment(plan, None)
 
 
 def test_plan_comment_lists_dropped_records():

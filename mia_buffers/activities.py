@@ -300,7 +300,7 @@ class Activities:
             plan.valid,
             plan.errors[:20],
             pool,
-            len(plan.rows),
+            plan.n_seen,
             spec.ready.min_fraction,
             spec.sourcing.dataset_timeout_days,
             list(spec.sampling.levels),

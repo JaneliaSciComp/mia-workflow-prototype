@@ -28,7 +28,7 @@ def render_plan_comment(plan: dict, link: str | None, dropped: dict[str, str] | 
         f"**Plan** for `{safe_text(plan.get('spec_name'))}` · spec `{safe_text(str(plan.get('spec_hash'))[:12])}` · "
         f"catalog `{safe_text(str(plan.get('catalog_ref') or 'unpinned')[:12])}`",
         "",
-        f"{len(pool)} in the pool of {len(rows)} seen.",
+        f"{len(pool)} in the pool of {plan.get('n_seen', len(rows))} seen.",  # older plan.json: every record is a row
         "",
     ]
     if plan.get("errors"):

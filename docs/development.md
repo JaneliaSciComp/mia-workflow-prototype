@@ -176,7 +176,8 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    `buffer:go`. The poller (every `temporal.poll_minutes`) turns the label into a signal and removes it; only a
    person with write access counts.
 2. **Planning.** The worker pins the round (`state_dir/rounds/<round>/`: `spec.yaml`, `pins.json`), archives the
-   catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan; `plan.md` and `plan.json` land
+   catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan (one row per record selection
+   admitted, the rest as a count per rule under `excluded`); `plan.md` and `plan.json` land
    in the round directory and in the browsable `work_root/issue-<n>/<round>/`. Everything sourcing needs is
    checked here: a record mia-data could not place (no single modality family and organism, the rule behind
    `<dataset folder>`) or whose voxel size is unknown stays out of the pool with that reason, and each pool

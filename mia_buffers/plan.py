@@ -6,6 +6,7 @@ JSON (plan.json) and markdown (the plan comment). Pure functions over Spec and F
 from __future__ import annotations
 
 import dataclasses
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,13 +70,18 @@ class Plan:
     spec_name: str
     spec_hash: str
     catalog_ref: str | None
-    rows: list[Row]
+    rows: list[Row]  # the records selection admitted (in the pool or not) and the unreadable ones
     errors: list[str]
     warnings: list[str]
+    excluded: dict[str, int] = field(default_factory=dict)  # selection rule -> how many records it threw out
 
     @property
     def valid(self) -> bool:
         return not self.errors
+
+    @property
+    def n_seen(self) -> int:
+        return len(self.rows) + sum(self.excluded.values())
 
     @property
     def rows_by_id(self) -> dict[str, Row]:
@@ -84,6 +90,7 @@ class Plan:
     def to_dict(self, states: dict[str, str] | None = None) -> dict:
         """The plan as JSON; with `states` (record id → dataset state) each row also carries `prepared`."""
         data = dataclasses.asdict(self)
+        data["n_seen"] = self.n_seen
         if states is not None:
             for row in data["rows"]:
                 row["prepared"] = states.get(row["id"], "unprepared")
@@ -101,7 +108,7 @@ class Plan:
         if self.warnings:
             lines += ["## Warnings", "", *(f"- {_cell(warning)}" for warning in self.warnings), ""]
         pool = [row for row in self.rows if row.in_pool]
-        lines += [f"## Records ({len(pool)} in the pool, {len(self.rows)} seen)", ""]
+        lines += [f"## Records ({len(pool)} in the pool, {self.n_seen} seen)", ""]
         lines += [
             "| id | decision | rule | dims | modality | channels | voxel nm | positions | weight | split preview |",
             "|---|---|---|---|---|---|---|---|---|---|",
@@ -127,6 +134,15 @@ class Plan:
                 splits,
             ]
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
+        if self.excluded:
+            lines += [
+                "",
+                f"## Excluded by selection ({sum(self.excluded.values())})",
+                "",
+                "| rule | records |",
+                "|---|---|",
+            ]
+            lines += [f"| {_cell(rule)} | {count} |" for rule, count in self.excluded.items()]
         not_prepared = [row.id for row in self.rows if row.rule == NOT_PREPARED]
         if not_prepared:
             lines += [
@@ -311,7 +327,11 @@ def build_plan(
         except Exception as error:  # one malformed record is a row with a reason, never a failed plan
             rows.append(_unreadable_row(path, record, f"{type(error).__name__}: {error}"))
     decisions: list[Decision] = decide_all(all_facts, spec.select)
+    excluded: Counter[str] = Counter()
     for f, decision in zip(all_facts, decisions, strict=True):
+        if not decision.admitted:  # a catalog of thousands against a spec naming a few: a count per rule, not a row
+            excluded[decision.rule] += 1
+            continue
         largest = f.largest_raw
         row = Row(
             id=f.id,
@@ -355,4 +375,4 @@ def build_plan(
     warnings = list(spec.warnings)
     if "content_hash" in spec.select.dedup.by:
         warnings.append(CONTENT_HASH_WARNING)
-    return Plan(spec.name, spec_hash, catalog_ref, rows, errors, warnings)
+    return Plan(spec.name, spec_hash, catalog_ref, rows, errors, warnings, dict(excluded.most_common()))

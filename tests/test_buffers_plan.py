@@ -90,11 +90,13 @@ def test_valid_2d_plan(spec_2d):
     plan = build_plan(spec_2d, "h", None, records())
     assert plan.valid and plan.errors == []
     assert {r.id for r in plan.rows if r.admitted and r.fit is not None and r.fit.ok} == {BCSS, U937}
-    assert plan.rows_by_id[ONE_CH].rule == "excluded by id: one channel"
+    assert ONE_CH not in plan.rows_by_id and plan.excluded["excluded by id: one channel"] == 1
+    assert plan.n_seen == len(records()) and set(plan.rows_by_id) == {BCSS, U937}
     assert plan.rows_by_id[BCSS].notes == ["download_method other: needs a manual drop (spec v0.4 §3)"]
     assert plan.rows_by_id[U937].splits == {"train": 20, "val": 3, "test": 2}
     assert plan.rows_by_id[U937].weight == pytest.approx(10 / (10 + 906**0.5), rel=1e-3)
-    assert plan.rows_by_id[DUP].weight == 0 and plan.rows_by_id[MITOLAB].rule.startswith("largest raw array has 50176")
+    assert DUP not in plan.rows_by_id and MITOLAB not in plan.rows_by_id
+    assert any(rule.startswith("largest raw array under min_size_voxels") for rule in plan.excluded)
     assert plan.warnings == [
         "sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)",
         "dedup.by content_hash is not available; doi used",
@@ -117,16 +119,21 @@ def test_no_dataset_admitted(spec):
     assert plan.errors == ["no dataset admitted"]
 
 
-def test_markdown_has_one_row_per_record_and_errors_first(spec, spec_2d):
-    text = build_plan(
-        spec_with(spec, **{"select.where.annotations.source": "any"}), "h", "abc", records()
-    ).render_markdown()
+def test_markdown_has_one_row_per_admitted_record_and_errors_first(spec, spec_2d):
+    plan = build_plan(spec_with(spec, **{"select.where.annotations.source": "any"}), "h", "abc", records())
+    text = plan.render_markdown()
     assert text.index("## Errors") < text.index("| id |")
     for record_id in F:
-        assert text.count(f"| {record_id} |") == 1
+        assert text.count(f"| {record_id} |") == (1 if record_id in plan.rows_by_id else 0)
+    assert f"## Excluded by selection ({sum(plan.excluded.values())})" in text
+    for rule, count in plan.excluded.items():
+        assert f"| {rule} | {count} |" in text
+    assert f"({len([r for r in plan.rows if r.in_pool])} in the pool, {len(F)} seen)" in text
     valid = build_plan(spec_2d, "h", None, records())
     assert "## Errors" not in valid.render_markdown() and isinstance(valid, Plan)
-    assert valid.to_dict()["rows"][0]["id"] == F[sorted(F, key=lambda i: F[i].path)[0]].id
+    assert [row["id"] for row in valid.to_dict()["rows"]] == [
+        row.id for row in sorted(valid.rows, key=lambda r: r.path)
+    ]
 
 
 def test_record_without_technical_is_a_row_not_a_crash(spec_2d):
@@ -147,7 +154,7 @@ def _record(**overrides) -> dict:
 def test_markdown_escapes_record_text(spec_2d_mixed):
     evil = _record(id="evil | pool | admitted", doi=None, license={"spdx": "x\ny|z", "url": None})
     text = build_plan(spec_2d_mixed, "h", None, [*records(), ("datasets/2D/TEM/zz-evil.yaml", evil)]).render_markdown()
-    assert "| evil \\| pool \\| admitted | out | license x y\\|z not in allowed |" in text
+    assert "| license x y\\|z not in allowed | 1 |" in text  # the excluded-rule table escapes the record's text too
     assert "\n| pool |" not in text
 
 
@@ -163,7 +170,7 @@ def test_malformed_record_is_a_row_not_a_crash(spec_2d_mixed):
     assert plan.rows_by_id["bad-arrays"].rule.startswith("record unreadable: AttributeError")
     assert plan.rows_by_id["bad-yaml"].rule == "record unreadable: ParserError: while parsing"
     assert plan.valid is False or plan.valid is True  # the plan was built either way
-    assert len(plan.rows) == len(records()) + 2
+    assert plan.n_seen == len(records()) + 2 and plan.to_dict()["n_seen"] == plan.n_seen
 
 
 def test_positions_counts_depth_for_3d(spec):
