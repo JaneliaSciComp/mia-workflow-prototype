@@ -499,7 +499,7 @@ class BufferService:
             for index, volume in enumerate(volumes):
                 missing = not os.path.isdir(volume.path)
                 if missing != volume.missing:
-                    self.ledger.set_volume_missing(buffer, volume.id, missing)
+                    self.ledger.set_volume_missing(buffer, volume.id, missing, volume.path)
                     volumes[index] = replace(volume, missing=missing)
         splits = sorted({split for volume in volumes for split in volume.split_planes})
         return (

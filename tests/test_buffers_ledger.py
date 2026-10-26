@@ -262,7 +262,9 @@ def test_buffers_summary_and_missing_flag(tmp_path):
     ledger.put_buffer("b2", {})
     ledger.put_volume("b1", vol("a"))
     ledger.put_volume("b1", vol("c"))
-    ledger.set_volume_missing("b1", "c", True)
+    ledger.set_volume_missing("b1", "c", True, "/elsewhere")  # a stat of an old path changes nothing
+    assert not ledger.volumes("b1")[1].missing
+    ledger.set_volume_missing("b1", "c", True, "/staged/c")
     assert [volume.missing for volume in ledger.volumes("b1")] == [False, True]
     ledger.add_event("b1", "ready", issue=1, event_id=None, detail="")
     cid = ledger.add_consumer("b1", INFO)
@@ -283,5 +285,5 @@ def test_buffers_summary_and_missing_flag(tmp_path):
         "consumers_seen": None,
         "draws_today": 0,
     }
-    ledger.set_volume_missing("b1", "c", False)
+    ledger.set_volume_missing("b1", "c", False, "/staged/c")
     assert ledger.buffers()[0]["servable"] == {"train": 2}

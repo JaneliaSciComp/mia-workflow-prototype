@@ -123,11 +123,14 @@ class Ledger:
             rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
         return [_volume_from(json.loads(row[0])) for row in rows]
 
-    def set_volume_missing(self, buffer: str, volume_id: str, missing: bool) -> None:
+    def set_volume_missing(self, buffer: str, volume_id: str, missing: bool, path: str) -> None:
+        """Set the flag only while the volume is still registered at `path`, the one stat'ed: a volume re-registered
+        at a new path meanwhile keeps its own flag."""
         with self._lock:
             self._db.execute(
-                "UPDATE volumes SET data = json_set(data, '$.missing', json(?)) WHERE buffer = ? AND id = ?",
-                (json.dumps(missing), buffer, volume_id),
+                "UPDATE volumes SET data = json_set(data, '$.missing', json(?)) WHERE buffer = ? AND id = ? "
+                "AND json_extract(data, '$.path') = ?",
+                (json.dumps(missing), buffer, volume_id, path),
             )
 
     # --- a buffer's status board, lifecycle events and summary: what the page shows -------------
@@ -205,24 +208,31 @@ class Ledger:
     def retire(self, buffer: str, archive_dir: Path | None) -> dict:
         """Drop the buffer's references and, archived first to `<archive_dir>/<buffer>.draws.jsonl.gz`, its draws,
         in one transaction; with no `archive_dir` the draws are kept. Volumes and the config stay for the page.
-        A later retire appends to the archive (copied into the new file), never overwrites it."""
+        A later retire appends to the archive (copied into the new file), never overwrites it; seq restarts at 1
+        after a retire, so it is not unique within an archive."""
         archive = archive_dir / f"{buffer}.draws.jsonl.gz" if archive_dir is not None else None
+        # ponytail: the archive is written under the service-wide lock inside BEGIN IMMEDIATE, so every request for
+        # every buffer stalls for as long as this buffer's draws take to gzip; upgrade: archive from a separate read
+        # connection, then delete `seq <= archived max` in a short transaction
         with self._transaction() as db:
             drawn = 0
             if archive is not None:
-                rows = db.execute(
-                    "SELECT seq, consumer, ts, descriptor FROM draws WHERE buffer = ? ORDER BY seq", (buffer,)
-                ).fetchall()
-                if rows:
+                (any_draws,) = db.execute("SELECT EXISTS (SELECT 1 FROM draws WHERE buffer = ?)", (buffer,)).fetchone()
+                if any_draws:
                     archive.parent.mkdir(parents=True, exist_ok=True)
                     tmp = archive.with_name(archive.name + ".tmp")
                     with gzip.open(tmp, "wt") as out:
                         if archive.exists():
                             with gzip.open(archive, "rt") as earlier:
                                 shutil.copyfileobj(earlier, out)
-                        for seq, consumer, ts, descriptor in rows:
+                        rows = db.execute(
+                            "SELECT seq, consumer, ts, descriptor FROM draws WHERE buffer = ? ORDER BY seq", (buffer,)
+                        )
+                        for seq, consumer, ts, descriptor in rows:  # streamed: never the whole table in memory
                             line = {"seq": seq, "consumer": consumer, "ts": ts, "descriptor": json.loads(descriptor)}
                             out.write(json.dumps(line) + "\n")
+                    # ponytail: a failure between this replace and COMMIT keeps the draws, so a retry appends their
+                    # lines again; dedupe by whole line (seq restarts at 1 after a retire, so it is not unique)
                     os.replace(tmp, archive)
                 drawn = db.execute("DELETE FROM draws WHERE buffer = ?", (buffer,)).rowcount
             refs = db.execute("DELETE FROM refs WHERE buffer = ?", (buffer,)).rowcount
