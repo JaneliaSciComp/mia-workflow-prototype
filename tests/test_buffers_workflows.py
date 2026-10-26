@@ -1128,3 +1128,20 @@ async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
         "release_lock",
         "timer",
     ]
+
+
+async def test_cache_keeper_runs_one_keep_pass(env):
+    from mia_buffers.models import KeeperReport
+    from mia_buffers.workflows import MiaCacheKeeper
+
+    passes = []
+
+    @activity.defn(name="keep")
+    async def keep(dry_run: bool = False) -> KeeperReport:
+        passes.append(dry_run)
+        return KeeperReport(scanned=2, evicted=["staged a"], over_quota={"raw": 5})
+
+    tq = f"tq-{uuid.uuid4()}"
+    async with Worker(env.client, task_queue=tq, workflows=[MiaCacheKeeper], activities=[keep]):
+        report = await env.client.execute_workflow(MiaCacheKeeper.run, id=f"wf-{uuid.uuid4()}", task_queue=tq)
+    assert report == KeeperReport(scanned=2, evicted=["staged a"], over_quota={"raw": 5}) and passes == [False]

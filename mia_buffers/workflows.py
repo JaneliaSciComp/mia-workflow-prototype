@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         DropResult,
         FetchJobArgs,
         FetchResult,
+        KeeperReport,
         PlanResult,
         QuotaCheck,
         RawStatus,
@@ -760,4 +761,19 @@ class MiaBufferPoll:
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=1),
             result_type=list[str],
+        )
+
+
+@workflow.defn(name="MiaCacheKeeper")
+class MiaCacheKeeper:
+    """Run on a schedule: the `keep` activity's housekeeping of the raw and staged roots."""
+
+    @workflow.run
+    async def run(self) -> KeeperReport:
+        return await workflow.execute_activity(
+            "keep",
+            start_to_close_timeout=timedelta(minutes=25),
+            heartbeat_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),  # the next scheduled pass is the retry
+            result_type=KeeperReport,
         )

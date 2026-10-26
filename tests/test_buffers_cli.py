@@ -232,3 +232,55 @@ def test_datasets_sync_reports_counts_and_409(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(registry, "sync_datasets", busy)
     assert cli.main(["datasets", "sync"]) == 1
     assert "try again" in capsys.readouterr().err
+
+
+def test_schedule_applies_the_poll_and_the_keeper(tmp_path, monkeypatch, capsys):
+    _sync_cfg(tmp_path, monkeypatch)
+    applied = []
+
+    async def fake_client(cfg_):
+        return None
+
+    async def fake_apply(client, schedule_id, schedule):
+        applied.append((schedule_id, schedule.spec.intervals[0].every, schedule.policy.overlap.name))
+        return "created"
+
+    monkeypatch.setattr(cli, "_client", fake_client)
+    monkeypatch.setattr(cli, "apply_schedule", fake_apply)
+    assert cli.main(["schedule", "apply"]) == 0
+    assert [(name, every.total_seconds(), overlap) for name, every, overlap in applied] == [
+        ("mia-buffers-poll", 120.0, "SKIP"),
+        ("mia-buffers-keeper", 1800.0, "SKIP"),
+    ]
+    assert capsys.readouterr().out.splitlines() == [
+        "created schedule mia-buffers-poll",
+        "created schedule mia-buffers-keeper",
+    ]
+
+
+def test_assets_sync_runs_one_keeper_pass(tmp_path, monkeypatch, capsys):
+    from mia_buffers.activities import Activities
+    from mia_buffers.models import KeeperReport
+
+    class FakeGH:
+        async def aclose(self):
+            pass
+
+    _sync_cfg(tmp_path, monkeypatch)
+    passes = []
+
+    async def keep(self, dry_run=False):
+        passes.append(dry_run)
+        return KeeperReport(scanned=3, evicted=["staged a"], errors=[] if dry_run else ["sync datasets: down"])
+
+    async def login(cfg_):
+        return "bot"
+
+    monkeypatch.setattr(cli, "_github_clients", lambda cfg_: (FakeGH(), FakeGH(), FakeGH()))
+    monkeypatch.setattr(cli, "_gh", lambda cfg_, repo: FakeGH())
+    monkeypatch.setattr(cli, "bot_login", login)
+    monkeypatch.setattr(Activities, "keep", keep)
+    assert cli.main(["assets", "sync", "--dry-run"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "scanned: 3" and "evicted: ['staged a']" in out and "errors: []" in out
+    assert cli.main(["assets", "sync"]) == 1 and passes == [True, False]  # a failed step is exit 1

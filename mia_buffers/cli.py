@@ -29,6 +29,8 @@ from .plan import build_plan, load_records
 from .spec import SpecError, load_spec, spec_hash
 
 if TYPE_CHECKING:
+    from autodev.github import GitHub
+
     from .config import Config
 
 
@@ -102,7 +104,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
-    from .workflows import MiaBuffer, MiaBufferPoll
+    from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper
 
     client = await _client(cfg)
     clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
@@ -118,7 +120,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaBufferPoll],
+        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper],
         activities=activities.all(),
         max_concurrent_activities=8,
     )
@@ -143,7 +145,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create or update the Temporal schedule that runs MiaBufferPoll every poll interval."""
+    """Create or update the Temporal schedules: MiaBufferPoll every poll interval, MiaCacheKeeper every
+    `keeper.minutes`."""
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -153,18 +156,20 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> i
         ScheduleSpec,
     )
 
-    from .workflows import MiaBufferPoll
+    from .workflows import MiaBufferPoll, MiaCacheKeeper
 
     client = await _client(cfg)
-    schedule_id = f"{cfg.deployment}-poll"
-    schedule = Schedule(
-        action=ScheduleActionStartWorkflow(
-            MiaBufferPoll.run, id=f"{cfg.deployment}-poll-run", task_queue=cfg.task_queue
-        ),
-        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
-        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
-    )
-    print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
+    for name, run, minutes in (
+        ("poll", MiaBufferPoll.run, cfg.temporal.poll_minutes),
+        ("keeper", MiaCacheKeeper.run, cfg.keeper.minutes),
+    ):
+        schedule_id = f"{cfg.deployment}-{name}"
+        schedule = Schedule(
+            action=ScheduleActionStartWorkflow(run, id=f"{schedule_id}-run", task_queue=cfg.task_queue),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=minutes))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+        )
+        print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
     return 0
 
 
@@ -262,23 +267,54 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
     )
 
 
+async def catalog_sync(cfg: Config, gh: GitHub, registry: Registry, ref: str | None = None) -> tuple[str, int]:
+    """Load the catalog repo's records at `ref` (default: main's head) into the registry; (ref, record count)."""
+    ref = ref or await gh.get_ref_sha("main")
+    snapshot = await asyncio.to_thread(catalog_snapshot, cfg, ref, gh.tokens)
+    records = load_records(snapshot)
+    await asyncio.to_thread(registry.put_records, ref, records)
+    return ref, len(records)
+
+
 async def cmd_catalog_sync(cfg: Config, args: argparse.Namespace) -> int:
     """Load the catalog repo's records at `--ref` (default: main's head) into the registry."""
     gh = _gh(cfg, cfg.github.catalog_repo)
     try:
-        ref = args.ref or await gh.get_ref_sha("main")
-        snapshot = await asyncio.to_thread(catalog_snapshot, cfg, ref, gh.tokens)
-    finally:
-        await gh.aclose()
-    records = load_records(snapshot)
-    try:
         with Registry.from_config(cfg.service) as registry:
-            registry.put_records(ref, records)
+            ref, count = await catalog_sync(cfg, gh, registry, args.ref)
     except RegistryError as error:
         print(error.message, file=sys.stderr)
         return 1
-    print(f"synced {ref} ({len(records)} records)")
+    finally:
+        await gh.aclose()
+    print(f"synced {ref} ({count} records)")
     return 0
+
+
+async def cmd_assets_sync(cfg: Config, args: argparse.Namespace) -> int:
+    """Run one cache keeper pass here, without Temporal (`--dry-run`: report, change nothing on disk)."""
+    from dataclasses import asdict
+
+    from autodev.jobs import CsubJobs
+
+    from .activities import Activities
+
+    clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
+    try:
+        activities = Activities(
+            cfg,
+            *clients[:3],
+            jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"),
+            bot=await bot_login(cfg),
+            gh_datasets=clients[3],
+        )
+        report = await activities.keep(dry_run=args.dry_run)
+    finally:
+        for gh in clients:
+            await gh.aclose()
+    for name, value in asdict(report).items():
+        print(f"{name}: {value}")
+    return 1 if report.errors else 0
 
 
 async def cmd_datasets_sync(cfg: Config, args: argparse.Namespace) -> int:
@@ -304,6 +340,7 @@ def _deployment(args: argparse.Namespace) -> int:
         "check": cmd_check,
         "catalog": cmd_catalog_sync,
         "datasets": cmd_datasets_sync,
+        "assets": cmd_assets_sync,
     }[args.command]
     return asyncio.run(command(cfg, args))
 
@@ -346,12 +383,18 @@ def main(argv: list[str] | None = None) -> int:
         if name == "schedule":
             command.add_argument("action", choices=["apply"])
         command.set_defaults(func=_serve if name == "serve" else _deployment)
-    for name, help_text in (("catalog", "the catalog repo's records"), ("datasets", "mia-data's published datasets")):
+    for name, help_text in (
+        ("catalog", "the catalog repo's records"),
+        ("datasets", "mia-data's published datasets"),
+        ("assets", "the raw and staged roots (one cache keeper pass: syncs, stale builds, evictions)"),
+    ):
         group = sub.add_parser(name, help=f"sync {help_text} into buffer-api's registry")
         sync = group.add_subparsers(dest="action", required=True).add_parser("sync", help=f"sync {help_text}")
         sync.add_argument("--config", help="path to mia.yaml (default: $MIA_CONFIG or ./mia.yaml)")
         if name == "catalog":
             sync.add_argument("--ref", help="catalog commit to load (default: head of main)")
+        if name == "assets":
+            sync.add_argument("--dry-run", action="store_true", help="report what would be removed; remove nothing")
         sync.set_defaults(func=_deployment)
     args = parser.parse_args(argv)
     return int(args.func(args))

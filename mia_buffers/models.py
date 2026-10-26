@@ -124,6 +124,23 @@ class RawStatus:
 
 
 @dataclass
+class KeeperReport:
+    """One pass of the cache keeper: the asset sync's counts, what it evicted, reset (`stale`, "<kind> <key>
+    <state>") and removed (`.building-*` paths), the bytes each kind is still over quota by, the catalog it synced
+    ("<ref> (<n> records)", "" when not due) and the steps that failed."""
+
+    scanned: int = 0
+    missing: int = 0
+    new: int = 0
+    evicted: list[str] = field(default_factory=list)
+    stale: list[str] = field(default_factory=list)
+    removed_building: list[str] = field(default_factory=list)
+    over_quota: dict[str, int] = field(default_factory=dict)
+    catalog: str = ""
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
 class StageResult:
     """The stage job's stage.json, reduced."""
 

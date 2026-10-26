@@ -791,3 +791,154 @@ async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, serve
     }
     acts.registry = Registry("http://127.0.0.1:9")  # the rows are best effort: the job id still comes back
     assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, [], 1)) == "j42"
+
+
+# -- the cache keeper
+
+
+@pytest.fixture
+def keeper_server(acts, tmp_path):
+    """A buffer-api scanning the activities' own roots, wanting the worker token `t`, and the registry client."""
+    import threading
+
+    from mia_buffers.api import BufferService, make_server
+    from mia_buffers.ledger import Ledger
+
+    paths = acts.cfg.paths
+    paths.staged_root.mkdir(parents=True, exist_ok=True)
+    (paths.storage_root / "unprepared").mkdir()  # an empty storage root reads as unmounted
+    service = BufferService(
+        Ledger(tmp_path / "keeper.sqlite"),
+        token="t",
+        storage_root=paths.storage_root,
+        raw_root=paths.raw_root,
+        staged_root=paths.staged_root,
+    )
+    srv = make_server(service, "127.0.0.1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    acts.registry = Registry(f"http://127.0.0.1:{srv.server_address[1]}", "t")
+    yield acts.registry
+    acts.registry.close()
+    srv.shutdown()
+
+
+def staged_artifact(acts, name: str, size: int) -> Path:
+    artifact = acts.cfg.paths.staged_root / "p256-l1-2-4" / "rec" / name
+    artifact.mkdir(parents=True)
+    (artifact / "stage.json").write_text("{}")
+    (artifact / "v0.bin").write_bytes(b"x" * size)
+    return artifact
+
+
+def referenced(registry, artifact: str) -> None:
+    """Register a volume of buffer `b` staged as `artifact`, so the buffer references it."""
+    from test_buffers_api import CFG, body
+
+    registry.request("PUT", "/buffers/b", json=CFG)
+    registry.request("PUT", "/buffers/b/volumes/v", json={**body(), "artifact": artifact})
+
+
+def catalog_not_due(acts) -> None:
+    mark = acts.cfg.paths.state_dir / "keeper" / "catalog-synced-at"
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text(str(int(__import__("time").time())))
+
+
+async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, monkeypatch):
+    import time
+
+    from mia_buffers import cli
+    from mia_core.fs import dir_bytes
+
+    registry = keeper_server
+    monkeypatch.setattr(cli, "catalog_snapshot", lambda cfg_, ref, tokens: CATALOG)
+    acts.gh_catalog.refs["main"] = REF
+    free, held = staged_artifact(acts, "free", 1000), staged_artifact(acts, "held", 10)
+    referenced(registry, "held")
+    old = time.time() - 49 * 3600  # unused longer than quota.hold_hours (48)
+    for key in ("free", "held"):
+        registry.put_asset("staged", key, {"last_used": old})
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = dir_bytes(held) + 100, 0
+
+    dry = await acts.keep(dry_run=True)
+    assert dry.errors == [] and dry.scanned == 2 and dry.new == 0
+    assert dry.evicted == ["staged free"] and free.is_dir() and registry.asset("staged", "free")["state"] == "ready"
+    assert dry.catalog == f"{REF} (6 records)" and registry.catalogs()  # due: no mark file yet
+
+    report = await acts.keep()
+    assert report.errors == [] and report.catalog == ""  # synced a pass ago
+    assert report.evicted == ["staged free"] and not free.exists() and held.is_dir()
+    row = registry.asset("staged", "free")
+    assert row["state"] == "evicted" and row["bytes"] == 0 and row["evicted_at"] > old
+    assert registry.asset("staged", "held")["state"] == "ready"
+    assert report.over_quota == {} and acts.gh.comments == {}
+    assert (await acts.keep()).evicted == []  # under quota now
+
+
+async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
+    from mia_core.fs import dir_bytes
+
+    registry = keeper_server
+    catalog_not_due(acts)
+    held, fresh = staged_artifact(acts, "held", 10), staged_artifact(acts, "fresh", 10)  # fresh: scanned just now
+    referenced(registry, "held")
+    acts.gh.issues[9] = {"number": 9, "body": "", "labels": [{"name": "bug"}]}  # newer, but not a buffer issue
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = 1, 0
+    over_by = dir_bytes(held) + dir_bytes(fresh) - 1
+    for _ in range(2):
+        report = await acts.keep()
+        assert report.errors == [] and report.evicted == [] and report.over_quota == {"staged": over_by}
+    assert held.is_dir() and fresh.is_dir() and 9 not in acts.gh.comments
+    [comment] = acts.gh.comments[7]
+    assert f"over quota by {over_by} bytes" in comment["body"] and "keeper over-quota staged" in comment["body"]
+    dry = await acts.keep(dry_run=True)
+    assert dry.over_quota == {} and len(acts.gh.comments[7]) == 1
+
+
+async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keeper_server):
+    import time
+    from types import SimpleNamespace
+
+    registry = keeper_server
+    catalog_not_due(acts)
+
+    class Csub:
+        def status(self, job_ids):
+            if job_ids == ["3"]:
+                raise RuntimeError("csub down")
+            return {"1": [], "2": [SimpleNamespace(terminal=True)], "4": [SimpleNamespace(terminal=False)]}[job_ids[0]]
+
+    acts.jobs = SimpleNamespace(client=Csub())
+    registry.put_asset("raw", "r", {"state": "fetching", "job": "1"})
+    for key, job in (("s", "2"), ("down", "3"), ("running", "4")):
+        registry.put_asset("staged", key, {"state": "staging", "job": job})
+    record_dir = acts.cfg.paths.staged_root / "p256-l1-2-4" / "rec"
+    old, young = record_dir / ".building-old", record_dir / ".building-young"
+    old.mkdir(parents=True)
+    young.mkdir()
+    stamp = time.time() - 49 * 3600
+    os.utime(old, (stamp, stamp))
+
+    dry = await acts.keep(dry_run=True)
+    assert dry.stale == ["raw r partial", "staged s missing"] and dry.removed_building == [str(old)]
+    assert old.is_dir() and registry.asset("raw", "r")["state"] == "fetching"
+    report = await acts.keep()
+    assert report.errors == [] and report.stale == dry.stale and report.removed_building == [str(old)]
+    assert not old.exists() and young.is_dir()
+    assert registry.asset("raw", "r") == {"state": "partial", "job": None}
+    assert registry.asset("staged", "s") == {"state": "missing", "job": None}
+    assert registry.asset("staged", "down")["state"] == registry.asset("staged", "running")["state"] == "staging"
+
+
+async def test_keep_reports_failed_steps_without_raising(acts):
+    from temporalio.testing import ActivityEnvironment
+
+    acts.registry = Registry("http://127.0.0.1:9")
+    acts.cfg.quota.staged_bytes = 1
+    env, beats = ActivityEnvironment(), []
+    env.on_heartbeat = lambda *details: beats.append(details[0])
+    report = await env.run(acts.keep)
+    assert beats == ["sync datasets", "sync assets", "catalog sync", "stale builds", "evict staged", "evict raw"]
+    steps = [error.split(":")[0] for error in report.errors]
+    assert steps == ["sync datasets", "sync assets", "catalog sync", "stale builds", "evict staged"]
+    assert report.scanned == 0 and report.evicted == []

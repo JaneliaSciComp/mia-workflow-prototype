@@ -17,7 +17,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,6 +47,7 @@ from mia_data.status import render_links, render_stage
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
+from .keeper import evict_path, live_bytes, plan_evictions, stale_builds
 from .models import (
     BindingInfo,
     BufferPins,
@@ -56,6 +57,7 @@ from .models import (
     DropResult,
     FetchJobArgs,
     FetchResult,
+    KeeperReport,
     PlanResult,
     QuotaCheck,
     RawStatus,
@@ -88,6 +90,10 @@ FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
+OVER_QUOTA = (
+    "The {kind} root is over quota by {over_by} bytes and nothing is evictable (every asset is referenced, held or "
+    "building). Raise `quota.{kind}_bytes`, retire a buffer, or wait for `quota.hold_hours`."
+)
 
 
 def _voxel(row: Row) -> dict[str, float]:
@@ -173,6 +179,7 @@ class Activities:
             self.comment_drop,
             self.nudge_dataset,
             self.poll,
+            self.keep,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -837,6 +844,165 @@ class Activities:
             else:
                 result.registered.append(volume_id)
         return result
+
+    # --- the cache keeper ----------------------------------------------------------------------
+
+    @activity.defn(name="keep")
+    async def keep(self, dry_run: bool = False) -> KeeperReport:
+        """One pass of the cache keeper (rules in keeper.py), each step best effort, a failure an `errors` entry:
+        sync datasets and assets; the catalog when `keeper.catalog_sync_hours` have passed; rows building under an
+        ended job reset; `.building-*` directories older than `quota.hold_hours` removed; free assets evicted per
+        kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
+        the resets, removals and evictions are only reported."""
+        report, registry, quota, now = KeeperReport(), self.registry, self.cfg.quota, time.time()
+        roots = (self.cfg.paths.raw_root, self.cfg.paths.staged_root)
+        hold_s = quota.hold_hours * 3600
+
+        async def step(name: str, work: Awaitable[Any]) -> Any:
+            _keeper_beat(name)
+            try:
+                return await work
+            except Exception as error:  # every step is best effort; the next pass tries again
+                log.warning("keeper: %s failed: %s", name, error)
+                report.errors.append(text(f"{name}: {error}", 500))
+                return None
+
+        await step("sync datasets", asyncio.to_thread(registry.sync_datasets))
+        synced = await step("sync assets", asyncio.to_thread(registry.sync_assets)) or {}
+        report.scanned, report.missing, report.new = (
+            int(synced.get(name) or 0) for name in ("scanned", "missing", "new")
+        )
+        await step("catalog sync", self._keeper_catalog(report, now))
+        await step("stale builds", self._keeper_stale(report, dry_run))
+        for path in synced.get("building") or []:
+            await step("building", self._keeper_building(report, Path(path), roots, hold_s, now, dry_run))
+        for kind in ("staged", "raw"):
+            await step(f"evict {kind}", self._keeper_evict(report, kind, roots, hold_s, now, dry_run))
+        return report
+
+    async def _keeper_catalog(self, report: KeeperReport, now: float) -> None:
+        """Sync the catalog's main head when the last sync is `keeper.catalog_sync_hours` old (or never ran)."""
+        from .cli import catalog_sync  # the `catalog sync` command's body; imported here, not with the activities
+
+        mark = self.cfg.paths.state_dir / "keeper" / "catalog-synced-at"
+        try:
+            last = float(mark.read_text())
+        except (OSError, ValueError):
+            last = 0.0
+        if now - last < self.cfg.keeper.catalog_sync_hours * 3600:
+            return
+        ref, count = await catalog_sync(self.cfg, self.gh_catalog, self.registry)
+        write_atomic(mark, str(int(now)))
+        report.catalog = f"{ref} ({count} records)"
+
+    def _job_finished(self, job_id: str) -> bool:
+        """Whether csub says the job ended (or no longer knows it); a csub error counts as still running."""
+        if self.jobs is None:
+            return False
+        try:
+            statuses = self.jobs.client.status([job_id])
+        except Exception as error:  # csub unreachable: leave the row for the next pass
+            log.warning("keeper: csub status of job %s failed: %s", job_id, error)
+            return False
+        return not statuses or bool(statuses[0].terminal)
+
+    async def _keeper_stale(self, report: KeeperReport, dry_run: bool) -> None:
+        registry = self.registry
+        rows = [
+            {"kind": kind, **row}
+            for kind in ("raw", "staged")
+            for row in (await asyncio.to_thread(registry.assets, kind))["assets"]
+        ]
+        for kind, key, state in await asyncio.to_thread(stale_builds, rows, self._job_finished):
+            if not dry_run:
+                await asyncio.to_thread(registry.put_asset, kind, key, {"state": state, "job": None})
+                log.info("keeper: %s %s was building under an ended job, now %s", kind, key, state)
+            report.stale.append(f"{kind} {key} {state}")
+
+    async def _keeper_building(
+        self, report: KeeperReport, path: Path, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool
+    ) -> None:
+        try:
+            modified = path.stat().st_mtime
+        except FileNotFoundError:
+            return  # the job finished and renamed it since the scan
+        if modified + hold_s >= now:
+            return
+        if not dry_run:
+            if not await asyncio.to_thread(evict_path, path, roots):
+                raise RuntimeError(f"could not remove {path}")
+            log.info("keeper: removed %s, untouched for %.0f h", path, (now - modified) / 3600)
+        report.removed_building.append(str(path))
+
+    async def _keeper_evict(
+        self, report: KeeperReport, kind: str, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool
+    ) -> None:
+        """Evict `kind`'s free assets until under quota; when still over, say so on the newest buffer issue."""
+        registry, limit = self.registry, getattr(self.cfg.quota, f"{kind}_bytes")
+        if limit <= 0:
+            return
+        rows = (await asyncio.to_thread(registry.assets, kind))["assets"]
+        in_progress: set[str] = set()
+        if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
+            in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
+        picked = plan_evictions(
+            rows,
+            quota_bytes=limit,
+            headroom_bytes=self.cfg.quota.headroom_bytes,
+            hold_s=hold_s,
+            now=now,
+            in_progress=in_progress,
+            kind=kind,
+        )
+        evicted: list[dict] = []
+        for row in picked:
+            data = row["data"]
+            if not dry_run:
+                # ponytail: one heartbeat per removal; a single rmtree longer than the 5 min heartbeat timeout fails
+                # the pass (the next one resumes). Heartbeat from a background task if caches get that large.
+                _keeper_beat(f"evict {kind} {row['key']}")
+                path = data.get("path")
+                if not isinstance(path, str) or not await asyncio.to_thread(evict_path, Path(path), roots):
+                    report.errors.append(text(f"evict {kind}: could not remove {row['key']} at {path}", 500))
+                    continue
+                await asyncio.to_thread(
+                    registry.put_asset, kind, row["key"], {"state": "evicted", "evicted_at": now, "bytes": 0}
+                )
+                log.info(
+                    "keeper: evicted %s %s (%s bytes, last used %s)",
+                    kind,
+                    row["key"],
+                    data.get("bytes"),
+                    data.get("last_used"),
+                )
+            evicted.append(row)
+            report.evicted.append(f"{kind} {row['key']}")
+        over_by = int(live_bytes(rows) - live_bytes(evicted) - limit)
+        if over_by > 0 and not dry_run:
+            report.over_quota[kind] = over_by
+            await self._over_quota_comment(kind, over_by)
+
+    async def _over_quota_comment(self, kind: str, over_by: int) -> None:
+        """Comment once on the newest open issue labelled `buffer:*`; with none open, only log."""
+        prefix = self.cfg.label("")
+        issues = [
+            issue
+            for issue in await self.gh_issues.list_issues(state="open")
+            if any(str((label or {}).get("name", "")).startswith(prefix) for label in issue.get("labels") or [])
+        ]
+        message = OVER_QUOTA.format(kind=kind, over_by=over_by)
+        if not issues:
+            log.warning("keeper: %s (no open buffer issue to tell)", message)
+            return
+        marker = self.cfg.marker(f"keeper over-quota {kind}")
+        newest = max(issues, key=lambda issue: issue["number"])
+        await self._comment_once(self.gh_issues, newest["number"], f"{message}\n\n{marker}", marker)
+
+
+def _keeper_beat(detail: str) -> None:
+    """Heartbeat when running as a Temporal activity (not under `mia-buffers assets sync`)."""
+    if activity.in_activity():
+        activity.heartbeat(detail)
 
 
 def _stage_json(staged: Path) -> Any:
