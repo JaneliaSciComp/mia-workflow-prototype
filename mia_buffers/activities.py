@@ -12,9 +12,11 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,21 +29,24 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
-from mia_core.registry import Registry, RegistryError
+from mia_core.assets import raw_asset, read_files_json, whole_file_url
+from mia_core.fs import dir_bytes
+from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
+from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
-from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, snapshot
-from mia_data.models import JobDone
+from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
+from mia_data.models import JobDone, LockTaken
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
-from .jobspec import artifact_id, catalog_snapshot, levels_key, stage_job
+from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .models import (
     BindingInfo,
     BufferPins,
@@ -49,7 +54,11 @@ from .models import (
     DatasetIssue,
     DatasetPlan,
     DropResult,
+    FetchJobArgs,
+    FetchResult,
     PlanResult,
+    QuotaCheck,
+    RawStatus,
     RegisterResult,
     SourcingLimits,
     StageJobArgs,
@@ -69,10 +78,13 @@ if TYPE_CHECKING:
 
     from .config import Config
 
+log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"i\d+-e\d+")
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
+FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
+FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
@@ -147,6 +159,14 @@ class Activities:
             self.prepare_stage,
             self.submit,
             self.read_stage,
+            self.take_lock,
+            self.release_lock,
+            self.raw_status,
+            self.check_quota,
+            self.prepare_fetch,
+            self.submit_fetch,
+            self.read_fetch,
+            self.mark_asset,
             self.verify_drop,
             self.create_buffer,
             self.register_dataset,
@@ -235,6 +255,15 @@ class Activities:
             raise ValueError(f"bad record id {record!r}")
         return self.cfg.paths.raw_root / record
 
+    def _binding_urls(self, round_id: str, record: str) -> list[str]:
+        """Every url of the round's copy of the record's binding (trusted: read_binding checked it), raw then labels."""
+        binding = yaml.safe_load(self._binding_path(round_id, record).read_text()) or {}
+        return [
+            str(url)
+            for array in (binding.get("raw") or []) + (binding.get("labels") or [])
+            for url in (array.get("urls") or [])
+        ]
+
     # --- admission and planning --------------------------------------------------------------
 
     @activity.defn(name="admit")
@@ -310,7 +339,15 @@ class Activities:
     @activity.defn(name="limits")
     async def limits(self) -> SourcingLimits:
         cfg = self.cfg
-        return SourcingLimits(cfg.sourcing.parallel, cfg.limits.job_walltime_min, cfg.service.url)
+        return SourcingLimits(
+            cfg.sourcing.parallel,
+            cfg.limits.job_walltime_min,
+            cfg.service.url,
+            parallel_fetch=cfg.sourcing.parallel_fetch,
+            fetch_walltime_min=cfg.limits.fetch_walltime_min,
+            fetch_attempts=cfg.limits.fetch_attempts,
+            poll_minutes=cfg.temporal.poll_minutes,
+        )
 
     # --- the issue ---------------------------------------------------------------------------
 
@@ -408,13 +445,7 @@ class Activities:
     async def comment_drop(self, issue: int, round_id: str, record: str, missing: list[str]) -> None:
         """Ask for a dataset's files (once), or list the ones still missing after a failed verification (once
         per distinct missing set)."""
-        binding = yaml.safe_load(self._binding_path(round_id, record).read_text()) or {}
-        urls = [
-            str(url)
-            for array in (binding.get("raw") or []) + (binding.get("labels") or [])
-            for url in (array.get("urls") or [])
-        ]
-        files = [list(pair) for pair in drop_names(urls)]
+        files = [list(pair) for pair in drop_names(self._binding_urls(round_id, record))]
         link = self.cfg.paths.link(self._cache_dir(record) / "incoming")
         suffix = " " + hashlib.sha256("\n".join(sorted(missing)).encode()).hexdigest()[:8] if missing else ""
         marker = self.cfg.marker(f"drop {round_id} {record}{suffix}")
@@ -511,21 +542,36 @@ class Activities:
     @mia_permanent_errors
     async def submit(self, key: str, args: StageJobArgs) -> str:
         """Build the stage job (snippets at the binding's commit, the staged directory as `out`), refuse hosts a
-        fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id."""
+        fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged asset
+        row says `staging` under it (best effort)."""
+        staged = self._staged_dir(args.round_id, args.record)
+        args.out = str(staged)
+        job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: stage_job(self.cfg, args, snap))
+        fields = {
+            "state": "staging",
+            "job": job_id,
+            "record": args.record,
+            "levels_key": self._levels_key(args.round_id),
+        }
+        await self.mark_asset("staged", staged.name, {**fields, "path": str(staged)})
+        return job_id
+
+    async def _submit_job(self, key: str, workspace: str, record: str, build_spec: Callable[[Path], JobSpec]) -> str:
+        """Submit `build_spec(snippets snapshot at the binding's commit)` at most once per key, refusing hosts a
+        fresh `csub probe` doesn't allow. Returns the job id."""
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         if self.jobs is None:
             raise RuntimeError("no job runner: submit runs only inside the worker")
-        binding = yaml.safe_load(Path(args.workspace, "binding.yaml").read_text()) or {}
+        binding = yaml.safe_load(Path(workspace, "binding.yaml").read_text()) or {}
         sha = str(binding.get("snippets_commit") or "")
         if not SHA_RE.fullmatch(sha):
-            raise ValueError(f"binding of {args.record} has no snippets_commit")
-        args.out = str(self._staged_dir(args.round_id, args.record))
+            raise ValueError(f"binding of {record} has no snippets_commit")
         patterns = await asyncio.to_thread(self.probe)
         snapshot_dir = await asyncio.to_thread(snapshot, self.cfg, sha, self.gh_snippets.tokens)
 
         def build() -> JobSpec:
-            spec = stage_job(self.cfg, args, snapshot_dir)
+            spec = build_spec(snapshot_dir)
             check_hosts_allowed(spec, patterns)
             return spec
 
@@ -537,10 +583,12 @@ class Activities:
             raise
 
     @activity.defn(name="await_job")
-    async def await_job(self, job_id: str, workspace: str) -> JobDone:
+    async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
+        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock."""
         if self.jobs is None:
             raise RuntimeError("no job runner: await_job runs only inside the worker")
-        outcome = await self.jobs.wait(job_id, workspace, activity.heartbeat)
+        heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
+        outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
 
     @activity.defn(name="read_stage")
@@ -565,14 +613,16 @@ class Activities:
 
     async def _record_assets(self, round_id: str, record: str, result: StageResult) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
-        input the id hashes, so a later round can reuse it) and the record's raw cache as files.json lists it."""
+        input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
+        record's raw cache as files.json lists it, both just used."""
         artifact, pins = self._artifact(round_id, record), self._pins(round_id)
         binding_path, cache = self._binding_path(round_id, record), self._cache_dir(record)
         binding = yaml.safe_load(binding_path.read_text())
+        staged_dir, now = self._staged_dir(round_id, record), time.time()
         staged = {
             "record": record,
             "levels_key": self._levels_key(round_id),
-            "path": str(self._staged_dir(round_id, record)),
+            "path": str(staged_dir),
             "artifact": artifact,
             "binding_hash": hashlib.sha256(binding_path.read_bytes()).hexdigest(),
             "harness_commit": pins.harness_commit,
@@ -583,27 +633,114 @@ class Activities:
             "volumes": result.volumes,
             "bytes_fetched": result.bytes_fetched,
             "snippets_commit": str(binding.get("snippets_commit") or "") if isinstance(binding, dict) else "",
+            "state": "ready" if result.ok else "partial",
+            "bytes": await asyncio.to_thread(dir_bytes, staged_dir),
+            "last_used": now,
+            "job": None,
         }
-        files = {
-            str(url)[:500]: {"size": (entry.get("validators") or {}).get("size"), "source": entry.get("source")}
-            for url, entry in read_manifest(cache).items()
-            if isinstance(entry, dict)
-        }
-        raw = {"path": str(cache), "files": files}
+        raw = {**await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record)), "last_used": now}
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
+
+    # --- the fetch phase: locks, quota, the fetch job, raw-cache state ---------------------------
+
+    @activity.defn(name="take_lock")
+    @mia_permanent_errors
+    async def take_lock(self, kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
+        """Take the lock file `<local_root>/locks/<kind>/<key>`; when someone else holds it, say who."""
+        return LockTaken(*await asyncio.to_thread(take_or_holder, lock_dir(self.cfg), kind, key, owner, ttl_s))
+
+    @activity.defn(name="release_lock")
+    @mia_permanent_errors
+    async def release_lock(self, kind: str, key: str, owner: str) -> None:
+        """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
+        await asyncio.to_thread(release_or_log, lock_dir(self.cfg), kind, key, owner)
+
+    @activity.defn(name="raw_status")
+    @mia_permanent_errors
+    async def raw_status(self, round_id: str, record: str) -> RawStatus:
+        """Whether files.json of the record's raw cache lists every whole file of the round's binding."""
+        manifest = await asyncio.to_thread(read_files_json, self._cache_dir(record))
+        wanted = dict.fromkeys(whole_file_url(url) for url in self._binding_urls(round_id, record))
+        missing = [url for url in wanted if url not in manifest]
+        return RawStatus(not missing and bool(manifest), missing)  # raw_asset's `ready` rule, without the du
+
+    @activity.defn(name="check_quota")
+    @mia_permanent_errors
+    async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
+        """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
+        limit). A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        limit = int(self.cfg.quota.raw_bytes)
+        if limit == 0:
+            return QuotaCheck(True)
+        expected = int(self._row(round_id, record).get("bytes") or 0)
+        used = int((await asyncio.to_thread(self.registry.assets, "raw"))["bytes"])
+        over_by = used + expected - limit
+        return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
+
+    @activity.defn(name="prepare_fetch")
+    @mia_permanent_errors
+    async def prepare_fetch(self, issue: int, round_id: str, record: str, attempt: int) -> str:
+        """The fetch job's workspace, one per attempt, with record.yaml and binding.yaml; the raw cache exists
+        afterwards (a mount must). Returns the workspace path."""
+        workspace = self._round_workspace(issue, round_id) / f"fetch-{record}-{int(attempt)}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
+        shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
+        self._cache_dir(record).mkdir(parents=True, exist_ok=True)
+        return str(workspace)
+
+    @activity.defn(name="submit_fetch")
+    @mia_permanent_errors
+    async def submit_fetch(self, key: str, args: FetchJobArgs) -> str:
+        """Submit the fetch job at most once per key, hosts checked as `submit` does. Returns the job id; the raw
+        asset row says `fetching` under it (best effort)."""
+        job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: fetch_job(self.cfg, args, snap))
+        await self.mark_asset("raw", args.record, {"state": "fetching", "job": job_id})
+        return job_id
+
+    @activity.defn(name="read_fetch")
+    @mia_permanent_errors
+    async def read_fetch(self, round_id: str, record: str, workspace: str) -> FetchResult:
+        """The fetch job's fetch.json, reduced; none (a job killed at its walltime) is partial, since the next
+        attempt resumes from the cache. The raw asset row is then put from the cache as it is (best effort)."""
+        report = loads(read_untrusted(Path(workspace), "fetch.json", FETCH_JSON_LIMIT))
+        if not isinstance(report, dict):
+            result = FetchResult(True, partial=True, errors=[FETCH_JSON_MISSING])
+        else:
+            files = [entry for entry in report.get("files") or [] if isinstance(entry, dict)]
+
+            def urls(outcome: str) -> list[str]:
+                return texts([entry.get("url") for entry in files if entry.get("outcome") == outcome])
+
+            fetched, blocked, failed = report.get("bytes_fetched"), report.get("host_not_allowed"), urls("failed")
+            result = FetchResult(
+                report.get("ok") is True and not failed,
+                report.get("partial") is True or any(entry.get("outcome") == "pending" for entry in files),
+                fetched if type(fetched) is int and fetched >= 0 else 0,
+                urls("stream"),
+                failed,
+                texts(report.get("errors")),
+                text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
+            )
+        row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
+        state = "ready" if result.ok and not result.partial else "partial"
+        await self.mark_asset("raw", record, {**row, "state": state, "job": None, "last_used": time.time()})
+        return result
+
+    @activity.defn(name="mark_asset")
+    @mia_permanent_errors
+    async def mark_asset(self, kind: str, key: str, fields: dict) -> None:
+        """Merge `fields` into buffer-api's asset row, best effort: an outage is logged, never raised."""
+        registry = self.registry
+        await asyncio.to_thread(best_effort, lambda: registry.put_asset(kind, key, fields), f"{kind} asset {key}", log)
 
     @activity.defn(name="verify_drop")
     @mia_permanent_errors
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
         key and list them in files.json. A listed file that is missing, empty or a symlink stays missing."""
-        binding = yaml.safe_load(self._binding_path(round_id, record).read_text()) or {}
-        urls = [
-            str(url)
-            for array in (binding.get("raw") or []) + (binding.get("labels") or [])
-            for url in (array.get("urls") or [])
-        ]
+        urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
         placed, missing, entries = [], [], {}
         for url, name in drop_names(urls):

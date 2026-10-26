@@ -192,6 +192,7 @@ def test_plan_rows_carry_voxel_size_and_recipe(spec_2d_mixed):
     assert plan.valid
     assert plan.rows_by_id[U937].voxel_size_nm == {"x": 45.0718, "y": 45.0718} and plan.rows_by_id[U937].assumed == []
     assert plan.rows_by_id[U937].channel_recipe == {"op": "mean"}
+    assert plan.rows_by_id[U937].bytes == 1153470226  # the record's size_bytes, for the raw quota
     assert plan.rows_by_id[ONE_CH].channel_recipe == {"op": "channel", "index": 0}
     three = build_plan(spec_with(spec_2d_mixed, **{"sampling.patch.c": 3}), "h", None, records())
     assert three.valid and three.rows_by_id[ONE_CH].channel_recipe == {"op": "replicate"}

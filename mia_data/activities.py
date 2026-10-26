@@ -28,7 +28,7 @@ from temporalio.exceptions import ApplicationError
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
 from mia_core.assets import raw_asset
-from mia_core.locks import heartbeat_through
+from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
@@ -544,18 +544,13 @@ class Activities:
     @mia_permanent_errors
     async def take_lock(self, kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
         """Take the lock file `<local_root>/locks/<kind>/<key>`; when someone else holds it, say who."""
-        locks = lock_dir(self.cfg)
-        if await asyncio.to_thread(locks.take, kind, key, owner, ttl_s):
-            return LockTaken(True)
-        holder = await asyncio.to_thread(locks.holder, kind, key)
-        return LockTaken(False, holder.owner if holder else "?")  # "?": released between the take and the look
+        return LockTaken(*await asyncio.to_thread(take_or_holder, lock_dir(self.cfg), kind, key, owner, ttl_s))
 
     @activity.defn(name="release_lock")
     @mia_permanent_errors
     async def release_lock(self, kind: str, key: str, owner: str) -> None:
         """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
-        if not await asyncio.to_thread(lock_dir(self.cfg).release, kind, key, owner):
-            log.warning("%s: the lock %s/%s was no longer held at release", owner, kind, key)
+        await asyncio.to_thread(release_or_log, lock_dir(self.cfg), kind, key, owner)
 
     # --- job results -------------------------------------------------------------------------
 

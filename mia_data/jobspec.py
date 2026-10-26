@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from importlib.resources import files
@@ -178,7 +179,8 @@ def _snapshot_lock(cfg: Config, key: str) -> AbstractContextManager[None]:
     """Blocks until this process holds the snapshot lock for `key` (a commit SHA)."""
     # ponytail: `hold` does not heartbeat, so an extraction longer than 900 s could be taken over; the rename of
     # the tmp dir to `dest` stays atomic. Upgrade: heartbeat from a thread.
-    owner = f"{cfg.deployment} pid {os.getpid()}"
+    # the thread too: the owner must be unique per caller, since a take by the lock's own owner succeeds
+    owner = f"{cfg.deployment} pid {os.getpid()} thread {threading.get_ident()}"
     return lock_dir(cfg).hold("snapshot", key, owner, ttl_s=SNAPSHOT_LOCK_TTL_S, timeout_s=SNAPSHOT_LOCK_TIMEOUT_S)
 
 

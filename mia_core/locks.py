@@ -62,7 +62,8 @@ class LockDir:
         return Holder(kind, key, owner, taken_at, heartbeat_at, ttl_s, heartbeat_at + ttl_s < self.now())
 
     def take(self, kind: str, key: str, owner: str, ttl_s: float) -> bool:
-        """Create the lock file; a stale one is renamed aside first. False when someone else holds it.
+        """Create the lock file; a stale one is renamed aside first. False when someone else holds it; True, with
+        a fresh heartbeat, when `owner` already holds it (a retried take must not wait on itself).
 
         The file is written complete under a temporary name and hard-linked into place, so it never exists
         empty; a taker that renames aside a lock it did not observe stale puts it back and loses."""
@@ -82,7 +83,7 @@ class LockDir:
                 if observed is None:
                     continue  # released between our link and our read
                 if not observed.stale:
-                    return False
+                    return observed.owner == owner and self.heartbeat(kind, key, owner)
                 aside = self._unique(path, "aside")
                 try:
                     os.replace(path, aside)
@@ -177,6 +178,21 @@ class LockDir:
             yield
         finally:
             self.release(kind, key, owner)
+
+
+def take_or_holder(locks: LockDir, kind: str, key: str, owner: str, ttl_s: float) -> tuple[bool, str]:
+    """(True, "") when `owner` took the lock, else (False, the holder's owner string; "?" when it was released
+    between the take and the look): the body of both workers' take_lock activities."""
+    if locks.take(kind, key, owner, ttl_s):
+        return True, ""
+    holder = locks.holder(kind, key)
+    return False, holder.owner if holder else "?"
+
+
+def release_or_log(locks: LockDir, kind: str, key: str, owner: str) -> None:
+    """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
+    if not locks.release(kind, key, owner):
+        log.warning("%s: the lock %s/%s was no longer held at release", owner, kind, key)
 
 
 def heartbeat_through(locks: LockDir, lock: Sequence[str], inner: Callable[[str], None]) -> Callable[[str], None]:

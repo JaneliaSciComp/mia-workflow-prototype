@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from mia_core.locks import Holder, LockDir
+from mia_core.locks import Holder, LockDir, take_or_holder
 
 
 def clock(start=1000.0):
@@ -21,6 +21,19 @@ def test_take_is_exclusive_until_released(tmp_path):
     assert json.loads((tmp_path / "raw" / "rec-1").read_text())["owner"] == "mia-data i1-e1 smoke"
     assert locks.release("raw", "rec-1", "mia-data i1-e1 smoke") and locks.holder("raw", "rec-1") is None
     assert locks.take("raw", "rec-1", "mia-buffers i2-e2 rec-1", 900)
+
+
+def test_the_owner_takes_its_own_live_lock_again(tmp_path):
+    """A take_lock activity whose reply was lost is retried: the owner must not wait on itself."""
+    now, tick = clock()
+    locks = LockDir(tmp_path, now)
+    assert locks.take("raw", "rec", "round A", 900)
+    tick(100)
+    assert locks.take("raw", "rec", "round A", 900)
+    holder = locks.holder("raw", "rec")
+    assert (holder.owner, holder.taken_at, holder.heartbeat_at) == ("round A", 1000.0, 1100.0)
+    assert take_or_holder(locks, "raw", "rec", "round B", 900) == (False, "round A")
+    assert take_or_holder(locks, "raw", "rec", "round A", 900) == (True, "")
 
 
 def test_stale_lock_is_renamed_aside_and_taken(tmp_path):

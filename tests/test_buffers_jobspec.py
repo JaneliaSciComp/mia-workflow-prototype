@@ -7,8 +7,8 @@ from autodev_helpers import GIT_ID, run_git
 from test_buffers_config import make_cfg
 
 from autodev.jobs import JOB_KEY_RE
-from mia_buffers.jobspec import artifact_id, catalog_snapshot, levels_key, stage_job
-from mia_buffers.models import BufferPins, StageJobArgs, job_key
+from mia_buffers.jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
+from mia_buffers.models import BufferPins, FetchJobArgs, StageJobArgs, job_key
 from mia_data.jobspec import harness_pin
 
 
@@ -61,6 +61,31 @@ def test_stage_job_without_hosts_is_offline(tmp_path):
     cfg = _cfg(tmp_path)
     spec = stage_job(cfg, _args(cfg, tmp_path / "ws", [], str(tmp_path / "out")), tmp_path / "snap")
     assert spec.allow_hosts == [] and spec.env["MIA_HARNESS_ALLOWED_HOSTS"] == ""
+
+
+def test_stage_job_with_a_read_only_cache(tmp_path):
+    """An offline stage after the fetch phase: the cache is read-only, the staged directory stays writable."""
+    cfg = _cfg(tmp_path)
+    args = _args(cfg, tmp_path / "ws", [], str(tmp_path / "out"))
+    args.cache_writable = False
+    spec = stage_job(cfg, args, tmp_path / "snap")
+    cache = str(cfg.paths.raw_root / "rec")
+    assert cache in spec.ro_mounts and cache not in spec.rw_mounts and spec.rw_mounts == [str(tmp_path / "out")]
+    assert spec.env["MIA_HARNESS_CACHE_WRITABLE"] == "0" and spec.env["MIA_HARNESS_CACHE_DIR"] == cache
+
+
+def test_fetch_job_fills_the_cache_under_the_fetch_limits(tmp_path):
+    cfg = _cfg(tmp_path)
+    workspace = tmp_path / "ws"
+    _args(cfg, workspace, [])
+    args = FetchJobArgs(str(workspace), "i1-e2", _pins(cfg), "rec", ["zenodo.org"], 1)
+    spec = fetch_job(cfg, args, tmp_path / "snap")
+    assert "harness fetch binding.yaml --record record.yaml --out fetch.json" in spec.command
+    assert spec.name == "mia-buffers-fetch" and spec.allow_hosts == ["zenodo.org"] and spec.walltime_min == 480
+    cache = str(cfg.paths.raw_root / "rec")
+    assert cache in spec.rw_mounts and cache not in spec.ro_mounts and str(tmp_path / "snap") in spec.ro_mounts
+    assert spec.env["MIA_HARNESS_JOB_BYTES"] == "50000000000" and spec.env["MIA_HARNESS_CACHE_DIR"] == cache
+    assert spec.env["MIA_HARNESS_CACHE_WRITABLE"] == "1"
 
 
 def test_stage_job_needs_an_out_dir(tmp_path):

@@ -59,6 +59,7 @@ class Row:
     voxel_size_nm: dict[str, float | None] = field(default_factory=dict)
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
     channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
+    bytes: int | None = None  # the record's size_bytes: what fetching it adds to the raw cache
 
     @property
     def in_pool(self) -> bool:
@@ -344,6 +345,7 @@ def build_plan(
             n_items=f.n_items,
             admitted=decision.admitted,
             rule=decision.rule,
+            bytes=f.size_bytes,
         )
         if decision.admitted:
             row.fit = fit(f, spec)

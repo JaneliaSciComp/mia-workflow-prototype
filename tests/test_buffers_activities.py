@@ -19,11 +19,12 @@ from mia_buffers import activities as acts_module
 from mia_buffers.activities import Activities
 from mia_buffers.drop import cache_key, read_manifest
 from mia_buffers.jobspec import artifact_id
-from mia_buffers.models import BufferPins, BufferState
+from mia_buffers.models import BufferPins, BufferState, FetchResult, QuotaCheck, RawStatus
 from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment
 from mia_core.registry import Registry, RegistryError
 from mia_data.catalog import dataset_folder
+from mia_data.models import LockTaken
 from mia_data.publish import reindex
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
@@ -486,6 +487,8 @@ async def test_refuse_label_removes_and_explains(acts):
 async def test_limits_come_from_config(acts):
     limits = await acts.limits()
     assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")
+    assert (limits.parallel_fetch, limits.fetch_walltime_min, limits.fetch_attempts) == (2, 480, 4)
+    assert (limits.poll_minutes, limits.lock_ttl_s) == (2, 900)
 
 
 async def test_admit_accepts_crlf_bodies(acts):
@@ -533,7 +536,11 @@ async def test_read_stage_records_the_staged_and_raw_assets(acts, server):
     }
     assert (staged["binding_hash"], staged["harness_commit"], staged["env_digest"]) == (info.hash, "h" * 40, "d" * 64)
     raw = acts.registry.asset("raw", U937)
-    assert raw == {"path": str(acts.cfg.paths.raw_root / U937), "files": {url: {"size": 12, "source": "download"}}}
+    assert {key: raw[key] for key in ("path", "files", "state")} == {
+        "path": str(acts.cfg.paths.raw_root / U937),
+        "files": {url: {"size": 12, "source": "download"}},
+        "state": "ready",
+    }
     acts.cfg.service.url = server  # the service's worker routes refuse a client without the token
     with pytest.raises(RegistryError) as error:
         Registry.from_config(acts.cfg.service).put_asset("staged", artifact, {})
@@ -560,3 +567,178 @@ async def test_read_binding_reports_a_pyramid_staged_earlier_for_the_same_bindin
     acts.registry = Registry("http://127.0.0.1:9")  # buffer-api down: the binding is still read, nothing reused
     info = await acts.read_binding(ROUND, U937)
     assert info.found and not info.staged
+
+
+# -- the fetch phase: locks, quota, raw-cache state
+
+A_TIF, B_ZIP = "https://zenodo.org/a.tif", "https://zenodo.org/b.zip"
+
+
+async def bound_two_urls(acts) -> Path:
+    """A planned round whose U937 binding lists a plain file and a zip member; returns the raw cache dir."""
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, [A_TIF, B_ZIP + "::m.tif"])
+    await acts.read_binding(ROUND, U937)
+    return acts.cfg.paths.raw_root / U937
+
+
+async def test_raw_status_reads_files_json(acts):
+    from mia_buffers.drop import merge_manifest
+
+    cache = await bound_two_urls(acts)
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, B_ZIP])
+    merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [B_ZIP])  # the zip is cached whole
+    merge_manifest(cache, {B_ZIP: {"validators": {"size": 5}, "source": "download"}})
+    assert await acts.raw_status(ROUND, U937) == RawStatus(True)
+
+
+async def test_check_quota(acts, server):
+    await bound_two_urls(acts)
+    real = acts.registry
+    acts.registry = Registry("http://127.0.0.1:9")  # quota 0 is unlimited: the registry is not asked
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True)
+    acts.cfg.quota.raw_bytes = 100
+    with pytest.raises(RegistryError):  # an outage propagates: the workflow retries the activity
+        await acts.check_quota(ROUND, U937)
+    acts.registry = real
+    real.put_asset("raw", "other-record", {"bytes": 90, "state": "ready"})
+    plan_path = acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    assert next(row for row in plan["rows"] if row["id"] == U937)["bytes"] == 1153470226  # from the record
+    for row in plan["rows"]:
+        row["bytes"] = 20 if row["id"] == U937 else row["bytes"]
+    plan_path.write_text(json.dumps(plan))
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=20)
+    acts.cfg.quota.raw_bytes = 110
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=20)
+
+
+async def test_prepare_fetch_makes_a_workspace_per_attempt(acts):
+    cache = await bound_two_urls(acts)
+    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 2))
+    assert workspace == acts.cfg.paths.work_root / "issue-7" / ROUND / f"fetch-{U937}-2"
+    assert yaml.safe_load((workspace / "record.yaml").read_text())["id"] == U937
+    assert yaml.safe_load((workspace / "binding.yaml").read_text())["record"] == U937 and cache.is_dir()
+
+
+async def test_read_fetch_without_a_report_is_partial(acts, server):
+    """A job killed at its walltime writes no fetch.json: partial, and the next attempt resumes from the cache."""
+    await bound_two_urls(acts)
+    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
+    await acts.mark_asset("raw", U937, {"state": "fetching", "job": "j1"})
+    result = await acts.read_fetch(ROUND, U937, str(workspace))
+    assert result == FetchResult(True, partial=True, errors=["fetch.json missing: the job ended before writing it"])
+    row = acts.registry.asset("raw", U937)
+    assert row["state"] == "partial" and row["job"] is None and row["last_used"] > 0
+    (workspace / "fetch.json").write_text("[1, 2]")
+    assert (await acts.read_fetch(ROUND, U937, str(workspace))).partial
+
+
+async def test_read_fetch_maps_outcomes_and_writes_the_raw_row(acts, server):
+    from mia_buffers.drop import merge_manifest
+
+    cache = await bound_two_urls(acts)
+    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
+    files = [
+        {"url": A_TIF, "outcome": "cached", "bytes": 3, "key": "k1"},
+        {"url": B_ZIP + "::m.tif", "outcome": "fetched", "bytes": 5, "key": "k2"},
+        {"url": "https://zenodo.org/c.zarr", "outcome": "stream", "reason": "needs a stream"},
+        {"url": "https://zenodo.org/d.tif", "outcome": "failed", "reason": "HTTPError: 404"},
+    ]
+    report = {"ok": False, "partial": False, "bytes_fetched": 5, "files": files, "errors": ["<!-- x -->"]}
+    (workspace / "fetch.json").write_text(json.dumps(report))
+    result = await acts.read_fetch(ROUND, U937, str(workspace))
+    assert result == FetchResult(
+        False, False, 5, ["https://zenodo.org/c.zarr"], ["https://zenodo.org/d.tif"], ["<!-- x -->"], None
+    )
+    assert acts.registry.asset("raw", U937)["state"] == "partial"
+    merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
+    merge_manifest(cache, {B_ZIP: {"validators": {"size": 5}, "source": "download"}})
+    report = {**report, "ok": True, "files": files[:3], "errors": [], "bytes_fetched": "lots"}
+    (workspace / "fetch.json").write_text(json.dumps(report))
+    result = await acts.read_fetch(ROUND, U937, str(workspace))
+    assert result.ok and not result.partial and result.bytes_fetched == 0 and result.stream == [files[2]["url"]]
+    row = acts.registry.asset("raw", U937)
+    assert row["state"] == "ready" and set(row["files"]) == {A_TIF, B_ZIP} and row["bytes"] > 0
+    pending = {**report, "files": [*files[:2], {"url": "https://zenodo.org/e.tif", "outcome": "pending"}]}
+    blocked = {**report, "ok": False, "files": [], "host_not_allowed": {"host": "evil.example", "chain": []}}
+    (workspace / "fetch.json").write_text(json.dumps(pending))
+    assert (await acts.read_fetch(ROUND, U937, str(workspace))).partial
+    (workspace / "fetch.json").write_text(json.dumps(blocked))
+    result = await acts.read_fetch(ROUND, U937, str(workspace))
+    assert not result.ok and result.host_not_allowed == "evil.example"
+    acts.registry = Registry("http://127.0.0.1:9")  # the row is best effort: the result still comes back
+    assert (await acts.read_fetch(ROUND, U937, str(workspace))).host_not_allowed == "evil.example"
+
+
+async def test_take_and_release_lock(acts):
+    assert await acts.take_lock("raw", U937, "mia-buffers i7-e11 fetch", 900) == LockTaken(True)
+    assert await acts.take_lock("raw", U937, "mia-buffers i7-e11 fetch", 900) == LockTaken(True)  # a retried take
+    assert await acts.take_lock("raw", U937, "mia-data i1-e2 smoke", 900) == LockTaken(
+        False, "mia-buffers i7-e11 fetch"
+    )
+    await acts.release_lock("raw", U937, "mia-data i1-e2 smoke")  # not the holder: the lock stays
+    assert not (await acts.take_lock("raw", U937, "mia-data i1-e2 smoke", 900)).ok
+    await acts.release_lock("raw", U937, "mia-buffers i7-e11 fetch")
+    assert (await acts.take_lock("raw", U937, "mia-data i1-e2 smoke", 900)).ok
+    assert (acts.cfg.paths.local_root / "locks" / "raw" / U937).is_file()
+
+
+async def test_mark_asset_is_best_effort(acts, server):
+    await acts.mark_asset("raw", U937, {"state": "waiting-drop"})
+    await acts.mark_asset("raw", U937, {"job": "j9"})  # merged into the row
+    assert acts.registry.asset("raw", U937) == {"state": "waiting-drop", "job": "j9"}
+    acts.registry = Registry("http://127.0.0.1:9")
+    await acts.mark_asset("raw", U937, {"state": "fetching"})  # buffer-api down: logged, not raised
+
+
+async def test_read_stage_sets_state_bytes_and_last_used(acts, server):
+    await planned_and_bound(acts)
+    staged = write_stage_json(staged_dir(acts, U937))
+    assert (await acts.read_stage(ROUND, U937)).ok
+    row = acts.registry.asset("staged", staged.name)
+    assert row["state"] == "ready" and row["job"] is None and row["last_used"] > 0
+    assert row["bytes"] == (staged / "stage.json").stat().st_size
+    assert acts.registry.asset("raw", U937)["last_used"] > 0
+    (staged / "stage.json").write_text(json.dumps({"ok": False, "volumes": [], "errors": ["boom"]}))
+    assert not (await acts.read_stage(ROUND, U937)).ok
+    assert acts.registry.asset("staged", staged.name)["state"] == "partial"
+
+
+class SubmitOnce:
+    """A job runner that builds the spec it is handed (so the hosts check runs) and answers job id j42."""
+
+    def __init__(self):
+        self.specs = []
+
+    async def submit(self, key, build):
+        self.specs.append(build())
+        return "j42"
+
+
+async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, server, monkeypatch, tmp_path):
+    from autodev.jobs import JobSpec
+    from mia_buffers.models import FetchJobArgs, StageJobArgs
+
+    def spec(cfg_, args, snap):  # the hosts are what the activity checks; the real specs are test_buffers_jobspec's
+        return JobSpec("job", "true", args.workspace, 1, allow_hosts=args.hosts)
+
+    await bound_two_urls(acts)
+    acts.jobs = SubmitOnce()
+    monkeypatch.setattr(acts_module, "snapshot", lambda cfg_, sha, tokens: tmp_path / "snap")
+    monkeypatch.setattr(acts_module, "fetch_job", spec)
+    monkeypatch.setattr(acts_module, "stage_job", spec)
+    pins = await admitted(acts)
+    workspace = await acts.prepare_fetch(7, ROUND, U937, 1)
+    with pytest.raises(ApplicationError, match="hosts not allowed by the csub policy: evil.example"):
+        await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, ["evil.example"], 1))
+    assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, ["zenodo.org"], 1)) == "j42"
+    assert acts.registry.asset("raw", U937) == {"state": "fetching", "job": "j42"}
+    stage_workspace = await acts.prepare_stage(7, ROUND, U937)
+    args = StageJobArgs(stage_workspace, ROUND, pins, U937, [], [1, 2, 4], 256, cache_writable=False)
+    assert await acts.submit("k2", args) == "j42" and args.out == str(staged_dir(acts, U937))
+    row = acts.registry.asset("staged", staged_dir(acts, U937).name)
+    assert row == {"state": "staging", "job": "j42", "record": U937, "levels_key": "p256-l1-2-4", "path": args.out}
+    acts.registry = Registry("http://127.0.0.1:9")  # the rows are best effort: the job id still comes back
+    assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, [], 1)) == "j42"

@@ -74,6 +74,50 @@ class StageJobArgs:
     patch: int
     out: str = ""
     voxel_size_nm: dict[str, float] | None = None
+    cache_writable: bool = True  # False: an offline stage after the fetch phase reads the raw cache only
+
+
+@dataclass
+class FetchJobArgs:
+    """Arguments of the `submit_fetch` activity (not replayed): the fetch job fills the record's raw cache."""
+
+    workspace: str
+    round_id: str
+    pins: BufferPins
+    record: str
+    hosts: list[str]
+    attempt: int
+
+
+@dataclass
+class FetchResult:
+    """The fetch job's fetch.json, reduced. `partial`: the job stopped before every file (byte budget, walltime);
+    `stream`: urls the harness reads in place at stage time; `failed`: urls that could not be fetched."""
+
+    ok: bool
+    partial: bool = False
+    bytes_fetched: int = 0
+    stream: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    host_not_allowed: str | None = None
+
+
+@dataclass
+class QuotaCheck:
+    """Whether the raw cache has room for a record: `expected` is its catalog size, `over_by` the bytes too many."""
+
+    ok: bool
+    over_by: int = 0
+    expected: int = 0
+
+
+@dataclass
+class RawStatus:
+    """Whether the record's raw cache holds every file of its binding; `missing` lists the whole-file urls not."""
+
+    ready: bool
+    missing: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +154,11 @@ class SourcingLimits:
     parallel: int
     walltime_min: int
     service_url: str
+    parallel_fetch: int = 2  # fetch jobs in flight per buffer
+    fetch_walltime_min: int = 480
+    fetch_attempts: int = 4
+    poll_minutes: int = 2
+    lock_ttl_s: int = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
 @dataclass
@@ -140,6 +189,7 @@ class DatasetStatus:
     issue: int | None = None  # the dataset's issue number in the datasets repo, once looked up
     folder: str = ""  # <storage_root>/<folder>/binding.yaml is what the poller watches while waiting-dataset
     voxel_size_nm: dict[str, float] | None = None  # from the plan, handed to the stage job
+    weight: float = 0.0  # the plan's weight, so the heaviest datasets are fetched first
 
 
 @dataclass
