@@ -318,6 +318,57 @@ first D round, check the live issue's spec: a non-empty `splits.stratify_by` is 
 `buffer_history_d.json` and `buffer_history_d_rebuild.json` (the degraded path) are the new replay fixtures, the
 older three are untouched; re-record each with the scoped `-k` in its test's docstring.
 
+## Preparation requests (milestone E)
+
+A buffer never asks mia-data for a dataset; a `prep:go` issue does. The issue lives in the buffers repo and its body
+is one yaml fence, with `records` or `select` (exactly one):
+
+```yaml
+schema_version: 1
+kind: preparation
+catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
+records: [<record id>, ...]     # an explicit list, or
+select: {...}                   # the buffer spec's select block, run over the registry's records at catalog.ref
+timeout_days: 14                # optional, default 14
+```
+
+A `select` only selects: no fit, no weights. `PrepSpec` in `mia_buffers/spec.py` is the model. An id that is not in
+the catalog at `ref`, or a `select` that admits nothing, ends the request in `prep:needs-human`.
+
+**Labels.** `prep:go` (human) starts `MiaPrep`; the workflow owns the rest. `prep:requested`: the records are admitted
+and handed to mia-data. `prep:done`: every record is `prepared` or `ineligible`. `prep:needs-human`: the request
+stopped, and the comment names the records that did not settle, each with its last registry state. `init-labels`
+creates all four.
+
+**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared`, `ineligible` or
+`needs-human` settles the record without touching GitHub. Otherwise it opens the mia-data issue with `data:go` (or
+nudges the open one; two requests for one record share one issue). One comment lists `record | outcome | issue` with
+the outcomes `opened`, `nudged`, `in-progress`, `done-unpublished`, `ineligible`, `prepared` and
+`needs-human`; the issue column is `<datasets repo>#<n>`. The workflow then polls
+`GET /datasets` on a backoff (`poll_minutes` doubling to 30 minutes). A record settles when its row is `prepared`, `ineligible` or `needs-human`. The request ends `prep:done` when
+all records are settled and none is `needs-human`; it ends `prep:needs-human` when any record is `needs-human`, or when
+`timeout_days` pass with records unsettled.
+
+**A busy `prep:go`.** A second `prep:go` while a request runs is refused with the busy comment, but only after the
+next poll, up to 30 minutes later (a `# ponytail:` in `MiaPrep`). Add it again once the issue shows a final stage.
+Workflow id `mia-buffers/<buffers repo>/prep-<issue>`, round id `p<issue>-e<event>`.
+
+**The `MiaBuffer` change.** Behind `workflow.patched("e-prep")`, a dataset with no prepared binding fails with
+"not prepared: request preparation with a prep:go issue" instead of nudging mia-data and waiting. The plan reads the
+prepared set from the registry, so an unprepared record is already out of the pool; the failure only covers a record
+that was prepared when the plan was made and is not now. The poller no longer watches bindings (`notice_datasets` is
+gone); `dataset_update` and `_await_dataset` stay in the file for runs recorded before E.
+
+**Rounds from before E.** A round in `waiting-dataset` never wakes after the upgrade. Prepare the dataset (a
+`prep:go` issue), then `buffer:go` again on the buffer issue to re-plan it.
+
+**`evaluate.enabled`.** `mia-data`'s config has `evaluate: {enabled: false}`. It is a switch only: no evaluate job
+exists, and setting it to true does nothing yet.
+
+**Restart.** Run `init-labels` for the `prep:*` labels, then restart the worker (it registers `MiaPrep`) and the
+poller. `prep_history.json` and `buffer_history_e.json` are the new replay fixtures; the older buffer fixtures are
+untouched.
+
 ## Running a buffer from an issue (milestone 3)
 
 The deployment reads its `mia-buffers` block of `mia.yaml` (`mia.yaml.example`; `buffers_repo` is the issue repo, `storage_root` is
@@ -366,6 +417,10 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
 Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are labels only (milestone 5).
 
 ## Datasets without a binding, and normalisation statistics (milestone 4)
+
+**Superseded by milestone E.** For rounds planned after E, the nudge-and-wait path below is gone: `MiaBuffer` fails
+an unprepared record, and a `prep:go` issue (see "Preparation requests") is what asks mia-data to prepare it. This
+section describes the path that runs only for rounds recorded before E.
 
 **Operator setup.** the `mia-buffers` block names mia-data's issue repo as `github.datasets_repo`. mia-data's own
 `mia-data` block lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments

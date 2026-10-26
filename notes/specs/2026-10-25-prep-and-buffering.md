@@ -725,6 +725,24 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
   is read outside the service's lock; draws recorded meanwhile stay for the next retire. `mia-buffers retire
   <buffer>` does the same by hand (refs, archive, `retired` event), leaving the issue's stage alone.
 
+**Built in E (2026-10-26).** Deviations from this spec and rulings made during the build:
+
+- Patch marker `e-prep` on the one `MiaBuffer` change: a not-found binding fails the dataset instead of nudging and
+  waiting. `dataset_update` and `_await_dataset` stay for pre-E runs.
+- A prep issue's records are the explicit `records:` list or the buffer spec's `select` block run over the registry's
+  records at `catalog.ref` (selection only: no fit, no weights); the spec adds `timeout_days` (default 14).
+- Progress is read from the registry (`GET /datasets`) on a backoff, `poll_minutes` doubling to 30 minutes; a record
+  settles when `prepared`, `ineligible` or `needs-human`. `prep:done` needs all settled and none `needs-human`.
+- `evaluate.enabled: false` is a switch in mia-data's config only; no evaluate job is built.
+- Workflow id `mia-buffers/<buffers_repo>/prep-<issue>`, round id `p<issue>-e<event>`; `ROUND_RE` accepts `p` ids.
+- The outcomes comment shows the dataset issue as `<datasets repo>#<n>`, and a registry `needs-human` row is an outcome.
+- A `select` that admits nothing ends the request in `prep:needs-human`.
+- `refuse_label` accepts `prep:go`, so a busy request is refused; the refusal comes after the next poll, up to 30
+  minutes later (upgrade: a `wait_condition` on the go events with the backoff as its timeout).
+- Ruling: the poller's binding watch is removed even though the live round waits on a dataset; a pre-E round in
+  `waiting-dataset` is re-planned with `buffer:go` once the dataset is prepared.
+- Ruling: the review of `MiaPrep` is folded into the final whole-branch review.
+
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 
 ## 11. Open questions (defaults in bold)

@@ -35,6 +35,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
 - **A staged artifact is published by the worker's rename and never written again.** Stage jobs write
   `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
+- **A buffer never asks mia-data for a dataset; a `prep:go` issue does.** `MiaBuffer` fails an unprepared record;
+  `MiaPrep` opens the `data:go` issues and follows them through the registry.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 
