@@ -71,6 +71,7 @@ def buffer_config(
         "idle_hours": spec.idle.hours,
         "retire_after_days": spec.retire_after_days,
         "auto_approve": spec.plan.auto_approve,
+        "max_empty_fraction": spec.health.max_empty_fraction,
     }
 
 

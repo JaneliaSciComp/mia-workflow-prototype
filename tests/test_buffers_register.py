@@ -302,3 +302,7 @@ def test_buffer_config_carries_recipe_plan_hash_and_lifecycle(spec_2d):  # noqa:
     cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={}, recipe=recipe, plan_hash="ph")
     assert recipe["params"] == cfg["tensorizer_params"] and cfg["recipe"] == recipe and cfg["plan_hash"] == "ph"
     assert (cfg["idle_hours"], cfg["retire_after_days"], cfg["auto_approve"]) == (72, 14, False)
+    assert cfg["max_empty_fraction"] == 0.05
+    strict = spec_with(spec_2d, **{"health.max_empty_fraction": 0.2})
+    again = buffer_config(plan, strict, tensorizer="muvit-2d", split_sizes={}, recipe=recipe, plan_hash="ph")
+    assert again["max_empty_fraction"] == 0.2

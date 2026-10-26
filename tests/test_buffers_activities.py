@@ -950,6 +950,8 @@ async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, 
     assert dry.errors == [] and dry.scanned == 2 and dry.new == 0
     assert dry.evicted == ["staged free"] and free.is_dir() and registry.asset("staged", "free")["state"] == "ready"
     assert dry.catalog == f"{REF} (6 records)" and registry.catalogs()  # due: no mark file yet
+    last = registry.request("GET", "/keeper")  # the pass, for the page
+    assert last["dry_run"] is True and last["evicted"] == ["staged free"] and last["at"] > old
 
     report = await acts.keep()
     assert report.errors == [] and report.catalog == ""  # synced a pass ago
@@ -958,6 +960,7 @@ async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, 
     assert row["state"] == "evicted" and row["bytes"] == 0 and row["evicted_at"] > old
     assert registry.asset("staged", "held")["state"] == "ready"
     assert report.over_quota == {} and acts.gh.comments == {}
+    assert registry.request("GET", "/keeper")["dry_run"] is False
     assert (await acts.keep()).evicted == []  # under quota now
 
 

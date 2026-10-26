@@ -140,3 +140,11 @@ def test_buffer_lifecycle_calls():
     assert reg.retire("b") == reply and seen[5].method == "DELETE" and seen[5].url.path == "/buffers/b/refs"
     assert reg.status("b") == reply and seen[6].method == "GET" and seen[6].url.path == "/buffers/b/status"
     assert all(request.headers["authorization"] == "Bearer t" for request in seen)
+
+
+def test_put_keeper():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"evicted": [], "at": 1.0}))
+    assert reg.put_keeper({"evicted": []}) == {"evicted": [], "at": 1.0}
+    assert seen[0].method == "PUT" and seen[0].url.path == "/keeper" and json.loads(seen[0].read()) == {"evicted": []}
+    assert seen[0].headers["authorization"] == "Bearer t"

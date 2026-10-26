@@ -15,6 +15,7 @@ import random
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,7 +43,18 @@ MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 DATASET_STATES = ("in-progress", "prepared", "ineligible", "needs-human")  # no row = unprepared
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
-Response = tuple[int, dict | None, dict[str, str]]
+UI_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")  # a file of the page by basename; no dotfile, no "/"
+UI_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+EMPTY_WINDOW_S = 3600  # the usage route's "last hour"
+JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "application/json"})
+# a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers
+Response = tuple[int, dict | bytes | None, dict[str, str]]
 
 
 class _Strict(BaseModel):
@@ -66,6 +78,7 @@ class BufferConfig(_Strict):
     idle_hours: float = 72
     retire_after_days: float = 14
     auto_approve: bool = False
+    max_empty_fraction: float = 0.05  # spec health: the share of empty answers (204) the page flags above
 
 
 class LevelBody(_Strict):
@@ -186,6 +199,12 @@ ROUTES = [
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
     ("GET", re.compile(r"^/locks$"), "locks", "read"),
+    ("GET", re.compile(r"^/$"), "page", "read"),
+    ("GET", re.compile(r"^/ui/([^/]+)$"), "ui", "read"),
+    ("GET", re.compile(r"^/meta$"), "meta", "read"),
+    ("GET", re.compile(r"^/usage/([^/]+)$"), "usage", "read"),
+    ("PUT", re.compile(r"^/keeper$"), "put_keeper", "worker"),
+    ("GET", re.compile(r"^/keeper$"), "keeper", "read"),
 ]
 
 
@@ -203,6 +222,8 @@ class BufferService:
         staged_root: Path | None = None,
         locks: LockDir | None = None,
         archive_dir: Path | None = None,
+        meta: dict | None = None,
+        ui_dir: Path | None = None,
     ):
         self.ledger = ledger
         self.token = token  # None disables the worker check (tests, a dev service)
@@ -211,6 +232,9 @@ class BufferService:
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
+        self.meta = meta  # what the page needs from mia.yaml (page_meta); None answers nulls
+        self.ui_dir = ui_dir  # the page's files; None serves no page
+        self._empty: dict[str, deque[float]] = {}  # per buffer, the times of the last hour's 204s
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
@@ -470,7 +494,7 @@ class BufferService:
                 if (d := draw(rng, volumes, split, patch=config.patch, levels=config.levels, channels=config.channels))
             ]
         if not descriptors:
-            return 204, None, {"Retry-After": str(RETRY_AFTER_S)}
+            return self._no_content(buffer)
         return 200, {"descriptors": self.ledger.record_draws(buffer, consumer_id, descriptors)}, {}
 
     def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
@@ -482,7 +506,7 @@ class BufferService:
             raise HttpError(416, f"from {start} is past the {split} list of {size}")
         volumes = self.ledger.volumes(buffer)
         if not servable(volumes, split):
-            return 204, None, {"Retry-After": str(RETRY_AFTER_S)}
+            return self._no_content(buffer)
         end = min(start + n, size)
         with self._lock:
             frozen = self.ledger.frozen(buffer, split)
@@ -496,6 +520,71 @@ class BufferService:
                 self.ledger.extend_frozen(buffer, split, fresh)
                 frozen += fresh
         return 200, {"descriptors": frozen[start:end], "size": size}, {}
+
+    def _no_content(self, buffer: str) -> Response:
+        """A 204 (nothing servable yet), counted for the buffer's usage: the day's row and the last hour's window."""
+        now = time.time()
+        with self._lock:
+            self._empty_window(buffer, now).append(now)
+        self.ledger.count_empty(buffer, datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d"))
+        return 204, None, {"Retry-After": str(RETRY_AFTER_S)}
+
+    def _empty_window(self, buffer: str, now: float) -> deque[float]:
+        """The buffer's 204 times within the last hour, older ones dropped; call under `_lock`."""
+        window = self._empty.setdefault(buffer, deque())
+        while window and window[0] < now - EMPTY_WINDOW_S:
+            window.popleft()
+        return window
+
+    # --- the page: its files, what it needs from mia.yaml, usage and the keeper's last pass --------
+
+    def _page(self, *, query: dict[str, str], body: bytes) -> Response:
+        return self._ui("index.html", query=query, body=body)
+
+    def _ui(self, name: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A file of the page by basename only (the segment is unquoted already, so check it here)."""
+        content_type = UI_TYPES.get(PurePosixPath(name).suffix)
+        if self.ui_dir is None or not UI_NAME_RE.match(name) or content_type is None:
+            raise HttpError(404, "no such file")
+        path = self.ui_dir / name
+        if not path.is_file():
+            raise HttpError(404, "no such file")
+        return 200, path.read_bytes(), {"Content-Type": content_type}
+
+    def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
+        if self.meta is not None:
+            return 200, self.meta, {}
+        names = ("buffers_repo", "datasets_repo", "catalog_repo", "service_url")
+        return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}}, {}
+
+    def _usage(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        config = self._config(buffer)
+        with self._lock:
+            empty = len(self._empty_window(buffer, time.time()))
+        last_hour = {**self.ledger.last_hour(buffer), "empty": empty}
+        days = self.ledger.usage(buffer)
+        return (
+            200,
+            {"buffer": buffer, "days": days, "last_hour": last_hour, "max_empty_fraction": config.max_empty_fraction},
+            {},
+        )
+
+    def _put_keeper(self, *, query: dict[str, str], body: bytes) -> Response:
+        try:
+            report = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not isinstance(report, dict):
+            raise HttpError(422, "a keeper report is a JSON object")
+        report.setdefault("at", time.time())
+        self.ledger.put_kv("keeper", report)
+        return 200, report, {}
+
+    def _keeper(self, *, query: dict[str, str], body: bytes) -> Response:
+        report = self.ledger.kv("keeper")
+        if report is None:
+            return 200, *JSON_NULL
+        return 200, report, {}
 
     def _status(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         """The buffer's summary; with a staged root, first stats each volume's pyramid once and flags the missing."""
@@ -532,12 +621,15 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
             status, payload, headers = service.handle(
                 self.command, parts.path, dict(parse_qsl(parts.query)), body, dict(self.headers.items())
             )
-            data = json.dumps(payload).encode() if payload is not None else b""
+            if isinstance(payload, bytes):
+                data = payload  # the handler's headers carry its Content-Type
+            else:
+                data = json.dumps(payload).encode() if payload is not None else b""
+                if data:
+                    headers = {**headers, "Content-Type": "application/json"}
             self.send_response(status)
             for key, value in headers.items():
                 self.send_header(key, value)
-            if data:
-                self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             if data:
@@ -597,6 +689,21 @@ def backup_forever(ledger: Ledger, directory: Path, minutes: int, stop: threadin
             log.exception("ledger backup failed")
 
 
+def page_meta(cfg: Config) -> dict:
+    """What the page reads from mia.yaml (`GET /meta`): the repos, the service URL, each root's browser URL (None when
+    unset), the quota and the keeper's cadence."""
+    github, paths = cfg.github, cfg.paths
+    return {
+        "buffers_repo": github.buffers_repo,
+        "datasets_repo": github.datasets_repo,
+        "catalog_repo": github.catalog_repo,
+        "service_url": cfg.service.url,
+        "roots": {root: getattr(paths, f"{root}_url") for root in paths.ROOTS},
+        "quota": cfg.quota.model_dump(),
+        "keeper": cfg.keeper.model_dump(),
+    }
+
+
 def serve(cfg: Config) -> None:
     """Run buffer-api until interrupted, as configured: URL, ledger on the local root, backups, worker token."""
     if cfg.service.token_file is None:
@@ -619,6 +726,8 @@ def serve(cfg: Config) -> None:
             staged_root=cfg.paths.staged_root,
             locks=LockDir(cfg.paths.local_root / "locks"),
             archive_dir=cfg.paths.state_dir / "archive",
+            meta=page_meta(cfg),
+            ui_dir=Path(__file__).parent / "ui",
         ),
         url.hostname or "127.0.0.1",
         url.port,

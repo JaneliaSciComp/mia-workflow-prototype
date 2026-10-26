@@ -166,6 +166,10 @@ class Registry:
         draw of the buffer: minutes on a large one, so the sync timeout."""
         return self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/refs", timeout=SYNC_TIMEOUT_S)
 
+    def put_keeper(self, report: dict) -> dict:
+        """Store the keeper's last pass for the page (`at` added when absent); returns it as stored."""
+        return self.request("PUT", "/keeper", json=report)
+
     def status(self, buffer: str) -> dict:
         """The buffer's status (stats its pyramids, flags the missing); a consumer route, the token is harmless."""
         return self.request("GET", f"/buffers/{quote(buffer, safe='')}/status")

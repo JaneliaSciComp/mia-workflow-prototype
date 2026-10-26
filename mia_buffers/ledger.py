@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS buffer_datasets (buffer TEXT, record TEXT, status TEX
                                             updated_at REAL, PRIMARY KEY (buffer, record));
 CREATE TABLE IF NOT EXISTS buffer_events (buffer TEXT, seq INTEGER, kind TEXT, at REAL, issue INTEGER, event_id TEXT,
                                           detail TEXT, PRIMARY KEY (buffer, seq));
+CREATE TABLE IF NOT EXISTS usage (buffer TEXT, day TEXT, draws INTEGER, consumers INTEGER, empty INTEGER,
+                                  PRIMARY KEY (buffer, day));
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
 BOARD_COLUMNS = ("record", "status", "reason", "job", "updated_at")
@@ -224,9 +227,67 @@ class Ledger:
             with self._transaction() as db:
                 drawn = 0
                 if archive is not None:
+                    # the daily usage outlives the draws: fold the days being deleted into `usage` first
+                    db.execute(
+                        "INSERT INTO usage SELECT buffer, strftime('%Y-%m-%d', ts, 'unixepoch'), COUNT(*), "
+                        "COUNT(DISTINCT consumer), 0 FROM draws WHERE buffer = ? AND seq <= ? GROUP BY 2 "
+                        "ON CONFLICT (buffer, day) DO UPDATE SET draws = COALESCE(draws, 0) + excluded.draws, "
+                        "consumers = MAX(COALESCE(consumers, 0), excluded.consumers)",
+                        (buffer, last),
+                    )
                     drawn = db.execute("DELETE FROM draws WHERE buffer = ? AND seq <= ?", (buffer, last)).rowcount
                 refs = db.execute("DELETE FROM refs WHERE buffer = ?", (buffer,)).rowcount
         return {"refs": refs, "draws": drawn, "archive": str(archive) if archive and archive.exists() else None}
+
+    # --- daily usage and the key-value rows: what the page charts -------------------------------
+
+    def count_empty(self, buffer: str, day: str) -> None:
+        """One more empty answer (a 204) for the buffer on `day` (YYYY-MM-DD, UTC)."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO usage VALUES (?, ?, NULL, NULL, 1) ON CONFLICT (buffer, day) DO UPDATE SET empty = empty + 1",
+                (buffer, day),
+            )
+
+    def usage(self, buffer: str) -> list[dict]:
+        """Per UTC day, oldest first: {day, draws, consumers, empty}. A day's draws are the materialised ones (a retire
+        folded them in) plus the live rows still in `draws`; consumers the larger of the two counts."""
+        # ponytail: consumers across a retire is a max, not a true distinct count; exact needs the archived ids
+        with self._lock:
+            stored = self._db.execute(
+                "SELECT day, draws, consumers, empty FROM usage WHERE buffer = ?", (buffer,)
+            ).fetchall()
+            live = self._db.execute(
+                "SELECT strftime('%Y-%m-%d', ts, 'unixepoch'), COUNT(*), COUNT(DISTINCT consumer) FROM draws "
+                "WHERE buffer = ? GROUP BY 1",
+                (buffer,),
+            ).fetchall()
+        days = {
+            day: {"day": day, "draws": draws or 0, "consumers": consumers or 0, "empty": empty or 0}
+            for day, draws, consumers, empty in stored
+        }
+        for day, draws, consumers in live:
+            row = days.setdefault(day, {"day": day, "draws": 0, "consumers": 0, "empty": 0})
+            row["draws"] += draws
+            row["consumers"] = max(row["consumers"], consumers)
+        return [days[day] for day in sorted(days)]
+
+    def last_hour(self, buffer: str) -> dict:
+        """{draws}: the buffer's draws in the last hour (the empty answers are the service's, kept in memory)."""
+        with self._lock:
+            (draws,) = self._db.execute(
+                "SELECT COUNT(*) FROM draws WHERE buffer = ? AND ts >= ?", (buffer, time.time() - 3600)
+            ).fetchone()
+        return {"draws": draws}
+
+    def put_kv(self, key: str, value: dict) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(value)))
+
+    def kv(self, key: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def _archive_draws(self, buffer: str, archive: Path, last: int) -> None:
         """Append the buffer's draws with `seq <= last` to the gzipped archive, streamed from a read-only

@@ -306,3 +306,32 @@ def test_retire_keeps_a_draw_recorded_while_the_archive_is_written(tmp_path, mon
     assert out["draws"] == 2 and ledger.max_seq("b1") == 3
     with gzip.open(tmp_path / "archive" / "b1.draws.jsonl.gz", "rt") as fh:
         assert [json.loads(line)["seq"] for line in fh] == [1, 2]
+
+
+def test_usage_counts_empty_answers_and_merges_live_draws(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    led.count_empty("b", day)
+    led.count_empty("b", day)
+    led.count_empty("b", "2026-01-01")
+    led.count_empty("other", day)
+    assert led.usage("b") == [
+        {"day": "2026-01-01", "draws": 0, "consumers": 0, "empty": 1},
+        {"day": day, "draws": 0, "consumers": 0, "empty": 2},
+    ]
+    led.record_draws("b", "c1", [{"volume": "a"}, {"volume": "a"}])
+    led.record_draws("b", "c2", [{"volume": "a"}])
+    assert led.usage("b")[1] == {"day": day, "draws": 3, "consumers": 2, "empty": 2}
+    assert led.last_hour("b") == {"draws": 3} and led.last_hour("other") == {"draws": 0}
+    assert led.retire("b", tmp_path / "archive")["draws"] == 3
+    assert led.usage("b")[1] == {"day": day, "draws": 3, "consumers": 2, "empty": 2}  # materialised, empty kept
+    led.record_draws("b", "c3", [{"volume": "a"}])  # a draw after the retire adds to the materialised day
+    assert led.usage("b")[1] == {"day": day, "draws": 4, "consumers": 2, "empty": 2}
+
+
+def test_kv(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    assert led.kv("keeper") is None
+    led.put_kv("keeper", {"a": 1})
+    led.put_kv("keeper", {"b": 2})
+    assert led.kv("keeper") == {"b": 2}

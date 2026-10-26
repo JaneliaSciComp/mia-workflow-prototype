@@ -1206,6 +1206,8 @@ class Activities:
             await step("catalog sync", self._keeper_catalog(report, now))
         finally:
             beating.cancel()
+        report_body = {**dataclasses.asdict(report), "dry_run": dry_run}  # the page shows the last pass
+        await asyncio.to_thread(best_effort, lambda: registry.put_keeper(report_body), "keeper report", log)
         return report
 
     async def _keeper_catalog(self, report: KeeperReport, now: float) -> None:

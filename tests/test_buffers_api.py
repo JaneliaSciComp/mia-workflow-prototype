@@ -628,3 +628,131 @@ def test_buffer_config_takes_the_lifecycle_fields(tmp_path):
     assert call(s, "PUT", "/buffers/d", payload=CFG)[0] == 200
     defaults = call(s, "GET", "/buffers/d/status")[1]["config"]
     assert (defaults["idle_hours"], defaults["retire_after_days"], defaults["auto_approve"]) == (72, 14, False)
+
+
+# --- the page's routes: static files, meta, usage, the keeper's last pass ----------------------------------
+
+
+def test_root_serves_the_page_and_ui_files(tmp_path):
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "index.html").write_text("<!doctype html><title>t</title>")
+    (ui / "app.js").write_text("let a = 1;")
+    (ui / "notes.txt").write_text("not served")
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), ui_dir=ui)
+    assert call(s, "GET", "/") == (
+        200,
+        b"<!doctype html><title>t</title>",
+        {"Content-Type": "text/html; charset=utf-8"},
+    )
+    assert call(s, "GET", "/ui/app.js") == (200, b"let a = 1;", {"Content-Type": "text/javascript"})
+    assert call(s, "GET", "/ui/notes.txt")[0] == 404  # not one of the served suffixes
+    assert call(s, "GET", "/ui/missing.css")[0] == 404
+    assert call(svc(tmp_path), "GET", "/")[0] == 404  # no ui_dir: no page
+
+    server = make_server(s, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        page = httpx.get(f"{base}/")
+        assert page.status_code == 200 and page.headers["content-type"] == "text/html; charset=utf-8"
+        assert page.content == b"<!doctype html><title>t</title>"
+        meta = httpx.get(f"{base}/meta")  # a dict still goes out as JSON
+        assert meta.headers["content-type"] == "application/json" and meta.json()["service_url"] is None
+        assert httpx.get(f"{base}/keeper").json() is None  # JSON null, not an empty body
+    finally:
+        server.shutdown()
+
+
+def test_ui_route_refuses_traversal(tmp_path):
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (tmp_path / "secret.html").write_text("no")
+    (ui / ".hidden.js").write_text("no")
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), ui_dir=ui)
+    for path in (
+        "/ui/..%2Fsecret.html",
+        "/ui/%2E%2E%2Fsecret.html",
+        "/ui/../secret.html",
+        "/ui/.hidden.js",
+        "/ui/..",
+        "/ui/a%00.js",
+        "/ui/sub/x.js",
+        "/ui/",
+    ):
+        assert call(s, "GET", path)[0] == 404, path
+
+
+def test_meta_route(tmp_path):
+    empty = call(svc(tmp_path), "GET", "/meta")[1]
+    assert empty == {
+        "buffers_repo": None,
+        "datasets_repo": None,
+        "catalog_repo": None,
+        "service_url": None,
+        "roots": {},
+        "quota": {},
+        "keeper": {},
+    }
+    from mia_buffers.api import page_meta
+
+    cfg = make_cfg(tmp_path, paths={"staged_root": {"path": str(tmp_path / "staged"), "url": "https://fg/staged"}})
+    meta = page_meta(cfg)
+    assert set(meta) == set(empty) and meta["buffers_repo"] == cfg.github.buffers_repo
+    assert (meta["datasets_repo"], meta["catalog_repo"]) == (cfg.github.datasets_repo, cfg.github.catalog_repo)
+    assert meta["service_url"] == cfg.service.url
+    assert meta["roots"] == {
+        "work_root": None,
+        "storage_root": None,
+        "raw_root": None,
+        "staged_root": "https://fg/staged",
+    }
+    assert meta["quota"] == {"raw_bytes": 0, "staged_bytes": 0, "headroom_bytes": 200e9, "hold_hours": 48}
+    assert meta["keeper"] == {"minutes": 30, "catalog_sync_hours": 24}
+    assert call(BufferService(Ledger(tmp_path / "m.sqlite"), meta=meta), "GET", "/meta")[1] == meta
+
+
+def test_usage_live_and_materialised(tmp_path, monkeypatch):
+    import time as time_module
+    from datetime import UTC, datetime
+
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", archive_dir=tmp_path / "archive")
+    worker(s, "PUT", "/buffers/b", CFG)
+    assert call(s, "GET", "/usage/zz")[0] == 404
+    one, two = (call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"] for _ in range(2))
+    assert call(s, "GET", "/buffers/b/next", {"consumer": one})[0] == 204  # no volume yet: two empty answers
+    assert call(s, "GET", "/buffers/b/split/val", {"consumer": one})[0] == 204
+    worker(s, "PUT", "/buffers/b/volumes/a", body())
+    yesterday = time_module.time() - 86400
+    with monkeypatch.context() as patched:
+        patched.setattr("mia_buffers.ledger.time.time", lambda: yesterday)
+        call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": one})
+    call(s, "GET", "/buffers/b/next", {"n": "3", "consumer": one})
+    call(s, "GET", "/buffers/b/next", {"n": "1", "consumer": two})
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    before = datetime.fromtimestamp(yesterday, UTC).strftime("%Y-%m-%d")
+    expected = [
+        {"day": before, "draws": 2, "consumers": 1, "empty": 0},
+        {"day": today, "draws": 4, "consumers": 2, "empty": 2},
+    ]
+    status, out, _ = call(s, "GET", "/usage/b")
+    assert status == 200 and out == {
+        "buffer": "b",
+        "days": expected,
+        "last_hour": {"draws": 4, "empty": 2},
+        "max_empty_fraction": 0.05,
+    }
+    assert worker(s, "DELETE", "/buffers/b/refs")[1]["draws"] == 6
+    assert s.ledger.max_seq("b") == 0  # the draws are gone, the days stay
+    assert call(s, "GET", "/usage/b")[1]["days"] == expected
+
+
+def test_keeper_kv_routes(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    assert call(s, "GET", "/keeper")[:2] == (200, b"null")
+    assert call(s, "PUT", "/keeper", payload={"evicted": []})[0] == 401
+    assert worker(s, "PUT", "/keeper", [1, 2])[0] == 422
+    status, stored, _ = worker(s, "PUT", "/keeper", {"evicted": ["staged a"], "dry_run": False})
+    assert status == 200 and stored["evicted"] == ["staged a"] and isinstance(stored["at"], float)
+    assert call(s, "GET", "/keeper")[1] == stored
+    assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
