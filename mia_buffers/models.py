@@ -257,6 +257,7 @@ class BufferState:
     retired: bool = False  # the round's buffer was retired: refs released, draws archived
     idle_hours: float = 72  # spec idle.hours and retire_after_days, for the idle comment
     retire_after_days: float = 14
+    superseded: list[str] = field(default_factory=list)  # buffers a go left serving, until the keeper retires them
 
 
 def job_key(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:

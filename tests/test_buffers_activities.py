@@ -1188,6 +1188,8 @@ async def test_mark_dataset_and_retire(acts, server):
     ]
     assert await acts.raw_ready(ROUND, U937) is False  # nothing fetched
     assert set(await acts.retire_buffer(ROUND, ROUND)) >= {"refs", "draws"}
+    [retired] = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]
+    assert (retired["kind"], retired["issue"], retired["detail"]) == ("retired", 7, "archive none")
     acts.registry = Registry("http://127.0.0.1:9")
     await acts.mark_dataset(ROUND, U937, "staging")
     with pytest.raises(RegistryError):  # the workflow retries a retire

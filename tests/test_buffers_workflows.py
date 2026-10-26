@@ -728,6 +728,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
 CACHE_HISTORY = HISTORY.with_name("buffer_history_c.json")
 LIFECYCLE_HISTORY = HISTORY.with_name("buffer_history_d.json")
+REBUILD_HISTORY = HISTORY.with_name("buffer_history_d_rebuild.json")
 
 
 def _scrub(obj):
@@ -1407,7 +1408,7 @@ async def test_degraded_rebuilds_from_the_raw_cache(env):
     m = Mocks(
         plan=ONLY_U937,
         bindings={"u937": [unstaged, unstaged, replace(unstaged, staged=True)]},  # sourcing reads it twice
-        missing=[["u937"], []],  # the re-send comes after the rebuild: nothing is missing any more
+        missing=[["u937"], ["u937"], []],  # asked again under the lock; the re-send comes after the rebuild
     )
     async with started(env, m) as h:
         await approve(h, m)
@@ -1415,7 +1416,7 @@ async def test_degraded_rebuilds_from_the_raw_cache(env):
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
-        await until(lambda: len(m.of("missing_records")) == 2, m=m)
+        await until(lambda: len(m.of("missing_records")) == 3, m=m)
         await asyncio.sleep(0.3)
         state = await h.query(MiaBuffer.status)
     assert len(m.of("read_binding")) == 4  # staged=True on both of the rebuild's reads, and staged anyway
@@ -1531,7 +1532,8 @@ async def test_ticker_stops_with_the_round(env):
 async def test_replay_buffer_history_d(env):
     """The run under `d-lifecycle` and `d-tick`: the plan auto-approves, u937 waits one tick for its raw lock, the
     buffer goes ready, idle, back to ready and is retired; as test_replay_buffer_history. Re-record this one alone:
-    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_d"""
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k "replay_buffer_history_d and not rebuild"
+    """
     if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
         m = Mocks(plan=replace(ONLY_U937, auto_approve=True), locks={"u937": [HELD, LockTaken(True)]})
         async with started(env, m) as h:
@@ -1610,3 +1612,102 @@ async def test_lifecycle_labels_outside_the_ready_loop_are_refused_at_once(env):
         await until(lambda: len(m.of("refuse_label")) == 2, m=m)
     assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("buffer:retire", "21"), ("buffer:keep", "22")]
     assert not m.of("retire_buffer")
+
+
+# --- final fix pass ------------------------------------------------------------------------------
+
+
+async def test_a_rebuild_another_buffer_finished_while_this_one_waited_is_reused(env):
+    """Two buffers share the artifact: the other one holds the raw lock while rebuilding it. Once the lock is ours
+    the record is no longer missing, so the pyramid is registered as it is: no second stage job."""
+    m = Mocks(
+        plan=ONLY_U937,
+        locks={"u937": [LockTaken(True), LockTaken(True), HELD, LockTaken(True)]},  # sourcing takes it twice
+        missing=[["u937"], []],  # missing when the keeper says so, back on disk once the lock is ours
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await waits_on_lock(h, "u937")
+        await env.sleep(timedelta(minutes=3))
+        await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert len(m.of("submit")) == 1 and m.of("prepare_stage") == [("u937",)] and not m.of("raw_status")[1:]
+    assert m.of("read_stage") == [("u937",), ("u937", 1)] and len(m.of("register_dataset")) == 2
+    servable = [c[0] for c in m.of("comment") if c[1] == "dataset i7-e11 u937 servable"]
+    assert servable[-1].endswith("rebuilt by mia-buffers i9-e9 rec while this buffer waited and reused.")
+    assert dataset(state, "u937").status == "servable" and state.stage == "ready"
+
+
+async def test_the_keepers_retire_of_a_ready_buffer_is_ignored(env):
+    """The keeper sent retire for the idle buffer, then a keep made it ready: the keeper's retire is stale. A
+    `buffer:retire` label still retires a ready buffer."""
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
+        await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
+        await idle(h, m, "idle")
+        assert not m.of("retire_buffer")
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
+        await idle(h, m, "retired")
+    assert m.of("retire_buffer") == [("i7-e11",)] and m.stages[-3:] == ["ready", "idle", "retired"]
+
+
+async def test_a_superseded_buffer_is_retired_by_the_keeper(env):
+    """A go from the idle loop leaves the buffer registered: the keeper's idle about it writes nothing, its retire
+    releases it and says so; the new round is untouched."""
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
+        await idle(h, m, "idle")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "plan-review")
+        assert (await h.query(MiaBuffer.status)).superseded == ["i7-e11"]
+        await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
+        await until(lambda: m.of("retire_buffer"), m=m)
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])  # the next keeper pass, before it saw the event
+        await until(lambda: any(c[1] == "retired i7-e11" for c in m.of("comment")), m=m)
+        await asyncio.sleep(0.3)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.superseded == [] and state.round_id == "i7-e15"
+    assert ("superseded buffer `i7-e11` retired: refs released", "retired i7-e11") in m.of("comment")
+    assert m.stages[-2:] == ["planning", "plan-review"] and not m.of("refuse_label")
+
+
+async def test_a_lifecycle_label_while_sourcing_is_refused_at_once(env):
+    m = Mocks(plan=ONLY_U937, gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("await"), m=m)  # the stage job runs: sourcing, not ready
+        await h.signal(MiaBuffer.keep, ev("keep", "31"))
+        await until(lambda: m.of("refuse_label"), m=m)
+        m.gate.set()
+        await idle(h, m, "ready")
+    assert m.of("refuse_label") == [
+        ("buffer:keep", "1 datasets still sourcing; add `buffer:keep` again once they settle", "31")
+    ]
+
+
+async def test_replay_buffer_history_d_rebuild(env):
+    """The degraded path under `d-lifecycle` and `d-tick`: ready, the keeper finds u937's pyramid gone, it is still
+    missing when asked again under the raw lock, so it is staged again from the raw cache with a job of its own and
+    the buffer stays ready; as test_replay_buffer_history. Re-record this one alone:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_d_rebuild"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(plan=ONLY_U937, missing=[["u937"]])
+        async with started(env, m) as h:
+            await approve(h, m)
+            await idle(h, m, "ready")
+            await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+            await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+            await idle(h, m, "ready")
+            assert len(m.of("submit")) == 2 and len(m.of("missing_records")) == 2
+            REBUILD_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-d-rebuild", REBUILD_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)

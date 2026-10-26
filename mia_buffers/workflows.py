@@ -59,6 +59,7 @@ WAITING = ("waiting-dataset", "waiting-drop", "blocked")
 ABANDONED = "abandoned: a new buffer:go started another round"
 RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this issue has no ready or idle buffer"
+SOURCING = "{count} datasets still sourcing; add `{label}` again once they settle"
 NOT_IDLE = "the buffer is ready, not idle"
 AUTO_APPROVE = "plan.auto_approve: sourcing starts without review"
 IDLE = (
@@ -276,18 +277,42 @@ class MiaBuffer:
         """Lifecycle signals are queued and this run acts on them (an old run ignores them, as it always did)."""
         return self.lifecycle_on and bool(self.lifecycle)
 
-    async def _refuse_lifecycle(self) -> None:
-        """d-lifecycle: refuse the queued lifecycle signals, for there is no ready or idle buffer to apply them to.
-        A label is refused with a comment; the keeper's own signals are only logged."""
+    async def _refuse_lifecycle(self, reason: str = NO_BUFFER, count: int = 0) -> None:
+        """d-lifecycle: refuse the queued lifecycle signals, for there is no ready or idle buffer to apply them to
+        (`reason` may name `{label}` and `{count}`). A label is refused with a comment; the keeper's own signals
+        are only logged, but for a retire of a superseded buffer."""
         if not self._lifecycle():
             return
         queued, self.lifecycle = self.lifecycle, []
-        for kind, payload, _buffer in queued:
+        for kind, payload, buffer in queued:
+            why = reason.format(label=f"buffer:{kind}", count=count)
             if isinstance(payload, LabelEvent):
                 if not self._seen(payload):
-                    await self._refuse(f"buffer:{kind}", NO_BUFFER, payload)
-            else:
-                workflow.logger.info("issue #%d: %s ignored: %s", self.state.issue, kind, NO_BUFFER)
+                    await self._refuse(f"buffer:{kind}", why, payload)
+            elif not await self._superseded(kind, buffer):
+                workflow.logger.info("issue #%d: %s ignored: %s", self.state.issue, kind, why)
+
+    async def _superseded(self, kind: str, buffer: str) -> bool:
+        """A keeper signal about a buffer a go left serving (`state.superseded`): its retire (the keeper waited
+        retire_after_days after its idle) releases it; anything else is logged. False: not a superseded buffer."""
+        if not buffer or buffer not in self.state.superseded:
+            return False
+        if kind != "retire":
+            workflow.logger.info("issue #%d: %s of superseded buffer %s ignored", self.state.issue, kind, buffer)
+            return True
+        try:
+            await self._act("retire_buffer", buffer, buffer, seconds=900, result_type=dict)
+        except ActivityError as error:  # the keeper signals it again on its next pass
+            workflow.logger.warning(
+                "issue #%d: retire of superseded buffer %s: %s", self.state.issue, buffer, error_message(error)
+            )
+            return True
+        self.state.superseded.remove(buffer)
+        try:
+            await self._comment(f"superseded buffer `{buffer}` retired: refs released", f"retired {buffer}")
+        except ActivityError as error:  # best effort: the retire is done
+            workflow.logger.warning("issue #%d: %s", self.state.issue, error_message(error))
+        return True
 
     async def _comment(self, body: str, marker: str) -> None:
         await self._act("comment", self.state.issue, body, marker)
@@ -419,11 +444,17 @@ class MiaBuffer:
             index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
         }
         tasks = [created[index] for index in range(len(datasets))]  # in state.datasets order, as the zips below need
+        deadline = workflow.now() + timedelta(days=state.timeout_days)
         try:
-            await workflow.wait_condition(
-                lambda: self._ready_now() or all(task.done() for task in tasks),
-                timeout=timedelta(days=state.timeout_days),
-            )
+            while True:
+                await workflow.wait_condition(
+                    lambda: self._ready_now() or all(task.done() for task in tasks) or self._lifecycle(),
+                    timeout=deadline - workflow.now(),
+                )
+                if self._ready_now() or all(task.done() for task in tasks):
+                    break
+                # d-lifecycle: a keep or retire label while sourcing is refused now, not once the buffer is ready
+                await self._refuse_lifecycle(SOURCING, sum(not task.done() for task in tasks))
         except TimeoutError:
             self.timed_out = True
             if not self._ready_now():
@@ -476,13 +507,16 @@ class MiaBuffer:
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events:
                 await self._cancel_rebuild(ABANDONED)
+                if self.state.buffer_id and not self.state.retired:  # it stays registered: its retire comes later
+                    self.state.superseded = (self.state.superseded + [self.state.buffer_id])[-20:]
                 return
             while self.lifecycle:
                 kind, payload, buffer = self.lifecycle.pop(0)
                 if isinstance(payload, LabelEvent) and self._seen(payload):
                     continue
                 if buffer and buffer != self.state.buffer_id:  # about a buffer an earlier round left registered
-                    workflow.logger.info("issue #%d: %s of buffer %s ignored", self.state.issue, kind, buffer)
+                    if not await self._superseded(kind, buffer):
+                        workflow.logger.info("issue #%d: %s of buffer %s ignored", self.state.issue, kind, buffer)
                     continue
                 if not await self._on_lifecycle(kind, payload):
                     return
@@ -502,8 +536,11 @@ class MiaBuffer:
             await self._stage("ready")
             await self._comment("kept", f"keep {state.round_id} {payload.event_id}")
         elif kind == "retire":
+            if payload is None and state.stage != "idle":  # the keeper's, sent before a keep made it ready again
+                workflow.logger.info("issue #%d: the keeper's retire ignored: the buffer is ready", state.issue)
+                return True
             await self._cancel_rebuild(RETIRED_WHILE)
-            retired = await self._act("retire_buffer", state.round_id, state.buffer_id, seconds=600, result_type=dict)
+            retired = await self._act("retire_buffer", state.round_id, state.buffer_id, seconds=900, result_type=dict)
             state.retired, state.idle_since = True, None
             await self._stage("retired", RETIRED.format(path=retired.get("archive") or "none"))
             return False
@@ -675,7 +712,8 @@ class MiaBuffer:
                 )
             )
             await self._refuse_queued(gos=False)
-            await self._refuse_lifecycle()  # the buffer is ready, but its datasets are still sourcing
+            # the buffer is ready, but its datasets are still sourcing
+            await self._refuse_lifecycle(SOURCING, sum(not task.done() for task in tasks))
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events and abandonable():
                 for task, dataset in pairs:
@@ -809,6 +847,11 @@ class MiaBuffer:
             return await self._reuse(
                 dataset, semaphore, built or " The pyramid was staged earlier for this binding and reused."
             )
+        if dataset.rebuilds:  # d-lifecycle: another buffer of this artifact may have rebuilt it while we waited
+            missing = await self._act("missing_records", state.buffer_id, seconds=300, result_type=list[str])
+            if record not in missing:
+                again = f" The pyramid was rebuilt by {holder} while this buffer waited and reused." if holder else ""
+                return await self._reuse(dataset, semaphore, again or " The pyramid is back on disk and reused.")
         raw = await self._act("raw_status", round_id, record, seconds=300, result_type=RawStatus)
         stream = list(raw.stream)
         if raw.missing and not binding.manual:

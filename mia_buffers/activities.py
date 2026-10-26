@@ -103,8 +103,7 @@ STAGE_EVENTS = {  # a stage label's lifecycle event on the buffer's page (the bu
     "plan-review": "planned",
     "sourcing": "approved",
     "ready": "ready",
-    "idle": "idle",
-    "retired": "retired",
+    "idle": "idle",  # `retired` is retire_buffer's: a superseded buffer is retired without a stage label
     "needs-human": "needs-human",
 }
 OVER_QUOTA = (
@@ -999,9 +998,18 @@ class Activities:
     @activity.defn(name="retire_buffer")
     @mia_permanent_errors
     async def retire_buffer(self, round_id: str, buffer_id: str) -> dict:
-        """Release the buffer's references and archive its draws ({refs, draws, archive}); a failure raises, so
-        the workflow retries."""
-        return await asyncio.to_thread(self.registry.retire, buffer_id)
+        """Release the buffer's references and archive its draws ({refs, draws, archive}), then write its `retired`
+        event (best effort; buffer-api then refuses its consumers). A failed retire raises, so the workflow
+        retries."""
+        retired, registry = await asyncio.to_thread(self.registry.retire, buffer_id), self.registry
+        detail = f"archive {retired.get('archive') or 'none'}"
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.event(buffer_id, "retired", issue=_issue_of(buffer_id), event_id=None, detail=detail),
+            f"retired event of {buffer_id}",
+            log,
+        )
+        return retired
 
     # --- the cache keeper ----------------------------------------------------------------------
 
