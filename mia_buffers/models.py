@@ -179,9 +179,11 @@ class DatasetIssue:
 @dataclass
 class DatasetStatus:
     """Where one dataset of the pool is in sourcing:
-    pending | waiting-dataset | waiting-drop | staging | servable | failed | dropped.
-    `waiting-dataset`: no approved binding yet, mia-data is working on `issue` (spec §3 step 1); `dropped`: left out
-    of the plan (ineligible, or still waiting at the timeout) and of the ready denominator."""
+    pending | waiting-dataset | waiting-drop | waiting-lock | fetching | blocked | staging | servable | failed |
+    dropped.
+    `waiting-dataset`: no approved binding yet, mia-data is working on `issue` (spec §3 step 1); `waiting-lock`:
+    another job holds the record's raw-cache lock; `blocked`: the raw cache is over its quota, the fetch waits;
+    `dropped`: left out of the plan (ineligible, or still waiting at the timeout) and of the ready denominator."""
 
     record: str
     group: str
@@ -219,3 +221,9 @@ def job_key(issue: int, round_id: str, record: str) -> str:
     """csub job key of a dataset's stage job: unique per round and record, within csub's 120 characters."""
     digest = hashlib.sha256(record.encode()).hexdigest()[:8]
     return f"buf-{issue}-{round_id}-stage-{record[:40]}-{digest}"
+
+
+def fetch_job_key(issue: int, round_id: str, record: str, attempt: int) -> str:
+    """csub job key of a dataset's fetch job, one per attempt; otherwise as job_key."""
+    digest = hashlib.sha256(record.encode()).hexdigest()[:8]
+    return f"buf-{issue}-{round_id}-fetch{attempt}-{record[:40]}-{digest}"

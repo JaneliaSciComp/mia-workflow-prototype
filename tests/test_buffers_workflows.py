@@ -26,15 +26,20 @@ from mia_buffers.models import (
     DatasetIssue,
     DatasetPlan,
     DropResult,
+    FetchJobArgs,
+    FetchResult,
     PlanResult,
+    QuotaCheck,
+    RawStatus,
     RegisterResult,
     SourcingLimits,
     StageJobArgs,
     StageResult,
+    fetch_job_key,
 )
 from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
-from mia_data.models import JobDone, LabelEvent
+from mia_data.models import JobDone, LabelEvent, LockTaken
 from mia_data.publish import reindex
 
 PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
@@ -88,6 +93,10 @@ class Mocks:
         gate_on="",
         unbound=(),
         nudges=None,
+        locks=None,
+        raw=None,
+        fetches=None,
+        quotas=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -95,6 +104,9 @@ class Mocks:
         self.gate, self.gate_on = gate, gate_on
         self.unbound, self.bound = set(unbound), set()  # records without a binding until added to `bound`
         self.nudges = nudges or {}  # record -> DatasetIssue
+        # record -> answers in turn (the last one repeats): take_lock, read_fetch, check_quota; raw_status as is
+        self.locks, self.fetches, self.quotas = locks or {}, fetches or {}, quotas or {}
+        self.raw = raw or {}  # record -> RawStatus; default: the raw cache is complete, nothing to fetch
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -153,7 +165,7 @@ class Mocks:
                 if manual
                 else BindingInfo(True, f"/s/{record}.yaml", "bh", ["zenodo.org"])
             )
-            return self.bindings.get(record, default)
+            return turn(self.bindings, record, default)
 
         @activity.defn(name="prepare_stage")
         async def prepare_stage(issue: int, round_id: str, record: str) -> str:
@@ -206,12 +218,56 @@ class Mocks:
             verify_drop,
             create_buffer,
             register_dataset,
+            *self.cache_acts(),
         ]
+
+    def cache_acts(self):
+        rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
+
+        @activity.defn(name="take_lock")
+        async def take_lock(kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
+            rec("take_lock", kind, key, owner, ttl_s)
+            return turn(self.locks, key, LockTaken(True))
+
+        @activity.defn(name="release_lock")
+        async def release_lock(kind: str, key: str, owner: str) -> None:
+            rec("release_lock", kind, key, owner)
+
+        @activity.defn(name="raw_status")
+        async def raw_status(round_id: str, record: str) -> RawStatus:
+            rec("raw_status", record)
+            return self.raw.get(record, RawStatus(True))
+
+        @activity.defn(name="check_quota")
+        async def check_quota(round_id: str, record: str) -> QuotaCheck:
+            rec("check_quota", record)
+            return turn(self.quotas, record, QuotaCheck(True))
+
+        @activity.defn(name="prepare_fetch")
+        async def prepare_fetch(issue: int, round_id: str, record: str, attempt: int) -> str:
+            rec("prepare_fetch", record, attempt)
+            return f"/w/{round_id}/fetch-{record}-{attempt}"
+
+        @activity.defn(name="submit_fetch")
+        async def submit_fetch(key: str, args: FetchJobArgs) -> str:
+            rec("submit_fetch", key, args)
+            return f"job-{key}"
+
+        @activity.defn(name="read_fetch")
+        async def read_fetch(round_id: str, record: str, workspace: str) -> FetchResult:
+            rec("read_fetch", record, workspace)
+            return turn(self.fetches, record, FetchResult(True))
+
+        @activity.defn(name="mark_asset")
+        async def mark_asset(kind: str, key: str, fields: dict) -> None:
+            rec("mark_asset", kind, key, fields)
+
+        return [take_lock, release_lock, raw_status, check_quota, prepare_fetch, submit_fetch, read_fetch, mark_asset]
 
     def await_act(self):
         @activity.defn(name="await_job")
-        async def await_job(job_id: str, ws: str) -> JobDone:
-            self.calls.append(("await", (job_id, ws)))
+        async def await_job(job_id: str, ws: str, lock: list[str] | None = None) -> JobDone:
+            self.calls.append(("await", (job_id, ws, lock)))
             if self.gate and self.gate_on in ws:
                 await self.gate.wait()
             state, code = self.states.get(ws.rsplit("/", 1)[1], ("DONE", 0))  # by stage-<record>
@@ -228,6 +284,14 @@ class Mocks:
     @property
     def stages(self):
         return [a[0] for a in self.of("set_stage")]
+
+
+def turn(answers, record, default):
+    """The next of a record's queued answers (a list; its last one repeats), the one answer, or `default`."""
+    queued = answers.get(record, default)
+    if not isinstance(queued, list):
+        return queued
+    return queued.pop(0) if len(queued) > 1 else queued[0]
 
 
 async def until(cond, timeout=10.0, m=None):
@@ -597,6 +661,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
 # --- replay -------------------------------------------------------------------------------------
 
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
+CACHE_HISTORY = HISTORY.with_name("buffer_history_c.json")
 
 
 def _scrub(obj):
@@ -618,6 +683,24 @@ async def test_replay_buffer_history(env):
             await idle(h, m, "ready")
             HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-recorded", HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+async def test_replay_buffer_history_c(env):
+    """The go → ready run under the `c-cache` patch: u937 waits once for its raw lock, fetches and stages offline,
+    bcss is dropped by hand; as test_replay_buffer_history. Re-record this one alone, so the older fixture keeps
+    the unpatched path: MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_c"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(locks={"u937": [HELD, LockTaken(True)]}, raw={"u937": RawStatus(False, [U937_URL])})
+        async with started(env, m) as h:
+            await approve(h, m)
+            await waits_on_lock(h, "u937")
+            await env.sleep(timedelta(minutes=3))
+            await until(lambda: m.of("comment_drop"), m=m)
+            await h.signal(MiaBuffer.dropped, "bcss")
+            await idle(h, m, "ready")
+            CACHE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-c-cache", CACHE_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
@@ -687,7 +770,8 @@ async def test_unmatched_dataset_waits_for_binding_then_stages(env):
         await h.signal(MiaBuffer.dropped, "bcss")
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
-    assert m.of("nudge_dataset") == [("bcss",)] and [a[0] for a in m.of("read_binding")].count("bcss") == 2
+    # unbound, after the update, and again under the raw-cache lock (c-cache)
+    assert m.of("nudge_dataset") == [("bcss",)] and [a[0] for a in m.of("read_binding")].count("bcss") == 3
     assert dataset(state, "bcss").status == "servable" and state.ready
 
 
@@ -808,3 +892,186 @@ async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"
+
+
+# --- milestone C: the raw-cache lock, the fetch phase, the offline stage ------------------------------
+
+ONLY_U937 = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
+U937_URL = "https://zenodo.org/u937.zip"
+OWNER = "mia-buffers i7-e11 u937"
+HELD = LockTaken(False, "mia-buffers i9-e9 rec")
+
+
+async def waits_on_lock(h, record, status="waiting-lock"):
+    """Poll the status query until `record` shows `status`; returns that dataset."""
+    for _ in range(400):
+        found = dataset(await h.query(MiaBuffer.status), record)
+        if found.status == status:
+            return found
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{record} never showed {status}")
+
+
+def order(m, *names):
+    """The calls among `names`, in the order they ran."""
+    return [name for name in m.names() if name in names]
+
+
+async def test_two_buffers_one_record_second_waits_then_reuses(env):
+    """Another buffer holds u937's raw lock and stages it meanwhile: this one waits, then registers that pyramid."""
+    staged_after = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"], staged=True)
+    m = Mocks(
+        plan=ONLY_U937,
+        locks={"u937": [HELD, HELD, LockTaken(True)]},
+        bindings={"u937": [BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"]), staged_after]},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        waiting = await waits_on_lock(h, "u937")
+        assert "raw cache held by mia-buffers i9-e9 rec" in waiting.reason
+        await env.sleep(timedelta(minutes=3))
+        await until(lambda: len(m.of("take_lock")) == 2, m=m)
+        await env.sleep(timedelta(minutes=3))
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("take_lock") == [("raw", "u937", OWNER, 900)] * 3
+    assert not m.of("submit_fetch") and not m.of("submit") and not m.of("prepare_stage")
+    assert order(m, "take_lock", "read_binding", "register_dataset", "release_lock")[-4:] == [
+        "take_lock",
+        "read_binding",
+        "register_dataset",
+        "release_lock",
+    ]
+    assert m.of("release_lock") == [("raw", "u937", OWNER)] and dataset(state, "u937").status == "servable"
+    (servable,) = [c[0] for c in m.of("comment") if c[1].endswith("u937 servable")]
+    assert "staged by mia-buffers i9-e9 rec while this buffer waited and reused" in servable
+
+
+async def test_fetch_then_offline_stage(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, [U937_URL])},
+        fetches={"u937": [FetchResult(True, partial=True), FetchResult(True, bytes_fetched=9)]},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+    assert [a[0] for a in m.of("submit_fetch")] == [fetch_job_key(7, "i7-e11", "u937", n) for n in (1, 2)]
+    assert [a[1].attempt for a in m.of("submit_fetch")] == [1, 2] and m.of("submit_fetch")[0][1].hosts == ["zenodo.org"]
+    assert fetch_job_key(7, "i7-e11", "u937", 1).startswith("buf-7-i7-e11-fetch1-u937-")
+    assert [a[2] for a in m.of("await")] == [["raw", "u937", OWNER]] * 3  # two fetch jobs, then the stage job
+    ((_, stage),) = m.of("submit")
+    assert stage.cache_writable is False and stage.hosts == []
+    assert order(m, "take_lock", "submit_fetch", "submit", "register_dataset", "release_lock") == [
+        "take_lock",
+        "take_lock",  # re-taken once the fetch slot is free
+        "submit_fetch",
+        "submit_fetch",
+        "take_lock",  # and once the stage slot is
+        "submit",
+        "register_dataset",
+        "release_lock",
+    ]
+
+
+async def test_stream_url_keeps_the_stage_online(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, [U937_URL])},
+        fetches={"u937": FetchResult(True, stream=["https://h/x.zarr/"])},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+    ((_, stage),) = m.of("submit")
+    assert stage.cache_writable is True and stage.hosts == ["zenodo.org"] and len(m.of("submit_fetch")) == 1
+
+
+async def test_fetch_still_partial_fails_and_releases(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, [U937_URL])},
+        fetches={"u937": FetchResult(True, partial=True)},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").reason == "fetch still partial after 4 attempts" and not m.of("submit")
+    assert len(m.of("submit_fetch")) == 4 and order(m, "read_fetch", "release_lock")[-2:] == [
+        "read_fetch",
+        "release_lock",
+    ]
+
+
+async def test_fetch_of_a_host_not_allowed_fails_without_retrying(env):
+    refused = FetchResult(False, errors=["egress refused"], host_not_allowed="zenodo.org")
+    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])}, fetches={"u937": refused})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    reason = dataset(state, "u937").reason
+    assert reason == "fetch failed: egress refused (host not allowed: zenodo.org)" and len(m.of("submit_fetch")) == 1
+    assert not m.of("submit") and m.of("release_lock") == [("raw", "u937", OWNER)]
+
+
+async def test_blocked_waits_for_quota_then_fetches(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, [U937_URL])},
+        quotas={"u937": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        blocked = await waits_on_lock(h, "u937", "blocked")
+        assert "over by 5 bytes" in blocked.reason and not m.of("submit_fetch")
+        await env.sleep(timedelta(minutes=3))
+        await idle(h, m, "ready")
+    assert len([c for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]) == 1
+    assert len(m.of("check_quota")) == 2 and len(m.of("submit_fetch")) == 1
+    assert order(m, "check_quota", "submit_fetch", "release_lock") == [
+        "check_quota",
+        "check_quota",
+        "submit_fetch",
+        "release_lock",
+    ]
+
+
+async def test_dropped_files_mark_the_raw_row_and_stage_offline(env):
+    only = PlanResult(True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only, raw={"bcss": RawStatus(False, ["manual://bcss/a.zip"])})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"), m=m)
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+    assert m.of("mark_asset") == [("raw", "bcss", {"state": "waiting-drop"})]
+    assert m.names().index("mark_asset") < m.names().index("comment_drop") and not m.of("submit_fetch")
+    ((_, stage),) = m.of("submit")
+    assert stage.cache_writable is False and stage.hosts == []
+
+
+async def test_heaviest_dataset_is_sourced_first(env):
+    pool = [DatasetPlan("light", "TEM", 0.2, False), DatasetPlan("heavy", "TEM", 0.8, False)]
+    m = Mocks(plan=PlanResult(True, [], pool, 2, levels=[1], patch=64))
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("read_binding")[0] == ("heavy",)
+    assert [(d.record, d.weight) for d in state.datasets] == [("light", 0.2), ("heavy", 0.8)]
+
+
+async def test_timeout_drops_a_blocked_dataset_and_releases_its_lock(env):
+    """`blocked` is waiting: the timeout cancels the dataset inside its lock, and the lock is released."""
+    # a real-time timeout of ~5 s, as test_timeout_lets_a_staging_job_finish_then_announces_ready
+    short = PlanResult(True, [], ONLY_U937.pool, 1, levels=[1], patch=64, timeout_days=6e-5)
+    m = Mocks(plan=short, raw={"u937": RawStatus(False, [U937_URL])}, quotas={"u937": QuotaCheck(False, over_by=5)})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        await until(lambda: m.of("release_lock"), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "dropped" and "still blocked" in dataset(state, "u937").reason
+    assert m.of("release_lock") == [("raw", "u937", OWNER)] and not m.of("submit_fetch")
