@@ -136,3 +136,9 @@ def test_namespace_defaults_to_the_app_under_a_shared_temporal_section(tmp_path,
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     cfg = load_config(tmp_path / "mia.yaml", service="mia-buffers")
     assert cfg.temporal.namespace == namespace and cfg.temporal.address == "t:7233"
+
+
+def test_keeper_cfg_defaults(tmp_path):
+    assert make_cfg(tmp_path).keeper.minutes == 30
+    with pytest.raises(ValidationError):
+        make_cfg(tmp_path, keeper={"minutes": 0})

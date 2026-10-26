@@ -183,7 +183,9 @@ class Config(BaseModel):
                 if isinstance(value, Path):
                     setattr(section, name, value.expanduser().resolve())
         if self.service and self.service.token_file:
-            self.service.token_file = self.service.token_file.expanduser()
+            self.service.token_file = (
+                self.service.token_file.expanduser().absolute()
+            )  # not resolve(): follow no symlink
         for other in (paths.work_root, paths.storage_root):
             if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
                 raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")

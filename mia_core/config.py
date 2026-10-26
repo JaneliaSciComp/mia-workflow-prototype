@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -30,6 +30,11 @@ class TemporalCfg(BaseModel):
 class ServiceCfg(BaseModel):
     url: str  # buffer-api base URL, reachable from the worker
     token_file: Path | None = None  # the worker token the service checks
+
+
+class KeeperCfg(BaseModel):
+    minutes: int = Field(default=30, ge=1)  # SQLite backup cadence of buffer-api
+    catalog_sync_hours: int = Field(default=24, ge=1)
 
 
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:

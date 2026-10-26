@@ -100,3 +100,10 @@ def test_example_mia_yaml_loads_every_service(service, module, attr, expected, m
     assert cfg.deployment == service and cfg.paths.state_dir.name == service
     labels = {"autodev": "autodev:go", "snippets": "snippets:go", "mia-data": "data:go", "mia-buffers": "buffer:go"}
     assert cfg.label("go") == labels[service]
+
+
+def test_service_token_file_is_absolute(tmp_path):
+    from tests.mia_helpers import make_cfg
+
+    cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org", "token_file": "~/x"})
+    assert cfg.service.token_file.is_absolute()

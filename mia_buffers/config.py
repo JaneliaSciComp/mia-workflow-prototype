@@ -15,7 +15,7 @@ from typing import ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from autodev.config import TemporalCfg
-from mia_core.config import ServiceCfg
+from mia_core.config import KeeperCfg, ServiceCfg
 from mia_data import config as mia_data_config
 
 # stage -> (label color, description); labels are `buffer:<stage>` (spec §1)
@@ -89,6 +89,7 @@ class Config(mia_data_config.Config):
     temporal: TemporalCfg = TemporalCfg(namespace="mia-buffers")
     paths: PathsCfg
     service: ServiceCfg
+    keeper: KeeperCfg = KeeperCfg()
     sourcing: SourcingCfg = SourcingCfg()
 
     def label(self, stage: str) -> str:

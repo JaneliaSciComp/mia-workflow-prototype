@@ -53,6 +53,9 @@ network:
 service:                                  # the buffer-api (`mia-buffers serve`) and its clients
   url: http://host.example.org:8765
   token_file: ~/.config/mia/service-token # chmod 600
+keeper:                                   # buffer-api's housekeeping (milestone C adds quota and eviction)
+  minutes: 30                             # SQLite backup cadence; the keeper pass in milestone C
+  catalog_sync_hours: 24
 services:                                 # per service: app + the sections that differ, in the app's own shape
   autodev:
     app: autodev
