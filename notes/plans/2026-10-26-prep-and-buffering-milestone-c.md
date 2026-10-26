@@ -518,8 +518,8 @@ def test_sync_assets_is_exclusive(tmp_path): ...        # hold service._sync_loc
 **Files:**
 - Modify: `mia_data/activities.py` (new activities `take_lock`, `release_lock`; `await_job(job_id, workspace,
   lock: list[str] | None = None)`; `read_smoke` and `read_verify` end with a best-effort `put_asset("raw")`;
-  the `limits` activity's result gains `poll_minutes`), `mia_data/models.py` (`LockTaken` dataclass; the limits
-  dataclass gains `poll_minutes: int = 2`), `mia_data/workflows.py` (`_hold_raw`, `_release_raw`; smoke and trusted
+  the `limits` activity's result gains `poll_minutes`), `mia_data/models.py` (`LockTaken` dataclass;
+  `RoundLimits.poll_minutes: int = 2`), `mia_data/workflows.py` (`_hold_raw`, `_release_raw`; smoke and trusted
   crop under `workflow.patched("c-raw-lock")`), `docs/mia-data-workflow.md` (a paragraph under "The steps" 3 and 6:
   the lock, what the comment says while waiting)
 - Test: `tests/test_mia_activities.py` (or the file that tests mia-data activities today), `tests/test_mia_workflows.py`,
