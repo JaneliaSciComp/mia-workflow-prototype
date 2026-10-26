@@ -294,13 +294,31 @@ class Activities:
     def dataset_fields(self, issue: int, round_id: str, stage: str) -> dict:
         """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
         binding and a manifest that matches it, else in-progress, or ineligible / needs-human at those stages."""
-        row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
+        try:
+            row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
+        except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
+            log.warning("round %s: no prepared lookup: %s", round_id, err)
+            row = None
         if row:
             row.pop("record")
             fields = row
         else:
             fields = {"state": {"ineligible": "ineligible", "needs-human": "needs-human"}.get(stage, "in-progress")}
         return {**fields, "data_stage": stage, "issue": issue}
+
+    def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
+        """Put the dataset's row to the registry; never raises (a missing pins file or a down service is logged)."""
+        try:
+            record = self._pins(round_id).record
+        except (ValueError, OSError) as err:
+            log.warning("round %s: registry write skipped: %s", round_id, err)
+            return
+        # the module logger: best_effort takes a Logger, not activity.logger's adapter
+        best_effort(
+            lambda: registry.put_dataset(record, **self.dataset_fields(issue, round_id, stage)),
+            f"dataset {record}",
+            log,
+        )
 
     async def _snapshot(self, sha: str) -> Path:
         return await asyncio.to_thread(snapshot, self.cfg, sha, self.gh_snippets.tokens)
@@ -374,13 +392,7 @@ class Activities:
             return
         round_id, paths = state.round_id, self.cfg.paths
         if registry := self.registry:
-            record, fields = self._pins(round_id).record, self.dataset_fields(issue, round_id, stage)
-            await asyncio.to_thread(
-                best_effort,
-                lambda: registry.put_dataset(record, **fields),
-                f"dataset {record}",
-                log,  # the module logger: best_effort takes a Logger, not activity.logger's adapter
-            )
+            await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
         links = {"Workspace": paths.link(self._round_workspace(issue, round_id))}
         if stage == "done":
             pins = self._pins(round_id)
