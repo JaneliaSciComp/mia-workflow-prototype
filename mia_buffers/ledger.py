@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .sampler import Level, Volume
@@ -29,6 +32,10 @@ CREATE TABLE IF NOT EXISTS frozen (buffer TEXT, split TEXT, idx INTEGER, descrip
                                    PRIMARY KEY (buffer, split, idx));
 CREATE TABLE IF NOT EXISTS assets (kind TEXT, key TEXT, data TEXT NOT NULL, updated REAL, PRIMARY KEY (kind, key));
 CREATE TABLE IF NOT EXISTS refs (buffer TEXT, kind TEXT, key TEXT, PRIMARY KEY (buffer, kind, key));
+CREATE TABLE IF NOT EXISTS catalogs (ref TEXT PRIMARY KEY, synced_at REAL, count INTEGER);
+CREATE TABLE IF NOT EXISTS records (ref TEXT, id TEXT, path TEXT NOT NULL, data TEXT NOT NULL,
+                                    PRIMARY KEY (ref, id));
+CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at REAL);
 """
 
 
@@ -61,17 +68,115 @@ class Ledger:
             row = self._db.execute("SELECT config FROM buffers WHERE id = ?", (buffer,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def put_volume(self, buffer: str, volume: Volume) -> None:
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """One locked BEGIN IMMEDIATE ... COMMIT; rolls back and re-raises on error."""
         with self._lock:
-            self._db.execute(
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._db
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+
+    def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> None:
+        """Upsert the volume and add its (kind, key) references in one transaction."""
+        with self._transaction() as db:
+            db.execute(
                 "INSERT OR REPLACE INTO volumes VALUES (?, ?, ?)",
                 (buffer, volume.id, json.dumps(dataclasses.asdict(volume))),
             )
+            db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
 
     def volumes(self, buffer: str) -> list[Volume]:
         with self._lock:
             rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
         return [_volume_from(json.loads(row[0])) for row in rows]
+
+    def backup(self, dest: Path) -> None:
+        """Write a consistent copy of the ledger to `dest`, atomically (temp file, then rename)."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        target = sqlite3.connect(tmp)
+        try:
+            with self._lock:
+                self._db.backup(target)
+        finally:
+            target.close()
+        os.replace(tmp, dest)
+
+    # --- catalogs and records: the parsed dataset records of a git ref ---------------------------
+
+    def put_records(self, ref: str, records: list[tuple[str, dict]]) -> int:
+        """Replace the ref's records (path, record) and note the sync; returns how many."""
+        with self._transaction() as db:
+            db.execute("DELETE FROM records WHERE ref = ?", (ref,))
+            db.executemany(
+                "INSERT INTO records VALUES (?, ?, ?, ?)",
+                [(ref, record["id"], path, json.dumps(record)) for path, record in records],
+            )
+            db.execute("INSERT OR REPLACE INTO catalogs VALUES (?, ?, ?)", (ref, time.time(), len(records)))
+        return len(records)
+
+    def records(self, ref: str) -> list[tuple[str, dict]]:
+        with self._lock:
+            rows = self._db.execute("SELECT path, data FROM records WHERE ref = ? ORDER BY path", (ref,)).fetchall()
+        return [(path, json.loads(data)) for path, data in rows]
+
+    def catalogs(self) -> list[dict]:
+        """Every synced ref, newest first: {ref, synced_at, count}."""
+        with self._lock:
+            rows = self._db.execute("SELECT ref, synced_at, count FROM catalogs ORDER BY synced_at DESC").fetchall()
+        return [{"ref": ref, "synced_at": synced_at, "count": count} for ref, synced_at, count in rows]
+
+    def latest_catalog(self) -> str | None:
+        catalogs = self.catalogs()
+        return catalogs[0]["ref"] if catalogs else None
+
+    # --- datasets: one row per record, the state the prep workflow and the sync keep ---------------
+
+    @staticmethod
+    def _merge_dataset(db: sqlite3.Connection, record: str, fields: dict, now: float) -> dict:
+        row = db.execute("SELECT data FROM datasets WHERE id = ?", (record,)).fetchone()
+        merged = {**(json.loads(row[0]) if row else {}), **fields}
+        db.execute("INSERT OR REPLACE INTO datasets VALUES (?, ?, ?)", (record, json.dumps(merged), now))
+        return {**merged, "id": record, "updated_at": now}
+
+    def put_dataset(self, record: str, fields: dict) -> dict:
+        """Merge `fields` into the record's row (new keys win); returns the merged row."""
+        with self._transaction() as db:
+            return self._merge_dataset(db, record, fields, time.time())
+
+    def dataset(self, record: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT data, updated_at FROM datasets WHERE id = ?", (record,)).fetchone()
+        return {**json.loads(row[0]), "id": record, "updated_at": row[1]} if row else None
+
+    def datasets(self, state: str | None = None) -> list[dict]:
+        query = "SELECT id, data, updated_at FROM datasets"
+        with self._lock:
+            if state is None:
+                rows = self._db.execute(query + " ORDER BY id").fetchall()
+            else:
+                rows = self._db.execute(
+                    query + " WHERE json_extract(data, '$.state') = ? ORDER BY id", (state,)
+                ).fetchall()
+        return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
+
+    def sync_datasets(self, prepared: dict[str, dict]) -> dict:
+        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched."""
+        now = time.time()
+        with self._transaction() as db:
+            for record, fields in prepared.items():
+                self._merge_dataset(db, record, {**fields, "state": "prepared"}, now)
+            stale = [
+                row[0]
+                for row in db.execute("SELECT id FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
+                if row[0] not in prepared
+            ]
+            db.executemany("DELETE FROM datasets WHERE id = ?", [(record,) for record in stale])
+        return {"prepared": len(prepared), "demoted": len(stale)}
 
     # --- the registry ------------------------------------------------------------------------
 

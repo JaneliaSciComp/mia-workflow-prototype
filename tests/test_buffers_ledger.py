@@ -1,6 +1,9 @@
 """The SQLite ledger: buffers, volumes, consumers, draws and frozen lists."""
 
+import sqlite3
 import threading
+
+import pytest
 
 from mia_buffers.ledger import Ledger
 from tests.test_buffers_sampler import vol
@@ -70,3 +73,51 @@ def test_assets_and_refs(tmp_path):
         {"key": "/s/p256/u937", "data": {"record": "u937", "binding_hash": "b2"}, "refs": ["buf-1", "buf-2"]}
     ]
     assert led.assets("raw") == [{"key": "u937", "data": None, "refs": ["buf-2"]}]
+
+
+def test_records_replace_per_ref_and_catalogs_list(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    assert led.put_records("a" * 40, [("datasets/x.yaml", {"id": "x"}), ("datasets/y.yaml", {"id": "y"})]) == 2
+    assert led.put_records("a" * 40, [("datasets/z.yaml", {"id": "z", "k": 1})]) == 1
+    assert led.records("a" * 40) == [("datasets/z.yaml", {"id": "z", "k": 1})] and led.records("b" * 40) == []
+    led.put_records("b" * 40, [])
+    assert [c["ref"] for c in led.catalogs()] == ["b" * 40, "a" * 40] and led.latest_catalog() == "b" * 40
+    assert led.catalogs()[1]["count"] == 1
+
+
+def test_dataset_rows_merge(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    assert led.dataset("r") is None
+    led.put_dataset("r", {"state": "in-progress", "data_stage": "matching", "issue": 7})
+    row = led.put_dataset("r", {"data_stage": "review"})
+    assert row["state"] == "in-progress" and row["data_stage"] == "review" and row["issue"] == 7 and row["id"] == "r"
+    assert [d["id"] for d in led.datasets("in-progress")] == ["r"] and led.datasets("prepared") == []
+
+
+def test_sync_datasets_keeps_in_progress_rows(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_dataset("busy", {"state": "in-progress", "issue": 1})
+    led.put_dataset("stuck", {"state": "needs-human", "issue": 2})
+    led.put_dataset("old", {"state": "prepared", "folder": "f-old"})
+    out = led.sync_datasets({"new": {"folder": "f-new", "crops": 3}})
+    assert out == {"prepared": 1, "demoted": 1}
+    assert led.dataset("old") is None and led.dataset("busy")["state"] == "in-progress"
+    assert led.dataset("stuck")["state"] == "needs-human" and led.dataset("new")["crops"] == 3
+
+
+def test_put_volume_with_refs_is_atomic(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    led.put_volume("b", vol("a"), refs=[("staged", "art1"), ("raw", "rec")])
+    assert led.refs("staged", "art1") == ["b"] and led.refs("raw", "rec") == ["b"]
+    with pytest.raises((sqlite3.InterfaceError, sqlite3.ProgrammingError)):
+        led.put_volume("b", vol("c"), refs=[("staged", object())])  # unbindable on purpose
+    assert [v.id for v in led.volumes("b")] == ["a"]
+
+
+def test_backup_is_a_consistent_copy(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {"x": 1})
+    led.backup(tmp_path / "bk" / "copy.sqlite")
+    assert Ledger(tmp_path / "bk" / "copy.sqlite").buffer("b") == {"x": 1}
+    assert not (tmp_path / "bk" / "copy.tmp").exists()
