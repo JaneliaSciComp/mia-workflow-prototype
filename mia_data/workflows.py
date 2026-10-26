@@ -241,7 +241,7 @@ class MiaDataDataset:
         another job holds it; the issue says so once per round. Returns the lock as [kind, key, owner]."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
-        record, owner, commented = state.pins.record, f"mia-data {state.round_id} {kind}", False
+        record, owner, commented, tries = state.pins.record, f"mia-data {state.round_id} {kind}", False, 0
         while not (
             taken := await self._act("take_lock", "raw", record, owner, RAW_LOCK_TTL_S, result_type=LockTaken)
         ).ok:
@@ -249,9 +249,11 @@ class MiaDataDataset:
                 waiting = f"waiting for the raw cache of `{record}`: held by {taken.holder}"
                 await self._act("comment", state.issue, waiting, f"lock {state.round_id}")
                 commented = True
-            # ponytail: one activity and one timer per try, ~250 history events per hour of waiting; a wait of many
-            # hours wants a backoff or a wake-up signal from the releasing worker.
-            await workflow.sleep(timedelta(minutes=(await self._limits()).poll_minutes))
+            # ponytail: poll_minutes, doubling each try up to 30 min (~20 history events an hour once backed off);
+            # a wait of many days wants a wake-up signal from the releasing worker.
+            poll_minutes = (await self._limits()).poll_minutes
+            await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
+            tries += 1
         return ["raw", record, owner]
 
     async def _release_raw(self, lock: list[str] | None) -> None:

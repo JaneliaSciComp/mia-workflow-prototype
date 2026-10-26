@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -98,6 +99,7 @@ class Mocks:
         fetches=None,
         quotas=None,
         limits=None,
+        release_gates=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -109,6 +111,7 @@ class Mocks:
         self.locks, self.fetches, self.quotas = locks or {}, fetches or {}, quotas or {}
         self.raw = raw or {}  # record -> RawStatus; default: the raw cache is complete, nothing to fetch
         self.limits = limits or SourcingLimits(2, 120, "http://svc:8765")
+        self.release_gates = release_gates or {}  # record -> asyncio.Event its release_lock waits for
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -234,6 +237,8 @@ class Mocks:
         @activity.defn(name="release_lock")
         async def release_lock(kind: str, key: str, owner: str) -> None:
             rec("release_lock", kind, key, owner)
+            if gate := self.release_gates.get(key):
+                await gate.wait()
 
         @activity.defn(name="raw_status")
         async def raw_status(round_id: str, record: str) -> RawStatus:
@@ -498,27 +503,29 @@ async def test_drop_with_missing_files_keeps_waiting(env):
     assert m.of("verify_drop") == [("bcss",), ("bcss",)] and m.stages[-1] == "ready"
 
 
+# a real-time day limit of ~5 s (a long env.sleep on the shared time-skipping server can hang it)
+SHORT_DAYS = 6e-5
+
+
 async def test_timeout_without_ready_is_needs_human(env):
     only = PlanResult(
-        True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64, timeout_days=14
+        True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64, timeout_days=SHORT_DAYS
     )
     m = Mocks(plan=only)
     async with started(env, m) as h:
         await approve(h, m)
         await until(lambda: m.of("comment_drop"))
-        await env.sleep(timedelta(days=15))  # the test server skips time only when asked
         await idle(h, m, "needs-human")
     detail = m.of("set_stage")[-1][1]
-    assert "14" in detail and "histology-WSI" in detail and not m.of("verify_drop")
+    assert "after 6e-05 days" in detail and "histology-WSI" in detail and not m.of("verify_drop")
 
 
 async def test_timeout_after_ready_changes_nothing(env):
-    m = Mocks(plan=ONE_GROUP)  # a and b share one group with min_fraction 0.5: a alone makes the buffer ready
-    async with started(env, m) as h:
+    m = Mocks(plan=replace(ONE_GROUP, timeout_days=SHORT_DAYS))  # a and b share one group with min_fraction 0.5:
+    async with started(env, m) as h:  # a alone makes the buffer ready
         await approve(h, m)
         await idle(h, m, "ready")
-        await env.sleep(timedelta(days=15))  # b is still waiting for its drop when the timer fires
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(SHORT_DAYS * 86400 + 1)  # b is still waiting for its drop past the day limit
         state = await h.query(MiaBuffer.status)
     assert m.stages == ["planning", "plan-review", "sourcing", "ready"] and state.ready
     assert dataset(state, "b").status == "waiting-drop" and not m.of("verify_drop")
@@ -805,15 +812,14 @@ async def test_late_dataset_update_is_ignored(env):
 
 
 async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
-    m = Mocks(unbound={"bcss"})  # u937 becomes servable, bcss waits for mia-data forever
+    m = Mocks(plan=replace(PLAN, timeout_days=SHORT_DAYS), unbound={"bcss"})  # bcss waits for mia-data forever
     async with started(env, m) as h:
         await approve(h, m)
         await until(lambda: m.of("register_dataset") and m.of("nudge_dataset"), m=m)
-        await env.sleep(timedelta(days=15))
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
     bcss = dataset(state, "bcss")
-    assert bcss.status == "dropped" and "14" in bcss.reason and "waiting-dataset" in bcss.reason
+    assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-dataset" in bcss.reason
     assert m.of("comment_plan")[-1][1] == {"bcss": bcss.reason} and "needs-human" not in m.stages
     assert state.ready and dataset(state, "u937").status == "servable"
 
@@ -914,9 +920,30 @@ async def waits_on_lock(h, record, status="waiting-lock"):
     raise AssertionError(f"{record} never showed {status}")
 
 
-def order(m, *names):
-    """The calls among `names`, in the order they ran."""
-    return [name for name in m.names() if name in names]
+def order(m, *names, record=None):
+    """The calls among `names`, in the order they ran; only those naming `record` among their arguments if given."""
+    return [name for name, args in m.calls if name in names and (record is None or record in args)]
+
+
+async def poll_timers(h) -> list[float]:
+    """The minutes of every timer the run started, but the day limit's."""
+    events = (await h.fetch_history()).events
+    seconds = [
+        e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta().total_seconds()
+        for e in events
+        if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+    ]
+    return [value / 60 for value in seconds if value < 3600]
+
+
+async def scheduled(h, name) -> list[list]:
+    """The arguments of every `name` activity the run scheduled, in history order."""
+    return [
+        [json.loads(payload.data) for payload in e.activity_task_scheduled_event_attributes.input.payloads]
+        for e in (await h.fetch_history()).events
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and e.activity_task_scheduled_event_attributes.activity_type.name == name
+    ]
 
 
 async def test_two_buffers_one_record_second_waits_then_reuses(env):
@@ -933,14 +960,19 @@ async def test_two_buffers_one_record_second_waits_then_reuses(env):
         assert "raw cache held by mia-buffers i9-e9 rec" in waiting.reason
         await env.sleep(timedelta(minutes=3))
         await until(lambda: len(m.of("take_lock")) == 2, m=m)
-        await env.sleep(timedelta(minutes=3))
+        await env.sleep(timedelta(minutes=5))
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
+        assert await poll_timers(h) == [2, 4]  # poll_minutes, doubling
     assert m.of("take_lock") == [("raw", "u937", OWNER, 900)] * 3
     assert not m.of("submit_fetch") and not m.of("submit") and not m.of("prepare_stage")
-    assert order(m, "take_lock", "read_binding", "register_dataset", "release_lock")[-4:] == [
-        "take_lock",
+    assert order(m, "take_lock", "read_binding", "read_stage", "register_dataset", "release_lock") == [
         "read_binding",
+        "take_lock",
+        "take_lock",
+        "take_lock",
+        "read_binding",  # re-read once the lock is ours: the holder staged it
+        "read_stage",  # the reuse
         "register_dataset",
         "release_lock",
     ]
@@ -965,8 +997,7 @@ async def test_fetch_then_offline_stage(env):
     ((_, stage),) = m.of("submit")
     assert stage.cache_writable is False and stage.hosts == []
     assert order(m, "take_lock", "submit_fetch", "submit", "register_dataset", "release_lock") == [
-        "take_lock",
-        "take_lock",  # re-taken once the fetch slot is free
+        "take_lock",  # the fetch slot was free: no re-take before the fetch
         "submit_fetch",
         "submit_fetch",
         "take_lock",  # and once the stage slot is
@@ -994,12 +1025,15 @@ async def test_fetch_still_partial_fails_and_releases(env):
         plan=ONLY_U937,
         raw={"u937": RawStatus(False, [U937_URL])},
         fetches={"u937": FetchResult(True, partial=True)},
+        states={"fetch-u937-4": ("EXIT", 137)},  # the last attempt was killed
     )
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "needs-human")
         state = await h.query(MiaBuffer.status)
-    assert dataset(state, "u937").reason == "fetch still partial after 4 attempts" and not m.of("submit")
+    last = f"job-{fetch_job_key(7, 'i7-e11', 'u937', 4)}"
+    assert dataset(state, "u937").reason == f"fetch still partial after 4 attempts (last job {last} EXIT exit 137)"
+    assert not m.of("submit")
     assert len(m.of("submit_fetch")) == 4 and order(m, "read_fetch", "release_lock")[-2:] == [
         "read_fetch",
         "release_lock",
@@ -1022,21 +1056,23 @@ async def test_blocked_waits_for_quota_then_fetches(env):
     m = Mocks(
         plan=ONLY_U937,
         raw={"u937": RawStatus(False, [U937_URL])},
-        quotas={"u937": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
+        quotas={"u937": [QuotaCheck(False, over_by=5)] * 3 + [QuotaCheck(True)]},
     )
     async with started(env, m) as h:
         await approve(h, m)
         blocked = await waits_on_lock(h, "u937", "blocked")
         assert "over by 5 bytes" in blocked.reason and not m.of("submit_fetch")
-        await env.sleep(timedelta(minutes=3))
+        await env.sleep(timedelta(minutes=15))  # the polls back off: 2, 4, 8 minutes
         await idle(h, m, "ready")
+        assert await poll_timers(h) == [2, 4, 8]
     assert len([c for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]) == 1
-    assert len(m.of("check_quota")) == 2 and len(m.of("submit_fetch")) == 1
+    assert len(m.of("check_quota")) == 4 and len(m.of("submit_fetch")) == 1
     assert order(m, "check_quota", "take_lock", "submit_fetch", "release_lock") == [
         "take_lock",
-        "take_lock",  # once the fetch slot is free
-        "check_quota",
+        "check_quota",  # before the fetch slot: a blocked dataset holds none
         "release_lock",  # released while blocked (spec §5.2)
+        "check_quota",
+        "check_quota",
         "check_quota",
         "take_lock",  # taken again before the fetch
         "submit_fetch",
@@ -1066,7 +1102,8 @@ async def test_heaviest_dataset_is_sourced_first(env):
         await approve(h, m)
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
-    assert m.of("read_binding")[0] == ("heavy",)
+        bindings = await scheduled(h, "read_binding")
+    assert [args[1] for args in bindings[:2]] == ["heavy", "light"]
     assert [(d.record, d.weight) for d in state.datasets] == [("light", 0.2), ("heavy", 0.8)]
 
 
@@ -1085,49 +1122,119 @@ async def test_timeout_drops_a_blocked_dataset_and_releases_its_lock(env):
 
 
 async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
-    """Review fix: with one fetch slot, `second` waits for it past the timeout; when it then finds the quota over
-    it is dropped rather than blocked forever, and the round ends. A blocked dataset holds no lock while it sleeps."""
-    short = PlanResult(
-        True,
-        [],
-        [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)],
-        1,
-        levels=[1],
-        patch=64,
-        timeout_days=6e-5,  # ~5 s of real time, as test_timeout_lets_a_staging_job_finish_then_announces_ready
-    )
-    over = QuotaCheck(False, over_by=5)
+    """Review fix: with one fetch slot, `second` waits for it (behind `first`'s fetch job) past the timeout; the
+    quota re-checked in the slot is then over, so it is dropped rather than blocked forever, and the round ends."""
+    two = [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)]
+    short = PlanResult(True, [], two, 1, levels=[1], patch=64, timeout_days=SHORT_DAYS)
     m = Mocks(
         plan=short,
         raw={record: RawStatus(False, [U937_URL]) for record in ("first", "second")},
-        quotas={"first": over, "second": over},
+        quotas={"second": [QuotaCheck(True), QuotaCheck(False, over_by=5)]},  # room, until first's fetch filled it
+        limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
+        gate=asyncio.Event(),
+        gate_on="fetch-first",
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("await") and len(m.of("check_quota")) == 2, m=m)  # second waits for the slot
+        for _ in range(400):  # until the day limit fired
+            if any(e.event_type == EventType.EVENT_TYPE_TIMER_FIRED for e in (await h.fetch_history()).events):
+                break
+            await asyncio.sleep(0.05)
+        m.gate.set()
+        await idle(h, m, "ready")
+        await until(lambda: len(m.of("release_lock")) == 2, m=m)
+        state = await h.query(MiaBuffer.status)
+    assert {d.record: (d.status, d.reason) for d in state.datasets} == {
+        "first": ("servable", ""),
+        "second": ("dropped", "still blocked after 6e-05 days"),
+    }
+    assert order(m, "take_lock", "check_quota", "release_lock", record="second") == [
+        "take_lock",
+        "check_quota",  # room: on to the fetch slot, which first holds
+        "take_lock",  # refreshed after the slot wait
+        "check_quota",  # re-checked in the slot: over
+        "check_quota",  # back outside the slot: over, and the day limit has fired
+        "release_lock",
+    ]
+    assert [args[1].record for args in m.of("submit_fetch")] == ["first"]
+
+
+async def test_a_blocked_dataset_leaves_its_fetch_slot_to_others(env):
+    """Review fix: the quota wait comes before the fetch slot, so with one slot a blocked dataset does not hold up
+    another dataset's fetch."""
+    two = [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)]
+    m = Mocks(
+        plan=PlanResult(True, [], two, 1, levels=[1], patch=64),
+        raw={record: RawStatus(False, [U937_URL]) for record in ("first", "second")},
+        quotas={"first": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
         limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "needs-human")
-        await until(lambda: len(m.of("release_lock")) == 2, m=m)
-        state = await h.query(MiaBuffer.status)
-        history = await h.fetch_history()
-    assert {d.record: (d.status, d.reason) for d in state.datasets} == {
-        "first": ("dropped", "still blocked after 6e-05 days"),
-        "second": ("dropped", "still blocked after 6e-05 days"),
-    }
-    assert sorted(m.of("release_lock")) == [("raw", r, f"mia-buffers i7-e11 {r}") for r in ("first", "second")]
-    assert not m.of("submit_fetch") and "below ready.min_fraction" in m.of("set_stage")[-1][1]
-    # first: check_quota → release_lock → its poll timer (the round's day-limit timer started before any of it)
-    names = []
-    for event in history.events:
-        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
-            names.append(event.activity_task_scheduled_event_attributes.activity_type.name)
-        elif event.event_type == EventType.EVENT_TYPE_TIMER_STARTED:
-            names.append("timer")
-    after = names[names.index("check_quota") :]
-    assert [n for n in after if n in ("check_quota", "release_lock", "timer")][:3] == [
-        "check_quota",
+        await until(lambda: m.of("submit_fetch"), m=m)
+        assert [args[1].record for args in m.of("submit_fetch")] == ["second"]  # while first is blocked
+        assert dataset(await h.query(MiaBuffer.status), "first").status == "blocked"
+        await env.sleep(timedelta(minutes=3))
+        await idle(h, m, "ready")
+    assert [args[1].record for args in m.of("submit_fetch")] == ["second", "first"]
+
+
+async def test_a_retake_that_waited_decides_again(env):
+    """Review fix: the lock was taken, then another owner held it at the stage slot's re-take and staged the binding
+    meanwhile: the binding is read again and its pyramid reused, no stage job."""
+    unstaged = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"])
+    m = Mocks(
+        plan=ONLY_U937,
+        locks={"u937": [LockTaken(True), HELD, LockTaken(True)]},
+        bindings={"u937": [unstaged, unstaged, replace(unstaged, staged=True)]},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await waits_on_lock(h, "u937")
+        await env.sleep(timedelta(minutes=3))
+        await idle(h, m, "ready")
+    assert order(m, "take_lock", "read_binding", "raw_status", "read_stage", "release_lock") == [
+        "read_binding",
+        "take_lock",
+        "read_binding",
+        "raw_status",
+        "take_lock",  # the stage slot's re-take: held by another owner
+        "take_lock",
+        "read_binding",  # decided again: staged meanwhile
+        "read_stage",
         "release_lock",
-        "timer",
     ]
+    assert not m.of("submit") and not m.of("prepare_stage")
+    (servable,) = [c[0] for c in m.of("comment") if c[1].endswith("u937 servable")]
+    assert "staged by mia-buffers i9-e9 rec while this buffer waited" in servable
+
+
+async def test_a_go_while_blocked_stops_the_blocked_dataset(env):
+    """Review fix: a new go abandons a blocked straggler; the cancel lands in the release of its lock, which must
+    end the task (before, the release swallowed it and the task polled on, re-took the lock and fetched)."""
+    two = [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "TEM", 0.5, False)]
+    gate = asyncio.Event()
+    m = Mocks(
+        plan=PlanResult(True, [], two, 1, min_fraction=0.5, levels=[1], patch=64),
+        raw={"b": RawStatus(False, [U937_URL])},
+        quotas={"b": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
+        release_gates={"b": gate},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")  # a servable; b blocked, inside its release
+        await until(lambda: ("release_lock", ("raw", "b", "mia-buffers i7-e11 b")) in m.calls, m=m)
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "plan-review")
+        before = order(m, "check_quota", "take_lock", "submit_fetch", record="b")
+        gate.set()
+        await env.sleep(timedelta(minutes=10))
+        await asyncio.sleep(0.5)
+        state = await h.query(MiaBuffer.status)
+    assert order(m, "check_quota", "take_lock", "submit_fetch", record="b") == before
+    assert not m.of("submit_fetch") and state.round_id == "i7-e15"
+    assert not [c for c in m.of("comment") if c[1] == "dataset i7-e11 b blocked"]  # it never went on to say so
 
 
 async def test_cache_keeper_runs_one_keep_pass(env):

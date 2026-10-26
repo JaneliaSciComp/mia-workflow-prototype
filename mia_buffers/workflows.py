@@ -20,7 +20,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
@@ -55,10 +55,24 @@ MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the lat
 # dataset statuses that wait on a human, on mia-data or on quota: dropped at the timeout, abandoned by a new go
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
 ABANDONED = "abandoned: a new buffer:go started another round"
+MAX_POLL_MINUTES = 30  # a lock or quota wait polls after poll_minutes, doubling each try up to this (c-cache)
 
 
 class RoundFailed(Exception):
     """A step of the round that ends it in needs-human (raised by workflow code, never by an activity)."""
+
+
+class LockChanged(Exception):
+    """A re-take of a record's lock had to wait for another owner: what was decided before is stale (c-cache)."""
+
+    def __init__(self, holder: str) -> None:
+        super().__init__(holder)
+        self.holder = holder
+
+
+def _backoff(poll_minutes: int, tries: int) -> timedelta:
+    """The sleep before the next try of a poll: `poll_minutes`, doubling with each try, at most MAX_POLL_MINUTES."""
+    return timedelta(minutes=min(poll_minutes * 2**tries, MAX_POLL_MINUTES))
 
 
 def _rollover_due() -> bool:
@@ -454,38 +468,59 @@ class MiaBuffer:
         # submit is the upgrade.
         holder = await self._lock(dataset, owner)
         try:
-            binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
-            if binding.staged:  # the lock's previous holder staged this very binding while we waited
-                built = f" The pyramid was staged by {holder} while this buffer waited and reused." if holder else ""
-                return await self._reuse(
-                    dataset, semaphore, built or " The pyramid was staged earlier for this binding and reused."
-                )
-            raw = await self._act("raw_status", round_id, record, seconds=300, result_type=RawStatus)
-            stream = list(raw.stream)
-            if raw.missing and not binding.manual:
-                async with fetch_slots:
-                    fetched = await self._fetch(dataset, binding, owner)
-                if fetched is None:
-                    return  # failed
-                stream += fetched
-            async with semaphore:
-                await self._lock(dataset, owner)  # refreshed after the wait for a stage slot
-                dataset.status, dataset.reason = "staging", ""
-                workspace = await self._act(
-                    "prepare_stage", state.issue, round_id, record, seconds=300, result_type=str
-                )
-                hosts = binding.hosts if stream else []
-                job = await self._job(
-                    record, workspace, hosts, dataset.voxel_size_nm, cache_writable=bool(stream), lock=lock
-                )
-                if job.state not in ("DONE", "EXIT"):
-                    return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
-                if job.state == "EXIT" and job.exit_code not in (0, None):
-                    return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
-                staged = await self._act("read_stage", round_id, record, seconds=300, result_type=StageResult)
-            await self._register(dataset, staged, "")
+            while True:
+                try:
+                    return await self._source_locked(dataset, semaphore, fetch_slots, owner, holder)
+                except LockChanged as changed:  # another owner had the cache meanwhile: look at it again
+                    holder = changed.holder
         finally:
             await self._release(lock)
+
+    async def _source_locked(
+        self,
+        dataset: DatasetStatus,
+        semaphore: asyncio.Semaphore,
+        fetch_slots: asyncio.Semaphore,
+        owner: str,
+        holder: str,
+    ) -> None:
+        """Under the record's lock: re-read the binding (`holder` may have staged it meanwhile) and the raw cache,
+        fetch what is missing, stage, register. LockChanged from a re-take means: decide again."""
+        state = self.state
+        assert state.round_id and state.buffer_id
+        round_id, record = state.round_id, dataset.record
+        binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
+        if binding.staged:  # the lock's previous holder staged this very binding while we waited
+            built = f" The pyramid was staged by {holder} while this buffer waited and reused." if holder else ""
+            return await self._reuse(
+                dataset, semaphore, built or " The pyramid was staged earlier for this binding and reused."
+            )
+        raw = await self._act("raw_status", round_id, record, seconds=300, result_type=RawStatus)
+        stream = list(raw.stream)
+        if raw.missing and not binding.manual:
+            fetched = await self._fetch(dataset, binding, owner, fetch_slots)
+            if fetched is None:
+                return  # failed
+            stream += fetched
+        async with semaphore:
+            await self._retake(dataset, owner)  # refreshed after the wait for a stage slot
+            dataset.status, dataset.reason = "staging", ""
+            workspace = await self._act("prepare_stage", state.issue, round_id, record, seconds=300, result_type=str)
+            hosts = binding.hosts if stream else []
+            job = await self._job(
+                record,
+                workspace,
+                hosts,
+                dataset.voxel_size_nm,
+                cache_writable=bool(stream),
+                lock=["raw", record, owner],
+            )
+            if job.state not in ("DONE", "EXIT"):
+                return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
+            if job.state == "EXIT" and job.exit_code not in (0, None):
+                return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
+            staged = await self._act("read_stage", round_id, record, seconds=300, result_type=StageResult)
+        await self._register(dataset, staged, "")
 
     async def _reuse(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, reused: str) -> None:
         """A pyramid staged from this very binding is on disk: re-read its report and register it, no job."""
@@ -523,7 +558,7 @@ class MiaBuffer:
         """Take the record's raw-cache lock, waiting while another owner holds it; a re-take by the same owner
         succeeds at once and refreshes it. Returns the last other holder seen ("" when it was free)."""
         limits = await self._limits()
-        holder = ""
+        holder, tries = "", 0
         while not (
             taken := await self._act(
                 "take_lock", "raw", dataset.record, owner, limits.lock_ttl_s, result_type=LockTaken
@@ -531,39 +566,56 @@ class MiaBuffer:
         ).ok:
             holder = taken.holder
             dataset.status, dataset.reason = "waiting-lock", f"raw cache held by {holder}"
-            # ponytail: one activity and one timer per try, as mia-data's _hold_raw; a wait of many hours wants a
-            # backoff or a wake-up from the releasing worker
-            await workflow.sleep(timedelta(minutes=limits.poll_minutes))
+            # ponytail: ~10 history events per try, backing off to one try per 30 min (~20 events an hour per
+            # waiter); 100 datasets waiting a day fill the 51,200-event history. Upgrade: a wake-up signal from the
+            # releasing worker, or continue-as-new during sourcing.
+            await workflow.sleep(_backoff(limits.poll_minutes, tries))
+            tries += 1
         self.held.add(owner)
         if holder:  # our own lock is not "held by" anyone on the page
             dataset.status, dataset.reason = "pending", ""
         return holder
 
+    async def _retake(self, dataset: DatasetStatus, owner: str) -> None:
+        """Take the record's lock again after a wait (a slot, a quota block). LockChanged when another owner held
+        it meanwhile: it may have staged the binding or the keeper evicted the cache, so the caller decides again."""
+        if holder := await self._lock(dataset, owner):
+            raise LockChanged(holder)
+
     async def _release(self, lock: list[str]) -> None:
-        """Release a lock _lock took, if this run still holds it; never raises: a lock left behind lapses after its
-        TTL."""
+        """Release a lock _lock took, if this run still holds it. A failed release is logged (a lock left behind
+        lapses after its TTL); a cancel that lands in it is re-raised after one more try, so a dropped or abandoned
+        dataset stops instead of polling on."""
         if lock[2] not in self.held:
             return
         self.held.discard(lock[2])
         try:
             await self._act("release_lock", *lock, budget=timedelta(minutes=30))
         except ActivityError as error:
+            if isinstance(error.cause, CancelledError):
+                try:  # the cancel is delivered: this try runs, and the next round need not wait out the TTL
+                    await self._act("release_lock", *lock, budget=timedelta(minutes=30))
+                except ActivityError:
+                    pass
+                raise
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _quota(self, dataset: DatasetStatus, owner: str) -> bool:
         """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the issue), with the
-        record's lock released while blocked (spec §5.2) and taken again before the fetch. False: the round's day
-        limit had fired, so the block dropped the dataset instead."""
+        record's lock released while blocked (spec §5.2) and taken again after. False: the dataset was dropped
+        (the round's day limit had fired, so the block dropped it) or abandoned while blocked."""
         state = self.state
         assert state.round_id
         limits = await self._limits()
-        said = False
+        said, tries = False, 0
         while not (quota := await self._act("check_quota", state.round_id, dataset.record, result_type=QuotaCheck)).ok:
             if self.timed_out:  # _drop_waiting has run: nothing would drop this one later
                 await self._drop(dataset, f"still blocked after {state.timeout_days:g} days")
                 return False
             dataset.status, dataset.reason = "blocked", f"raw quota over by {quota.over_by} bytes"
             await self._release(["raw", dataset.record, owner])
+            if dataset.status == "dropped" or dataset.reason == ABANDONED:  # cancelled meanwhile
+                return False
             if not said:
                 await self._comment(
                     f"`{dataset.record}` is blocked: {dataset.reason}. Its fetch waits until the keeper frees space "
@@ -571,23 +623,42 @@ class MiaBuffer:
                     f"dataset {state.round_id} {dataset.record} blocked",
                 )
                 said = True
-            await workflow.sleep(timedelta(minutes=limits.poll_minutes))
+            # ponytail: as _lock, backing off to one try per 30 min; a wake-up from the keeper is the upgrade
+            await workflow.sleep(_backoff(limits.poll_minutes, tries))
+            tries += 1
         if owner not in self.held:
-            await self._lock(dataset, owner)
-        dataset.status, dataset.reason = "fetching", ""
+            dataset.status, dataset.reason = "pending", ""
+            await self._retake(dataset, owner)
         return True
 
-    async def _fetch(self, dataset: DatasetStatus, binding: BindingInfo, owner: str) -> list[str] | None:
-        """The fetch phase, under the record's lock and a fetch slot: wait for quota, then up to fetch_attempts
-        fetch jobs, each resuming from the cache. Returns the urls the stage must stream, or None (failed or dropped)."""
+    async def _fetch(
+        self, dataset: DatasetStatus, binding: BindingInfo, owner: str, fetch_slots: asyncio.Semaphore
+    ) -> list[str] | None:
+        """The fetch phase under the record's lock: wait for quota (holding no fetch slot), then take a fetch slot;
+        after a wait for it the lock is refreshed and the quota checked again (other fetches ran meanwhile; over
+        again: back to waiting without the slot). Returns the urls the stage must stream, or None (failed or
+        dropped)."""
+        state = self.state
+        assert state.round_id
+        while True:
+            if not await self._quota(dataset, owner):
+                return None  # dropped
+            waited = fetch_slots.locked()
+            async with fetch_slots:
+                if waited:
+                    await self._retake(dataset, owner)  # refreshed after the wait for a fetch slot
+                    if not (await self._act("check_quota", state.round_id, dataset.record, result_type=QuotaCheck)).ok:
+                        continue
+                dataset.status, dataset.reason = "fetching", ""
+                return await self._fetch_jobs(dataset, binding, owner)
+
+    async def _fetch_jobs(self, dataset: DatasetStatus, binding: BindingInfo, owner: str) -> list[str] | None:
+        """Up to fetch_attempts fetch jobs, each resuming from the cache; the stream urls, or None (failed)."""
         state = self.state
         assert state.round_id and state.pins
         round_id, record = state.round_id, dataset.record
         limits = await self._limits()
-        await self._lock(dataset, owner)  # refreshed after the wait for a fetch slot
-        dataset.status, dataset.reason = "fetching", ""
-        if not await self._quota(dataset, owner):
-            return None  # dropped
+        last = ""
         for attempt in range(1, limits.fetch_attempts + 1):
             workspace = await self._act(
                 "prepare_fetch", state.issue, round_id, record, attempt, seconds=300, result_type=str
@@ -595,7 +666,8 @@ class MiaBuffer:
             args = FetchJobArgs(workspace, round_id, state.pins, record, list(binding.hosts), attempt)
             key = fetch_job_key(state.issue, round_id, record, attempt)
             job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
-            await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
+            job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
+            last = f"last job {job.job_id} {job.state} exit {job.exit_code}"
             fetched = await self._act("read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult)
             if fetched.host_not_allowed or not fetched.ok:
                 why = "; ".join(fetched.errors + [f"{url} failed" for url in fetched.failed]) or "no errors reported"
@@ -605,7 +677,7 @@ class MiaBuffer:
                 return None
             if not fetched.partial:
                 return list(fetched.stream)
-        await self._fail(dataset, f"fetch still partial after {limits.fetch_attempts} attempts")
+        await self._fail(dataset, f"fetch still partial after {limits.fetch_attempts} attempts ({last})")
         return None
 
     async def _await_dataset(self, dataset: DatasetStatus) -> bool:

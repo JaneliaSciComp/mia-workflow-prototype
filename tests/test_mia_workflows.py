@@ -518,12 +518,12 @@ async def test_continue_as_new_keeps_handled(env, monkeypatch):
 async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke(env):
     m = Mocks(smoke=SmokeResult(False, errors=["no data"]), lock_busy=2)
     async with started(env, m) as h:
-        for tries in (1, 2):  # each refused take sleeps poll_minutes (2) before the next
+        for tries in (1, 2):  # a refused take sleeps poll_minutes (2), doubling with each try
             await until(lambda tries=tries: len(m.of("take_lock")) == tries)
-            await env.sleep(timedelta(minutes=3))
+            await env.sleep(timedelta(minutes=2 * tries + 1))
         await idle(h, m, "needs-human")
         timers = [e for e in (await h.fetch_history()).events if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED]
-        assert [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in timers] == [120, 120]
+        assert [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in timers] == [120, 240]
     owner = "mia-data i7-e11 smoke"
     assert m.of("take_lock") == [("raw", "rec-1", owner, 900)] * 3
     waiting = [a for a in m.of("comment") if a[1] == "lock i7-e11"]
