@@ -108,6 +108,17 @@ class Registry:
         found = self._lookup(f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}")
         return None if found is None else found["data"]
 
+    def assets(self, kind: str, state: str | None = None, record: str | None = None) -> dict:
+        """{kind, assets: [{key, data, refs}], bytes}, filtered on the rows' state and record when given."""
+        params = {name: value for name, value in (("state", state), ("record", record)) if value is not None}
+        return self.request("GET", f"/assets/{quote(kind, safe='')}", params=params or None)
+
+    def sync_assets(self) -> dict:
+        return self.request("POST", "/sync/assets")
+
+    def locks(self) -> list[dict]:
+        return self.request("GET", "/locks")["locks"]
+
     def put_records(self, ref: str, records: list[tuple[str, dict]]) -> dict:
         body = {"records": [{"path": path, "record": record} for path, record in records]}
         return self.request("PUT", f"/records/{quote(ref, safe='')}", json=body)

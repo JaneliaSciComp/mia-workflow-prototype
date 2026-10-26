@@ -11,6 +11,7 @@ import yaml
 from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger, prune_backups
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
+from mia_core.locks import LockDir
 from tests.test_buffers_config import make_cfg
 from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
 from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
@@ -277,6 +278,7 @@ def test_assets_registry_and_refs_from_registered_volumes(tmp_path):
     assert call(s, "GET", "/assets/staged")[1] == {
         "kind": "staged",
         "assets": [{"key": "/staged/a", "data": {"record": "rec", "ok": True}, "refs": ["b"]}],
+        "bytes": 0,
     }
     assert call(s, "GET", "/assets/nope/x")[0] == 404
 
@@ -427,3 +429,57 @@ def test_volume_refs_are_keyed_by_artifact(tmp_path):
     assert call(s, "GET", "/assets/staged/art1")[1]["refs"] == ["b"]
     call(s, "PUT", "/buffers/b/volumes/c", payload=body("c"))  # no artifact: the directory, as before
     assert call(s, "GET", "/assets/staged/%2Fstaged%2Fc")[1]["refs"] == ["b"]
+
+
+def test_assets_merge_filter_and_totals(tmp_path):
+    s = svc(tmp_path)
+    assert call(s, "PUT", "/assets/staged/a1", payload={"state": "staging", "record": "rec", "job": "7"})[0] == 200
+    status, out, _ = call(s, "PUT", "/assets/staged/a1", payload={"state": "ready", "bytes": 100})
+    assert status == 200 and out == {
+        "kind": "staged",
+        "key": "a1",
+        "data": {"state": "ready", "record": "rec", "job": "7", "bytes": 100},
+    }
+    call(s, "PUT", "/assets/staged/a2", payload={"state": "evicted", "record": "rec", "bytes": 50})
+    status, out, _ = call(s, "PUT", "/assets/staged/a1", payload={"state": "gone"})
+    assert status == 422 and "state must be one of" in out["error"]
+    assert call(s, "PUT", "/assets/staged/a1", payload=[1])[0] == 422
+    assert s.handle("PUT", "/assets/staged/a1", {}, b"not json")[0] == 422
+    status, out, _ = call(s, "GET", "/assets/staged", {"state": "ready"})
+    assert status == 200 and [a["key"] for a in out["assets"]] == ["a1"] and out["bytes"] == 100
+    assert [a["key"] for a in call(s, "GET", "/assets/staged", {"record": "rec"})[1]["assets"]] == ["a1", "a2"]
+
+
+def test_locks_route_lists_holders(tmp_path):
+    locks = LockDir(tmp_path / "locks")
+    assert locks.take("raw", "rec", "job-1", 900)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", locks=locks)
+    status, out, _ = call(s, "GET", "/locks")  # a read route: no token
+    assert status == 200 and [(h["kind"], h["key"], h["owner"], h["stale"]) for h in out["locks"]] == [
+        ("raw", "rec", "job-1", False)
+    ]
+    assert call(svc(tmp_path / "other"), "GET", "/locks")[1] == {"locks": []}
+
+
+def test_sync_assets_skips_a_missing_or_empty_root(tmp_path):
+    raw = tmp_path / "raw"
+    (raw / "rec").mkdir(parents=True)
+    (raw / "rec" / "k").write_bytes(b"x" * 8)
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_asset("staged", "art", {"state": "ready", "bytes": 5})
+    led.put_asset("raw", "gone", {"state": "ready", "bytes": 5})
+    s = BufferService(led, raw_root=raw, staged_root=tmp_path / "unmounted")
+    status, out, _ = call(s, "POST", "/sync/assets")
+    assert status == 200 and out == {"scanned": 1, "new": 1, "missing": 1, "building": [], "skipped": ["staged"]}
+    assert led.asset("staged", "art")["state"] == "ready" and led.asset("raw", "gone")["state"] == "missing"
+    assert led.asset("raw", "rec")["state"] == "ready" and led.asset("raw", "rec")["bytes"] == 8
+    assert BufferService(led).handle("POST", "/sync/assets", {}, b"")[0] == 503
+    worker = BufferService(led, token="t", raw_root=raw)
+    assert worker.handle("POST", "/sync/assets", {}, b"")[0] == 401
+
+
+def test_sync_assets_is_exclusive(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), raw_root=tmp_path / "raw", staged_root=tmp_path / "staged")
+    with s._sync_lock:
+        status, out, _ = call(s, "POST", "/sync/assets")
+    assert status == 409 and out == {"error": "a sync is running"}

@@ -98,3 +98,20 @@ def test_read_token(tmp_path):
     for name in ("missing", "empty"):
         with pytest.raises(RegistryError):
             read_token(tmp_path / name)
+
+
+def test_assets_sync_assets_and_locks():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"kind": "staged", "assets": [], "bytes": 0}))
+    assert reg.assets("staged", state="ready") == {"kind": "staged", "assets": [], "bytes": 0}
+    assert (
+        seen[0].method == "GET"
+        and seen[0].url.path == "/assets/staged"
+        and dict(seen[0].url.params) == {"state": "ready"}
+    )
+    reg.assets("raw", record="rec")
+    assert dict(seen[1].url.params) == {"record": "rec"}
+    reg.sync_assets()
+    assert seen[2].method == "POST" and seen[2].url.path == "/sync/assets"
+    holder = {"kind": "raw", "key": "rec", "owner": "o"}
+    assert Registry("http://svc", "t", transport=transport([], body={"locks": [holder]})).locks() == [holder]

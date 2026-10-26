@@ -168,6 +168,10 @@ class Ledger:
                 ).fetchall()
         return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
 
+    def in_progress_records(self) -> set[str]:
+        """Dataset ids whose state is in-progress: a prep job may be reading their raw cache."""
+        return {row["id"] for row in self.datasets("in-progress")}
+
     def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
         """Mark each given record prepared and drop prepared rows no longer given; other states are untouched.
         With `older_than`, only rows last written before it are dropped: one written during the scan stays."""
@@ -186,11 +190,17 @@ class Ledger:
 
     # --- the registry ------------------------------------------------------------------------
 
-    def put_asset(self, kind: str, key: str, data: dict) -> None:
-        with self._lock:
-            self._db.execute(
-                "INSERT OR REPLACE INTO assets VALUES (?, ?, ?, ?)", (kind, key, json.dumps(data), time.time())
-            )
+    @staticmethod
+    def _merge_asset(db: sqlite3.Connection, kind: str, key: str, fields: dict, now: float) -> dict:
+        row = db.execute("SELECT data FROM assets WHERE kind = ? AND key = ?", (kind, key)).fetchone()
+        merged = {**(json.loads(row[0]) if row else {}), **fields}
+        db.execute("INSERT OR REPLACE INTO assets VALUES (?, ?, ?, ?)", (kind, key, json.dumps(merged), now))
+        return merged
+
+    def put_asset(self, kind: str, key: str, data: dict) -> dict:
+        """Merge `data` into the row (new keys win; a new row when none); returns the merged data."""
+        with self._transaction() as db:
+            return self._merge_asset(db, kind, key, data, time.time())
 
     def asset(self, kind: str, key: str) -> dict | None:
         with self._lock:
@@ -208,17 +218,81 @@ class Ledger:
             ).fetchall()
         return [row[0] for row in rows]
 
-    def assets(self, kind: str) -> list[dict]:
-        """Every key of `kind` that has a row or a reference: {key, data (None without a row), refs}."""
+    def assets(self, kind: str, state: str | None = None, record: str | None = None) -> list[dict]:
+        """Every key of `kind` that has a row or a reference: {key, data (None without a row), refs}. With `state`
+        or `record`, only rows whose data has that value; a reference without a row passes no filter."""
         with self._lock:
-            rows = self._db.execute(
-                "SELECT key, data FROM assets WHERE kind = ? UNION SELECT DISTINCT key, NULL FROM refs "
-                "WHERE kind = ? AND key NOT IN (SELECT key FROM assets WHERE kind = ?) ORDER BY key",
-                (kind, kind, kind),
-            ).fetchall()
+            if state is None and record is None:
+                rows = self._db.execute(
+                    "SELECT key, data FROM assets WHERE kind = ? UNION SELECT DISTINCT key, NULL FROM refs "
+                    "WHERE kind = ? AND key NOT IN (SELECT key FROM assets WHERE kind = ?) ORDER BY key",
+                    (kind, kind, kind),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT key, data FROM assets WHERE kind = ? AND (? IS NULL OR json_extract(data, '$.state') = ?) "
+                    "AND (? IS NULL OR json_extract(data, '$.record') = ?) ORDER BY key",
+                    (kind, state, state, record, record),
+                ).fetchall()
         return [
             {"key": key, "data": json.loads(data) if data else None, "refs": self.refs(kind, key)} for key, data in rows
         ]
+
+    def asset_bytes(self, kind: str) -> int:
+        """Σ `bytes` over the rows of `kind` that are on disk (state neither missing nor evicted)."""
+        with self._lock:
+            (total,) = self._db.execute(
+                "SELECT COALESCE(SUM(json_extract(data, '$.bytes')), 0) FROM assets WHERE kind = ? "
+                "AND COALESCE(json_extract(data, '$.state'), '') NOT IN ('missing', 'evicted')",
+                (kind,),
+            ).fetchone()
+        return int(total)
+
+    def staged_last_used(self) -> dict[str, float]:
+        """Artifact id → the newest draw from any volume that lives in that artifact."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT json_extract(volumes.data, '$.artifact'), MAX(draws.ts) FROM draws JOIN volumes "
+                "ON volumes.buffer = draws.buffer AND volumes.id = json_extract(draws.descriptor, '$.volume') "
+                "WHERE json_extract(volumes.data, '$.artifact') IS NOT NULL GROUP BY 1"
+            ).fetchall()
+        return {artifact: ts for artifact, ts in rows}
+
+    def sync_assets(
+        self,
+        found: dict[tuple[str, str], dict],
+        *,
+        older_than: float | None = None,
+        kinds: tuple[str, ...] = ("raw", "staged"),
+    ) -> dict:
+        """Merge what a scan found (a new, missing or evicted row becomes ready; other states are kept), mark
+        `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted (with
+        `older_than`, only rows last written before it), then merge each staged row's `last_used` from the draws."""
+        last_used = self.staged_last_used()
+        now = time.time()
+        with self._transaction() as db:
+            rows = {
+                (kind, key): (json.loads(data), updated)
+                for kind, key, data, updated in db.execute("SELECT kind, key, data, updated FROM assets")
+            }
+            new = 0
+            for (kind, key), fields in found.items():
+                known = rows.get((kind, key))
+                new += known is None
+                becomes_ready = known is None or known[0].get("state") in ("missing", "evicted")
+                self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)
+            missing = 0
+            for (kind, key), (data, updated) in rows.items():
+                if kind not in kinds or (kind, key) in found or (older_than is not None and updated >= older_than):
+                    continue
+                if data.get("state") not in ("fetching", "staging", "waiting-drop", "evicted", "missing"):
+                    self._merge_asset(db, kind, key, {"state": "missing"}, now)
+                    missing += 1
+            for artifact, ts in last_used.items():
+                row = db.execute("SELECT data FROM assets WHERE kind = 'staged' AND key = ?", (artifact,)).fetchone()
+                if row and ts > (json.loads(row[0]).get("last_used") or 0):
+                    self._merge_asset(db, "staged", artifact, {"last_used": ts}, now)
+        return {"scanned": len(found), "new": new, "missing": missing}
 
     def add_consumer(self, buffer: str, info: dict) -> str:
         consumer_id = uuid.uuid4().hex

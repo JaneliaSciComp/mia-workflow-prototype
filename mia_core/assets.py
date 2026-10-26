@@ -33,6 +33,11 @@ def _file_entry(entry: dict) -> dict:
     }
 
 
+def file_entries(manifest: dict) -> dict:
+    """A files.json mapping reduced to bounded urls and typed entries, as raw rows carry it."""
+    return {text(url, 500): _file_entry(entry) for url, entry in manifest.items() if isinstance(entry, dict)}
+
+
 def raw_asset(cache_dir: Path, urls: Iterable[str]) -> dict:
     """The raw-cache asset row: path, bytes, files.json entries, and `ready` when every url of `urls` is cached."""
     manifest = read_files_json(cache_dir)
@@ -41,6 +46,6 @@ def raw_asset(cache_dir: Path, urls: Iterable[str]) -> dict:
     return {
         "path": str(cache_dir),
         "bytes": dir_bytes(cache_dir),
-        "files": {text(url, 500): _file_entry(entry) for url, entry in manifest.items() if isinstance(entry, dict)},
+        "files": file_entries(manifest),
         "state": "ready" if ready else "partial",
     }

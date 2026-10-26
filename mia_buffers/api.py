@@ -15,6 +15,7 @@ import random
 import re
 import threading
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -23,7 +24,9 @@ from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
+from mia_core.locks import LockDir
 from mia_core.registry import read_token
 
 from .config import Config
@@ -31,7 +34,7 @@ from .ledger import Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, draw, fits, servable
 from .spec import SpecError, load_spec_text, spec_text_hash
-from .sync import scan_storage
+from .sync import scan_assets, scan_storage
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
@@ -156,6 +159,8 @@ ROUTES = [
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
+    ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
+    ("GET", re.compile(r"^/locks$"), "locks", "read"),
 ]
 
 
@@ -163,12 +168,22 @@ class BufferService:
     """Routes → ledger operations. One train rng per buffer, seeded from the config; frozen lists seeded per split."""
 
     def __init__(
-        self, ledger: Ledger, stale_s: float = 300.0, *, token: str | None = None, storage_root: Path | None = None
+        self,
+        ledger: Ledger,
+        stale_s: float = 300.0,
+        *,
+        token: str | None = None,
+        storage_root: Path | None = None,
+        raw_root: Path | None = None,
+        staged_root: Path | None = None,
+        locks: LockDir | None = None,
     ):
         self.ledger = ledger
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
+        self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
+        self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
@@ -258,8 +273,9 @@ class BufferService:
             raise HttpError(422, f"invalid JSON: {error}") from None
         if not isinstance(data, dict):
             raise HttpError(422, "an asset is a JSON object")
-        self.ledger.put_asset(kind, key, data)
-        return 200, {"kind": kind, "key": key}, {}
+        if "state" in data and data["state"] not in ASSET_STATES:
+            raise HttpError(422, f"state must be one of {list(ASSET_STATES)}, got {data['state']!r}")
+        return 200, {"kind": kind, "key": key, "data": self.ledger.put_asset(kind, key, data)}, {}
 
     def _get_asset(self, kind: str, key: str, *, query: dict[str, str], body: bytes) -> Response:
         data, refs = self.ledger.asset(kind, key), self.ledger.refs(kind, key)
@@ -268,7 +284,27 @@ class BufferService:
         return 200, {"kind": kind, "key": key, "data": data, "refs": refs}, {}
 
     def _list_assets(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"kind": kind, "assets": self.ledger.assets(kind)}, {}
+        assets = self.ledger.assets(kind, state=query.get("state"), record=query.get("record"))
+        return 200, {"kind": kind, "assets": assets, "bytes": self.ledger.asset_bytes(kind)}, {}
+
+    def _sync_assets(self, *, query: dict[str, str], body: bytes) -> Response:
+        if self.raw_root is None and self.staged_root is None:
+            raise HttpError(503, "the service has neither raw_root nor staged_root")
+        if not self._sync_lock.acquire(blocking=False):
+            raise HttpError(409, "a sync is running")
+        try:
+            started = time.time()
+            known = {("raw", row["key"]): row["data"] for row in self.ledger.assets("raw") if row["data"]}
+            known |= {("staged", row["key"]): row["data"] for row in self.ledger.assets("staged") if row["data"]}
+            found, building, skipped = scan_assets(self.raw_root, self.staged_root, known)
+            kinds = tuple(kind for kind in ("raw", "staged") if kind not in skipped)
+            counts = self.ledger.sync_assets(found, older_than=started, kinds=kinds)
+            return 200, {**counts, "building": [str(path) for path in building], "skipped": skipped}, {}
+        finally:
+            self._sync_lock.release()
+
+    def _locks(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"locks": [asdict(holder) for holder in self.locks.holders()] if self.locks else []}, {}
 
     # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
 
@@ -482,6 +518,8 @@ def serve(cfg: Config) -> None:
     if cfg.service.token_file is None:
         raise SystemExit("set service.token_file in mia.yaml and run `mia init-token`")
     token = read_token(cfg.service.token_file)
+    if cfg.paths.local_root is None:
+        raise SystemExit("set paths.local_root in mia.yaml")
     try:
         ledger = open_ledger(cfg)
     except RuntimeError as error:
@@ -489,7 +527,14 @@ def serve(cfg: Config) -> None:
     url = urlparse(cfg.service.url)
     assert url.port is not None  # ServiceCfg requires an explicit port
     server = make_server(
-        BufferService(ledger, token=token, storage_root=cfg.paths.storage_root),
+        BufferService(
+            ledger,
+            token=token,
+            storage_root=cfg.paths.storage_root,
+            raw_root=cfg.paths.raw_root,
+            staged_root=cfg.paths.staged_root,
+            locks=LockDir(cfg.paths.local_root / "locks"),
+        ),
         url.hostname or "127.0.0.1",
         url.port,
     )

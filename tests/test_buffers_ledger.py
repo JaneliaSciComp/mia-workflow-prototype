@@ -1,7 +1,9 @@
 """The SQLite ledger: buffers, volumes, consumers, draws and frozen lists."""
 
+import dataclasses
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -121,3 +123,65 @@ def test_backup_is_a_consistent_copy(tmp_path):
     led.backup(tmp_path / "bk" / "copy.sqlite")
     assert Ledger(tmp_path / "bk" / "copy.sqlite").buffer("b") == {"x": 1}
     assert not (tmp_path / "bk" / "copy.tmp").exists()
+
+
+def test_put_asset_merges_and_filters(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("raw", "rec", {"state": "fetching", "job": "1", "path": "/netfs/lab/raw/rec"})
+    merged = ledger.put_asset("raw", "rec", {"bytes": 10, "scanned_at": 5.0})
+    assert merged["state"] == "fetching" and merged["job"] == "1" and merged["bytes"] == 10
+    ledger.put_asset("staged", "art1", {"state": "ready", "record": "rec", "bytes": 100})
+    ledger.put_asset("staged", "art2", {"state": "evicted", "record": "rec", "bytes": 0})
+    ledger.add_ref("b", "staged", "ref-only")
+    assert [a["key"] for a in ledger.assets("staged", state="ready")] == ["art1"]
+    assert [a["key"] for a in ledger.assets("staged", record="rec")] == ["art1", "art2"]
+    assert [a["key"] for a in ledger.assets("staged")] == ["art1", "art2", "ref-only"]
+    assert ledger.asset_bytes("staged") == 100 and ledger.asset_bytes("raw") == 10
+
+
+def test_sync_assets_marks_missing_but_keeps_building_rows(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("staged", "gone", {"state": "ready", "bytes": 5})
+    ledger.put_asset("staged", "building", {"state": "staging", "job": "7"})
+    ledger.put_asset("staged", "back", {"state": "missing"})
+    ledger.put_asset("raw", "rec", {"state": "ready"})
+    found = {
+        ("staged", "back"): {"path": "/netfs/lab/s/p/rec/back", "bytes": 3, "scanned_at": 9.0},
+        ("staged", "new"): {"path": "/netfs/lab/s/p/rec/new", "bytes": 4, "scanned_at": 9.0, "record": "rec"},
+    }
+    counts = ledger.sync_assets(found, older_than=time.time() + 1, kinds=("staged",))
+    by_key = {a["key"]: a["data"] for a in ledger.assets("staged")}
+    assert by_key["gone"]["state"] == "missing" and by_key["building"]["state"] == "staging"
+    assert by_key["back"]["state"] == "ready" and by_key["new"]["state"] == "ready" and by_key["new"]["record"] == "rec"
+    assert counts == {"scanned": 2, "new": 1, "missing": 1}
+    assert ledger.asset("raw", "rec")["state"] == "ready"  # a kind not scanned is never demoted
+    # a row written after the scan started is left alone
+    ledger.put_asset("staged", "late", {"state": "ready"})
+    ledger.sync_assets({}, older_than=time.time() - 60)
+    assert {a["key"]: a["data"]["state"] for a in ledger.assets("staged")}["late"] == "ready"
+
+
+def test_staged_last_used_comes_from_draws(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_buffer("b", {})
+    ledger.put_volume("b", dataclasses.replace(vol("a"), artifact="art1"))
+    ledger.put_volume("b", vol("plain"))  # no artifact: never in the map
+    ledger.put_asset("staged", "art1", {"state": "ready", "last_used": 1.0})
+    assert ledger.staged_last_used() == {}
+    before = time.time()
+    ledger.record_draws("b", "c", [{"volume": "a"}, {"volume": "plain"}])
+    after = time.time()
+    used = ledger.staged_last_used()
+    assert list(used) == ["art1"] and before <= used["art1"] <= after
+    ledger.sync_assets({("staged", "art1"): {"bytes": 1, "scanned_at": after}})
+    assert ledger.asset("staged", "art1")["last_used"] == used["art1"]
+    ledger.put_asset("staged", "art1", {"last_used": after + 100})  # newer than every draw: kept
+    ledger.sync_assets({("staged", "art1"): {"bytes": 1, "scanned_at": after}})
+    assert ledger.asset("staged", "art1")["last_used"] == after + 100
+
+
+def test_in_progress_records(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_dataset("busy", {"state": "in-progress"})
+    ledger.put_dataset("done", {"state": "prepared"})
+    assert ledger.in_progress_records() == {"busy"}
