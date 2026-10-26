@@ -267,8 +267,8 @@ class Ledger:
     ) -> dict:
         """Merge what a scan found (a new, stateless, missing or evicted row becomes ready; other states are kept),
         mark `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted, then
-        merge each staged row's `last_used` from the draws (a new row starts with its `scanned_at`; later scans leave
-        it). With `older_than`, a row written since (by a worker,
+        merge each staged row's `last_used` from the draws (a new row, or a known one without it, starts with its
+        `scanned_at`; later scans leave it). With `older_than`, a row written since (by a worker,
         during the scan) is neither merged nor marked: the scan may predate that write."""
         last_used = self.staged_last_used()
         now = time.time()
@@ -283,7 +283,8 @@ class Ledger:
                 if known is not None and older_than is not None and known[1] >= older_than:
                     continue
                 new += known is None
-                if known is None and "scanned_at" in fields:  # a new row was last used when first seen, never later
+                if "scanned_at" in fields and (known is None or not known[0].get("last_used")):
+                    # a new row (or one from before last_used) was last used when first seen, never later
                     fields = {"last_used": fields["scanned_at"], **fields}
                 becomes_ready = known is None or known[0].get("state") in (None, "missing", "evicted")
                 self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)

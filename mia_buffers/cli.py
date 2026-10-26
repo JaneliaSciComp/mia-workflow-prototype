@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 from datetime import timedelta
@@ -21,7 +22,7 @@ from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import Registry, RegistryError, read_token
 from mia_data.cli import _gh, _github_clients
-from mia_data.jobspec import harness_pin
+from mia_data.jobspec import harness_env, harness_pin
 
 from .config import HUMAN_LABELS, STAGES, load_config
 from .jobspec import catalog_snapshot
@@ -241,6 +242,17 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             raise RuntimeError(f"{tensorizer} is missing")
         return f"{commit[:12]} env {digest[:12]} tensorizer {cfg.sourcing.tensorizer}"
 
+    async def harness_fetch():
+        """The harness checkout has the `fetch` subcommand the fetch jobs run (milestone C)."""
+        command = [str(harness_env(cfg)), "-c", "import sys; from mia_harness.cli import main; sys.exit(main())"]
+        try:
+            result = subprocess.run([*command, "fetch", "--help"], capture_output=True, text=True, timeout=120)
+        except OSError as error:
+            raise RuntimeError(f"cannot run the harness environment's python: {error}") from error
+        if result.returncode:
+            raise RuntimeError(f"`harness fetch --help` exited {result.returncode}: {result.stderr.strip()[-300:]}")
+        return f"{cfg.harness.dir} has `harness fetch`"
+
     async def buffer_api():
         url = f"{cfg.service.url}/buffers/_check_/status"
         status = httpx.get(url, timeout=10).status_code
@@ -262,6 +274,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             ("local root", local_root),
             ("service token", service_token),
             ("harness", harness),
+            ("harness fetch", harness_fetch),
             ("buffer-api", buffer_api),
         ]
     )
@@ -292,12 +305,23 @@ async def cmd_catalog_sync(cfg: Config, args: argparse.Namespace) -> int:
 
 
 async def cmd_assets_sync(cfg: Config, args: argparse.Namespace) -> int:
-    """Run one cache keeper pass here, without Temporal (`--dry-run`: report, change nothing on disk)."""
+    """Run one cache keeper pass here, without Temporal (`--dry-run`: report, change nothing on disk). A pass that
+    may evict runs only where the workers' lock directory is: elsewhere it would not see a running job's lock."""
     from dataclasses import asdict
 
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
+
+    locks = cfg.paths.local_root / "locks" if cfg.paths.local_root else None
+    if not args.dry_run and not (locks and locks.is_dir()):
+        print(
+            f"refusing to evict on {socket.gethostname()}: {locks or 'paths.local_root/locks'} does not exist, so the "
+            "workers' raw-cache locks are not here. Run it on the host `mia up` started the workers on, or pass "
+            "--dry-run.",
+            file=sys.stderr,
+        )
+        return 2
 
     clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
     try:
@@ -374,7 +398,11 @@ def main(argv: list[str] | None = None) -> int:
         ("worker", "run the Temporal workers (main and await queues)"),
         ("schedule", "create or update the poll Schedule"),
         ("init-labels", "create the buffer:* labels on the issue repo"),
-        ("check", "verify GitHub repos, Temporal, directories, the local root, the token, the harness and buffer-api"),
+        (
+            "check",
+            "verify GitHub repos, Temporal, directories, the local root, the token, the harness (and its fetch) and "
+            "buffer-api",
+        ),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument(

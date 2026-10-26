@@ -162,6 +162,15 @@ def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch
     tdir = cfg.harness.dir / "tensorizers" / cfg.sourcing.tensorizer
     tdir.mkdir(parents=True)
     (tdir / "tensorizer.yaml").write_text("name: x\n")
+    python = cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\n[ "$3" = fetch ] && [ "$4" = --help ]\n')  # a harness that has `fetch`
+    python.chmod(0o755)
+
+    async def login(cfg_):
+        return "bot"
+
+    monkeypatch.setattr(cli, "bot_login", login)  # no GitHub: the rows' own fakes answer
     monkeypatch.setattr(cli, "load_config", lambda path=None, service=None: cfg)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     monkeypatch.setattr(cli, "_gh", lambda cfg_, repo, tokens=None: _CheckGitHub(repo))
@@ -171,9 +180,14 @@ def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch
     monkeypatch.setattr(cli.httpx, "get", lambda url, timeout: SimpleNamespace(status_code=404))
     assert cli.main(["check"]) == 1
     rows = capsys.readouterr().out.rstrip("\n").split("\n")
-    assert [r[:3] for r in rows] == ["ok ", "ok ", "ok ", "BAD", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
+    assert [r[:3] for r in rows] == ["ok ", "ok ", "ok ", "BAD", "BAD", "ok ", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert rows[3].startswith("BAD  github catalog") and "down" in rows[4]
-    assert rows[9].startswith("ok   buffer-api") and "http://svc:1" in rows[9]
+    assert rows[9].startswith("ok   harness fetch") and rows[10].startswith("ok   buffer-api")
+    assert "http://svc:1" in rows[10]
+    python.write_text("#!/bin/sh\necho 'invalid choice: fetch' >&2; exit 2\n")  # a checkout from before the fetch
+    assert cli.main(["check"]) == 1
+    rows = capsys.readouterr().out.rstrip("\n").split("\n")
+    assert rows[9].startswith("BAD  harness fetch") and "exited 2: invalid choice: fetch" in rows[9]
 
 
 def test_serve_takes_config_only(capsys):
@@ -280,7 +294,11 @@ def test_assets_sync_runs_one_keeper_pass(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_gh", lambda cfg_, repo: FakeGH())
     monkeypatch.setattr(cli, "bot_login", login)
     monkeypatch.setattr(Activities, "keep", keep)
-    assert cli.main(["assets", "sync", "--dry-run"]) == 0
+    assert cli.main(["assets", "sync", "--dry-run"]) == 0  # a dry run anywhere
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "scanned: 3" and "evicted: ['staged a']" in out and "errors: []" in out
+    assert cli.main(["assets", "sync"]) == 2 and passes == [True]  # no lock directory here: not the workers' host
+    err = capsys.readouterr().err
+    assert "refusing to evict on" in err and "`mia up`" in err and "local/locks does not exist" in err
+    (tmp_path / "local" / "locks").mkdir(parents=True)
     assert cli.main(["assets", "sync"]) == 1 and passes == [True, False]  # a failed step is exit 1

@@ -13,8 +13,8 @@ log = logging.getLogger(__name__)
 BUILDING = ("fetching", "staging")  # states a job is writing under
 
 
-def _bytes(data: dict) -> float:
-    value = data.get("bytes")
+def _bytes(data: dict, name: str = "bytes") -> float:
+    value = data.get(name)
     return value if isinstance(value, int | float) and not isinstance(value, bool) else 0
 
 
@@ -27,6 +27,17 @@ def live_bytes(assets: list[dict]) -> float:
     return sum(
         _bytes(data) for row in assets if (data := row.get("data") or {}).get("state") not in ("missing", "evicted")
     )
+
+
+def demand(assets: list[dict], *, hold_s: float, now: float) -> float:
+    """The largest `wanted` among the rows a fetch is blocked on (check_quota marks them), blocked within `hold_s`."""
+    wanted = [0.0]
+    for row in assets:
+        data = row.get("data") or {}
+        blocked_at = data.get("blocked_at")
+        if isinstance(blocked_at, int | float) and blocked_at + hold_s > now:
+            wanted.append(_bytes(data, "wanted"))
+    return max(wanted)
 
 
 def free_assets(assets: list[dict], *, hold_s: float, now: float, in_progress: set[str], kind: str) -> list[dict]:
@@ -52,12 +63,13 @@ def plan_evictions(
     now: float,
     in_progress: set[str],
     kind: str,
+    demand_bytes: float = 0,
 ) -> list[dict]:
-    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom; none when the
-    quota is 0 (unlimited)."""
+    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom, or minus
+    `demand_bytes` (what a blocked fetch wants) when that is larger; none when the quota is 0 (unlimited)."""
     if quota_bytes <= 0:
         return []
-    remaining, target, picked = live_bytes(assets), quota_bytes - headroom_bytes, []
+    remaining, target, picked = live_bytes(assets), quota_bytes - max(headroom_bytes, demand_bytes), []
     for row in free_assets(assets, hold_s=hold_s, now=now, in_progress=in_progress, kind=kind):
         if remaining <= target:
             break

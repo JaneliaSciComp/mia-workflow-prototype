@@ -113,5 +113,10 @@ def test_assets_sync_assets_and_locks():
     assert dict(seen[1].url.params) == {"record": "rec"}
     reg.sync_assets()
     assert seen[2].method == "POST" and seen[2].url.path == "/sync/assets"
+    assert seen[2].extensions["timeout"]["read"] == 600  # a sync walks a whole root: minutes, not 30 s
+    reg.sync_datasets()
+    assert seen[3].url.path == "/sync/datasets" and seen[3].extensions["timeout"]["read"] == 600
+    reg.assets("raw")
+    assert seen[4].extensions["timeout"]["read"] == 30  # every other call keeps the client's
     holder = {"kind": "raw", "key": "rec", "owner": "o"}
     assert Registry("http://svc", "t", transport=transport([], body={"locks": [holder]})).locks() == [holder]

@@ -47,7 +47,7 @@ from mia_data.status import render_links, render_stage
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
-from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
+from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     BindingInfo,
     BufferPins,
@@ -92,6 +92,7 @@ DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
+KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
 OVER_QUOTA = (
     "The {kind} root is over quota by {over_by} bytes and nothing is evictable (every asset is referenced, held or "
     "building). Raise `quota.{kind}_bytes`, retire a buffer, or wait for `quota.hold_hours`."
@@ -524,7 +525,8 @@ class Activities:
 
     async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str]:
         """(found, artifact id): found when buffer-api's registry holds an `ok` pyramid under this artifact id
-        and its stage.json is still on disk. Buffer-api unreachable or refusing: not found (stage again)."""
+        and its stage.json is still on disk (its `last_used` is then touched). Buffer-api unreachable or refusing:
+        not found (stage again)."""
         artifact = self._artifact(round_id, record)
         try:
             data = await asyncio.to_thread(self.registry.asset, "staged", artifact)
@@ -532,7 +534,10 @@ class Activities:
             activity.logger.warning("%s: registry unavailable, staging again: %s", record, error)
             return False, artifact
         found = isinstance(data, dict) and data.get("ok") is True
-        return found and (self._staged_dir(round_id, record) / "stage.json").is_file(), artifact
+        found = found and (self._staged_dir(round_id, record) / "stage.json").is_file()
+        if found:  # a buffer is about to reuse it: the keeper's hold rule spares it
+            await self.mark_asset("staged", artifact, {"last_used": time.time()})
+        return found, artifact
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
@@ -672,12 +677,15 @@ class Activities:
     @mia_permanent_errors
     async def raw_status(self, round_id: str, record: str) -> RawStatus:
         """Whether files.json of the record's raw cache lists every whole file of the round's binding but the
-        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known)."""
+        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known). The row's
+        `last_used` is touched, so the keeper's hold rule spares what this buffer is about to use."""
         try:
             row = await asyncio.to_thread(self.registry.asset, "raw", record)
         except RegistryError as error:
             log.warning("%s: registry unavailable, no stream urls known: %s", record, error)
             row = None
+        if isinstance(row, dict):
+            await self.mark_asset("raw", record, {"last_used": time.time()})
         recorded = row.get("stream") if isinstance(row, dict) else None
         urls = self._binding_urls(round_id, record)
         stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
@@ -690,7 +698,8 @@ class Activities:
     async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
         """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
         limit). The record's own row is left out of the total, so a resumed fetch does not count its partial
-        cache twice. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        cache twice. Over: the row records `wanted` (the catalog size) and `blocked_at`, best effort, for the
+        keeper. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
         limit = int(self.cfg.quota.raw_bytes)
         if limit == 0:
             return QuotaCheck(True)
@@ -701,6 +710,8 @@ class Activities:
         own_bytes = own.get("bytes")
         own_bytes = own_bytes if counted and type(own_bytes) is int else 0
         over_by = int(listing["bytes"]) - own_bytes + expected - limit
+        if over_by > 0:  # the keeper frees room for the largest blocked fetch (`wanted`), not only the headroom
+            await self.mark_asset("raw", record, {"wanted": expected, "blocked_at": time.time()})
         return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
 
     @activity.defn(name="prepare_fetch")
@@ -757,6 +768,7 @@ class Activities:
             stream = [url for url in self._binding_urls(round_id, record) if url in streamed]
         row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
         row.update(state="ready" if result.ok and not result.partial else "partial", job=None, last_used=time.time())
+        row.update(wanted=None, blocked_at=None)  # the fetch ran: no longer blocked
         if stream is not None:
             row["stream"] = stream
         await self.mark_asset("raw", record, row)
@@ -773,7 +785,8 @@ class Activities:
     @mia_permanent_errors
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
-        key and list them in files.json. A listed file that is missing, empty or a symlink stays missing."""
+        key and list them in files.json. A listed file that is missing, empty or a symlink stays missing. When none
+        is, the raw row becomes `ready` (best effort)."""
         urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
         placed, missing, entries = [], [], {}
@@ -803,6 +816,8 @@ class Activities:
             placed.append(name)
         if entries:
             merge_manifest(cache, entries)
+        if not missing:  # the row said waiting-drop: the files are in (best effort)
+            await self.mark_asset("raw", record, {"state": "ready"})
         return DropResult(not missing, placed, missing)
 
     @activity.defn(name="create_buffer")
@@ -855,12 +870,20 @@ class Activities:
         sync datasets and assets; the catalog when `keeper.catalog_sync_hours` have passed; rows building under an
         ended job reset; `.building-*` directories older than `quota.hold_hours` removed; free assets evicted per
         kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
-        the resets, removals and evictions are only reported."""
+        the resets, removals and evictions are only reported. The catalog sync runs last, so a slow one never
+        holds up an eviction; a background task heartbeats through any single long step."""
         report, registry, quota, now = KeeperReport(), self.registry, self.cfg.quota, time.time()
         roots = (self.cfg.paths.raw_root, self.cfg.paths.staged_root)
         hold_s = quota.hold_hours * 3600
+        current = ["start"]  # the step under way, the heartbeat's detail
+
+        async def keepalive() -> None:
+            while True:
+                await asyncio.sleep(KEEPER_HEARTBEAT_S)
+                _keeper_beat(current[0])
 
         async def step(name: str, work: Awaitable[Any]) -> Any:
+            current[0] = name
             _keeper_beat(name)
             try:
                 return await work
@@ -869,17 +892,21 @@ class Activities:
                 report.errors.append(text(f"{name}: {error}", 500))
                 return None
 
-        await step("sync datasets", asyncio.to_thread(registry.sync_datasets))
-        synced = await step("sync assets", asyncio.to_thread(registry.sync_assets)) or {}
-        report.scanned, report.missing, report.new = (
-            int(synced.get(name) or 0) for name in ("scanned", "missing", "new")
-        )
-        await step("catalog sync", self._keeper_catalog(report, now))
-        await step("stale builds", self._keeper_stale(report, dry_run))
-        for path in synced.get("building") or []:
-            await step("building", self._keeper_building(report, Path(path), roots, hold_s, now, dry_run))
-        for kind in ("staged", "raw"):
-            await step(f"evict {kind}", self._keeper_evict(report, kind, roots, hold_s, now, dry_run))
+        beating = asyncio.create_task(keepalive())
+        try:
+            await step("sync datasets", asyncio.to_thread(registry.sync_datasets))
+            synced = await step("sync assets", asyncio.to_thread(registry.sync_assets)) or {}
+            report.scanned, report.missing, report.new = (
+                int(synced.get(name) or 0) for name in ("scanned", "missing", "new")
+            )
+            await step("stale builds", self._keeper_stale(report, dry_run))
+            for path in synced.get("building") or []:
+                await step("building", self._keeper_building(report, Path(path), roots, hold_s, now, dry_run))
+            for kind in ("staged", "raw"):
+                await step(f"evict {kind}", self._keeper_evict(report, kind, roots, hold_s, now, dry_run))
+            await step("catalog sync", self._keeper_catalog(report, now))
+        finally:
+            beating.cancel()
         return report
 
     async def _keeper_catalog(self, report: KeeperReport, now: float) -> None:
@@ -966,13 +993,12 @@ class Activities:
             planned,
             quota_bytes=limit,
             headroom_bytes=self.cfg.quota.headroom_bytes,
+            demand_bytes=demand(rows, hold_s=hold_s, now=now) if kind == "raw" else 0,
             **rules,
         )
         evicted: list[dict] = []
         for row in picked:
             if not dry_run:
-                # ponytail: one heartbeat per removal; a single rmtree longer than the 5 min heartbeat timeout fails
-                # the pass (the next one resumes). Heartbeat from a background task if caches get that large.
                 _keeper_beat(f"evict {kind} {row['key']}")
                 taken, owner = await asyncio.to_thread(
                     take_or_holder, locks, "raw", lock_key(row), KEEPER, KEEPER_LOCK_TTL_S

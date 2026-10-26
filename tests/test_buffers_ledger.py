@@ -154,7 +154,8 @@ def test_sync_assets_marks_missing_but_keeps_building_rows(tmp_path):
     assert by_key["gone"]["state"] == "missing" and by_key["building"]["state"] == "staging"
     assert by_key["back"]["state"] == "ready" and by_key["new"]["state"] == "ready" and by_key["new"]["record"] == "rec"
     assert counts == {"scanned": 2, "new": 1, "missing": 1}
-    assert by_key["new"]["last_used"] == 9.0 and "last_used" not in by_key["back"]  # first seen: used then
+    assert by_key["new"]["last_used"] == 9.0  # first seen: used then
+    assert by_key["back"]["last_used"] == 9.0  # known, but without last_used (from before it): as first seen
     ledger.sync_assets({("staged", "new"): {"bytes": 4, "scanned_at": 99.0}}, older_than=time.time() + 1, kinds=())
     assert ledger.asset("staged", "new")["last_used"] == 9.0  # a later scan is not a use
     assert ledger.asset("raw", "rec")["state"] == "ready"  # a kind not scanned is never demoted
@@ -171,12 +172,18 @@ def test_sync_assets_readies_stateless_and_evicted_rows_and_skips_rows_written_d
     started = time.time() + 1
     found = {("staged", key): {"bytes": 7, "scanned_at": 9.0} for key in ("old", "evicted")}
     assert ledger.sync_assets(found, older_than=started) == {"scanned": 2, "new": 0, "missing": 0}
-    assert ledger.asset("staged", "old") == {"binding_hash": "b", "bytes": 7, "scanned_at": 9.0, "state": "ready"}
+    assert ledger.asset("staged", "old") == {
+        "binding_hash": "b",
+        "bytes": 7,
+        "scanned_at": 9.0,
+        "state": "ready",
+        "last_used": 9.0,  # a pre-C row is not evictable at once: the hold rule counts from its first scan
+    }
     assert ledger.asset("staged", "evicted")["state"] == "ready"
     # evicted by a worker after the scan saw the directory: the scan's row is not merged back
     ledger.put_asset("staged", "evicted", {"state": "evicted", "bytes": 0})
     ledger.sync_assets({("staged", "evicted"): {"bytes": 7, "scanned_at": 10.0}}, older_than=time.time() - 60)
-    assert ledger.asset("staged", "evicted") == {"state": "evicted", "bytes": 0, "scanned_at": 9.0}
+    assert ledger.asset("staged", "evicted") == {"state": "evicted", "bytes": 0, "scanned_at": 9.0, "last_used": 9.0}
 
 
 def test_staged_last_used_comes_from_draws(tmp_path):

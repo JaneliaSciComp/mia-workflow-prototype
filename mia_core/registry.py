@@ -13,6 +13,8 @@ import httpx
 
 from mia_core.config import ServiceCfg
 
+SYNC_TIMEOUT_S = 600.0  # a sync walks a whole root (du, stage.json reads): minutes, not the 30 s of a lookup
+
 
 class RegistryError(RuntimeError):
     """A failed registry call: `status` is the HTTP status, or None when the service was not reached."""
@@ -63,10 +65,14 @@ class Registry:
     ) -> None:
         self.close()
 
-    def request(self, method: str, path: str, *, json: Any = None, params: dict | None = None) -> Any:
-        """Send the request; the parsed JSON body (None when empty), or RegistryError on any failure."""
+    def request(
+        self, method: str, path: str, *, json: Any = None, params: dict | None = None, timeout: float | None = None
+    ) -> Any:
+        """Send the request; the parsed JSON body (None when empty), or RegistryError on any failure. `timeout`
+        (seconds) overrides the client's for this call."""
+        per_call = httpx.USE_CLIENT_DEFAULT if timeout is None else httpx.Timeout(timeout)  # httpx: None is no limit
         try:
-            response = self._client.request(method, path, json=json, params=params)
+            response = self._client.request(method, path, json=json, params=params, timeout=per_call)
         except (httpx.HTTPError, httpx.InvalidURL) as err:
             raise RegistryError(None, str(err)) from err
         if response.status_code >= 400:
@@ -114,7 +120,7 @@ class Registry:
         return self.request("GET", f"/assets/{quote(kind, safe='')}", params=params or None)
 
     def sync_assets(self) -> dict:
-        return self.request("POST", "/sync/assets")
+        return self.request("POST", "/sync/assets", timeout=SYNC_TIMEOUT_S)
 
     def locks(self) -> list[dict]:
         return self.request("GET", "/locks")["locks"]
@@ -127,7 +133,7 @@ class Registry:
         return self.request("POST", "/plan", json={"spec": spec_text})
 
     def sync_datasets(self) -> dict:
-        return self.request("POST", "/sync/datasets")
+        return self.request("POST", "/sync/datasets", timeout=SYNC_TIMEOUT_S)
 
     def catalogs(self) -> list[dict]:
         return self.request("GET", "/catalogs")["catalogs"]

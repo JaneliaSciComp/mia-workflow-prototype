@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -345,7 +346,7 @@ async def test_read_binding_needs_the_manifest_mia_data_published_for_it(acts):
     assert not (await acts.read_binding(ROUND, U937)).found
 
 
-async def test_verify_drop_moves_files_and_writes_manifest(acts):
+async def test_verify_drop_moves_files_and_writes_manifest(acts, server):
     await acts.plan(7, ROUND, await admitted(acts))
     write_binding(acts, BCSS, ["manual://x/b.zip::m.png", "manual://x/b.zip::n.png"], snippet="png-pairs")
     await acts.read_binding(ROUND, BCSS)
@@ -359,6 +360,7 @@ async def test_verify_drop_moves_files_and_writes_manifest(acts):
     assert not (cache / "incoming" / "b.zip").exists()
     entry = read_manifest(cache)["manual://x/b.zip"]
     assert entry["validators"] == validators and entry["source"] == "manual"
+    assert acts.registry.asset("raw", BCSS) == {"state": "ready"}  # no longer waiting-drop
     assert (await acts.verify_drop(ROUND, BCSS)).ok  # idempotent: the manifest already has it
 
 
@@ -609,9 +611,16 @@ async def test_check_quota(acts, server):
     for row in plan["rows"]:
         row["bytes"] = 20 if row["id"] == U937 else row["bytes"]
     plan_path.write_text(json.dumps(plan))
+    before = time.time()
     assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=20)
+    row = real.asset("raw", U937)  # what the keeper frees room for
+    assert row["wanted"] == 20 and row["blocked_at"] >= before and "state" not in row
     acts.cfg.quota.raw_bytes = 110
     assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=20)
+    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
+    await acts.read_fetch(ROUND, U937, str(workspace))  # the fetch ran: no longer blocked
+    row = real.asset("raw", U937)
+    assert row["wanted"] is None and row["blocked_at"] is None
     # a resumed fetch: the record's own partial cache is not counted twice (other 60 + own 30 + expected 50)
     real.put_asset("raw", "other-record", {"bytes": 60})
     real.put_asset("raw", U937, {"bytes": 30, "state": "partial"})
@@ -712,6 +721,24 @@ async def test_a_stream_url_is_ready_for_fetch_status_and_stage(acts, server):
     assert row["state"] == "ready" and row["stream"] == [member] and row["last_used"] > 0
     acts.registry = Registry("http://127.0.0.1:9")  # no registry, no recorded stream urls: the zip counts as missing
     assert await acts.raw_status(ROUND, U937) == RawStatus(False, [B_ZIP])
+
+
+async def test_raw_status_and_a_staged_find_touch_last_used(acts, server):
+    """Review fix: what a (possibly waiting) buffer is about to use is touched, so the keeper's hold rule spares
+    it: the raw row raw_status reads, and the staged row read_binding reports as reusable."""
+    await planned_and_bound(acts)
+    acts.registry.put_asset("raw", U937, {"state": "ready", "last_used": 1.0})
+    before = time.time()
+    await acts.raw_status(ROUND, U937)
+    assert acts.registry.asset("raw", U937)["last_used"] >= before
+    assert acts.registry.asset("raw", "nobody") is None
+    write_stage_json(staged_dir(acts, U937))
+    await acts.read_stage(ROUND, U937)
+    artifact = staged_dir(acts, U937).name
+    acts.registry.put_asset("staged", artifact, {"last_used": 1.0})
+    before = time.time()
+    assert (await acts.read_binding(ROUND, U937)).staged
+    assert acts.registry.asset("staged", artifact)["last_used"] >= before
 
 
 async def test_take_and_release_lock(acts):
@@ -938,10 +965,23 @@ async def test_keep_reports_failed_steps_without_raising(acts):
     env, beats = ActivityEnvironment(), []
     env.on_heartbeat = lambda *details: beats.append(details[0])
     report = await env.run(acts.keep)
-    assert beats == ["sync datasets", "sync assets", "catalog sync", "stale builds", "evict staged", "evict raw"]
+    assert beats == ["sync datasets", "sync assets", "stale builds", "evict staged", "evict raw", "catalog sync"]
     steps = [error.split(":")[0] for error in report.errors]
-    assert steps == ["sync datasets", "sync assets", "catalog sync", "stale builds", "evict staged"]
+    assert steps == ["sync datasets", "sync assets", "stale builds", "evict staged", "catalog sync"]  # catalog last
     assert report.scanned == 0 and report.evicted == []
+
+
+async def test_keep_heartbeats_through_a_long_step(acts, monkeypatch):
+    """Review fix: a background task heartbeats while one step (here a slow datasets sync) runs."""
+    from temporalio.testing import ActivityEnvironment
+
+    monkeypatch.setattr(acts_module, "KEEPER_HEARTBEAT_S", 0.02)
+    acts.registry = Registry("http://127.0.0.1:9")
+    monkeypatch.setattr(acts.registry, "sync_datasets", lambda: time.sleep(0.3) or {})
+    env, beats = ActivityEnvironment(), []
+    env.on_heartbeat = lambda *details: beats.append(details[0])
+    await env.run(acts.keep)
+    assert beats[0] == "sync datasets" and beats.count("sync datasets") >= 4
 
 
 async def test_keep_spares_a_raw_cache_whose_lock_a_job_holds(acts, keeper_server):

@@ -3,7 +3,7 @@
 import pytest
 
 from mia_buffers import keeper
-from mia_buffers.keeper import evict_path, free_assets, plan_evictions, stale_builds
+from mia_buffers.keeper import demand, evict_path, free_assets, plan_evictions, stale_builds
 
 
 def test_plan_evictions_skips_referenced_and_held_assets():
@@ -19,6 +19,28 @@ def test_plan_evictions_skips_referenced_and_held_assets():
     )
     # 160 live → evict a (120) … b referenced, c held, d building; still over, nothing else free
     assert [r["key"] for r in picked] == ["a"]
+
+
+def test_a_blocked_fetch_larger_than_the_headroom_sets_the_target():
+    now, hold_s = 10_000.0, 3600
+    rows = [
+        {"key": "old", "data": {"state": "ready", "bytes": 30, "last_used": 1.0}, "refs": []},
+        {"key": "older", "data": {"state": "ready", "bytes": 30, "last_used": 0.5}, "refs": []},
+        {"key": "want", "data": {"state": "missing", "wanted": 50, "blocked_at": now - 60}, "refs": []},
+        {"key": "stale", "data": {"state": "missing", "wanted": 90, "blocked_at": now - hold_s - 1}, "refs": []},
+        {"key": "odd", "data": {"wanted": 70, "blocked_at": "yesterday"}, "refs": []},
+        {
+            "key": "cleared",
+            "data": {"state": "ready", "wanted": None, "blocked_at": None, "last_used": now},
+            "refs": [],
+        },
+    ]
+    assert demand(rows, hold_s=hold_s, now=now) == 50  # stale, non-numeric and cleared marks do not count
+    rules = {"hold_s": hold_s, "now": now, "in_progress": set(), "kind": "raw"}
+    # 60 live under a quota of 100: the headroom of 10 needs nothing, the blocked fetch's 50 needs one eviction
+    assert plan_evictions(rows, quota_bytes=100, headroom_bytes=10, **rules) == []
+    picked = plan_evictions(rows, quota_bytes=100, headroom_bytes=10, demand_bytes=50, **rules)
+    assert [row["key"] for row in picked] == ["older"]
 
 
 def test_zero_quota_never_evicts():

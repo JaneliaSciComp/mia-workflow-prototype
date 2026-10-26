@@ -89,7 +89,8 @@ def scan_assets(
     raw_root: Path | None, staged_root: Path | None, known: dict[AssetKey, dict]
 ) -> tuple[dict[AssetKey, dict], list[Path], list[str]]:
     """(kind, key) → row for every raw cache `raw_root/<record>` and staged artifact
-    `staged_root/<levels key>/<record>/<artifact>/stage.json`; the `.building-*` directories found; and the kinds
+    `staged_root/<levels key>/<record>/<artifact>/stage.json`; the `.building-*` directories found (staged builds
+    and the evictions' asides in both roots); and the kinds
     whose root is unset, missing or empty, so a sync never marks a whole unmounted root missing."""
     now = time.time()
     found: dict[AssetKey, dict] = {}
@@ -98,6 +99,8 @@ def scan_assets(
     raw_dirs = _children(raw_root)
     if raw_dirs is None:
         skipped.append("raw")
+    if raw_root is not None:  # an eviction's aside, left by a removal that failed half way (even the last record's)
+        building += sorted(path for path in raw_root.glob(".building-*") if path.is_dir())
     for folder in raw_dirs or []:
         if folder.is_dir():
             row = {"path": str(folder), "bytes": _bytes(folder, known.get(("raw", folder.name)))}

@@ -87,6 +87,11 @@ def test_scan_assets_finds_raw_and_artifact_dirs_and_reuses_sizes(tmp_path, capl
     known = {("staged", "0123456789abcdef"): {"bytes": 1, "scanned_at": 0.0}}
     assert scan_assets(raw, staged, known)[0][("staged", "0123456789abcdef")]["bytes"] == dir_bytes(art)
     assert scan_assets(tmp_path / "none", staged, {})[2] == ["raw"]
+    # an eviction's aside in the raw root is swept like a staged build, even when it is all the root holds
+    (tmp_path / "only-aside" / ".building-evicted-rec-1").mkdir(parents=True)
+    (raw / ".building-evicted-rec-2").mkdir()
+    assert [p.name for p in scan_assets(raw, staged, {})[1]] == [".building-evicted-rec-2", building[0].name]
+    assert [p.name for p in scan_assets(tmp_path / "only-aside", None, {})[1]] == [".building-evicted-rec-1"]
     (tmp_path / "empty").mkdir()
     assert scan_assets(tmp_path / "empty", staged, {})[2] == ["raw"]
     assert scan_assets(raw, tmp_path / "empty", {})[2] == ["staged"]
