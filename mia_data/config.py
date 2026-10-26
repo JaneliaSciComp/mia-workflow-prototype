@@ -120,6 +120,9 @@ class LimitsCfg(BaseModel):
     agent_max_budget_usd: float = 5
     max_stage_attempts: int = 1
     max_pr_revisions: int = 5
+    fetch_bytes: float = 50e9
+    fetch_walltime_min: int = 480
+    fetch_attempts: int = 4
 
 
 class HarnessCfg(BaseModel):

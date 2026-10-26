@@ -46,6 +46,13 @@ class KeeperCfg(BaseModel):
     catalog_sync_hours: int = Field(default=24, ge=1)
 
 
+class QuotaCfg(BaseModel):
+    raw_bytes: float = Field(default=0, ge=0)  # 0 = unlimited
+    staged_bytes: float = Field(default=0, ge=0)
+    headroom_bytes: float = Field(default=200e9, ge=0)
+    hold_hours: float = Field(default=48, ge=0)  # an asset unused this long is evictable
+
+
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
     """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
     if not path.is_file():

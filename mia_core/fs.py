@@ -55,3 +55,18 @@ def require_secret_file(path: Path) -> None:
         ) from error
     if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
         raise RuntimeError(f"{path} must be a regular file with mode 600 (chmod 600)")
+
+
+def dir_bytes(path: Path) -> int:
+    """Total size of the regular files under `path` (symlinks not followed); 0 when `path` is missing."""
+    total = 0
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    total += dir_bytes(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    except FileNotFoundError:
+        pass
+    return total

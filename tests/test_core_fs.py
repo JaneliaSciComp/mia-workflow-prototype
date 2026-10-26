@@ -81,3 +81,11 @@ def test_require_secret_file_accepts_600_and_rejects_missing_or_symlink(tmp_path
     link.symlink_to(tok)
     with pytest.raises(RuntimeError):
         fs.require_secret_file(link)
+
+
+def test_dir_bytes_sums_regular_files_only(tmp_path):
+    (tmp_path / "a").write_bytes(b"x" * 10)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b").write_bytes(b"y" * 5)
+    (tmp_path / "link").symlink_to(tmp_path / "a")
+    assert fs.dir_bytes(tmp_path) == 15 and fs.dir_bytes(tmp_path / "missing") == 0
