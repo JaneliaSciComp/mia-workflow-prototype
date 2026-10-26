@@ -53,6 +53,7 @@ NOT_REVIEW = "`buffer:approve` counts only while the issue is in `buffer:plan-re
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 # dataset statuses that wait on a human, on mia-data or on quota: dropped at the timeout, abandoned by a new go
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
+ABANDONED = "abandoned: a new buffer:go started another round"
 
 
 class RoundFailed(Exception):
@@ -85,6 +86,8 @@ class MiaBuffer:
         self.drops: set[str] = set()  # records whose files a human dropped since we last looked
         self.dataset_updates: dict[str, str] = {}  # record -> "binding" | "ineligible", from the poller
         self.limits: SourcingLimits | None = None
+        self.timed_out = False  # the round's day limit fired: a dataset that turns blocked now is dropped (c-cache)
+        self.held: set[str] = set()  # owners of the raw-cache locks this run holds (c-cache)
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -277,6 +280,7 @@ class MiaBuffer:
         """Create the buffer, source every dataset in parallel, announce ready when the groups allow it."""
         state = self.state
         assert state.round_id
+        self.timed_out = False
         await self._stage("sourcing")
         state.buffer_id = state.round_id
         limits = await self._limits()
@@ -299,6 +303,7 @@ class MiaBuffer:
                 timeout=timedelta(days=state.timeout_days),
             )
         except TimeoutError:
+            self.timed_out = True
             if not self._ready_now():
                 below = self._below()  # before the drops: the message names what the human waited for
                 await self._drop_waiting(tasks, f"still {{status}} after {state.timeout_days:g} days")
@@ -347,7 +352,7 @@ class MiaBuffer:
                 for task, dataset in pairs:
                     if not task.done():
                         task.cancel()
-                        dataset.status, dataset.reason = "failed", "abandoned: a new buffer:go started another round"
+                        dataset.status, dataset.reason = "failed", ABANDONED
                 return False
         return True
 
@@ -368,6 +373,8 @@ class MiaBuffer:
             if dataset.status == "servable":  # only the "servable" comment failed; the volumes are registered
                 workflow.logger.warning("issue #%d: %s: %s", self.state.issue, dataset.record, error_message(error))
                 return
+            if (dataset.status == "dropped" or dataset.reason == ABANDONED) and workflow.patched("c-cache"):
+                return  # a cancel that landed inside an activity: the drop or abandon already says why
             await self._fail(dataset, error_message(error))
 
     async def _source_steps(
@@ -442,8 +449,8 @@ class MiaBuffer:
         owner = f"mia-buffers {round_id} {record}"
         lock = ["raw", record, owner]
         # ponytail: between a take and the next await_job poll the lock is not heartbeated (prepare + submit retries
-        # could outlast lock_ttl_s); it is re-taken after each slot wait and blocked poll. A heartbeat in submit is
-        # the upgrade.
+        # could outlast lock_ttl_s); it is re-taken after each slot wait and after a quota block. A heartbeat in
+        # submit is the upgrade.
         holder = await self._lock(dataset, owner)
         try:
             binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
@@ -526,24 +533,36 @@ class MiaBuffer:
             # ponytail: one activity and one timer per try, as mia-data's _hold_raw; a wait of many hours wants a
             # backoff or a wake-up from the releasing worker
             await workflow.sleep(timedelta(minutes=limits.poll_minutes))
+        self.held.add(owner)
+        if holder:  # our own lock is not "held by" anyone on the page
+            dataset.status, dataset.reason = "pending", ""
         return holder
 
     async def _release(self, lock: list[str]) -> None:
-        """Release a lock _lock took; never raises: a lock left behind lapses after its TTL."""
+        """Release a lock _lock took, if this run still holds it; never raises: a lock left behind lapses after its
+        TTL."""
+        if lock[2] not in self.held:
+            return
+        self.held.discard(lock[2])
         try:
             await self._act("release_lock", *lock, budget=timedelta(minutes=30))
         except ActivityError as error:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
-    async def _quota(self, dataset: DatasetStatus, owner: str) -> None:
-        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the issue), keeping
-        the record's lock fresh at every poll."""
+    async def _quota(self, dataset: DatasetStatus, owner: str) -> bool:
+        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the issue), with the
+        record's lock released while blocked (spec §5.2) and taken again before the fetch. False: the round's day
+        limit had fired, so the block dropped the dataset instead."""
         state = self.state
         assert state.round_id
         limits = await self._limits()
         said = False
         while not (quota := await self._act("check_quota", state.round_id, dataset.record, result_type=QuotaCheck)).ok:
+            if self.timed_out:  # _drop_waiting has run: nothing would drop this one later
+                await self._drop(dataset, f"still blocked after {state.timeout_days:g} days")
+                return False
             dataset.status, dataset.reason = "blocked", f"raw quota over by {quota.over_by} bytes"
+            await self._release(["raw", dataset.record, owner])
             if not said:
                 await self._comment(
                     f"`{dataset.record}` is blocked: {dataset.reason}. Its fetch waits until the keeper frees space "
@@ -552,19 +571,22 @@ class MiaBuffer:
                 )
                 said = True
             await workflow.sleep(timedelta(minutes=limits.poll_minutes))
+        if owner not in self.held:
             await self._lock(dataset, owner)
         dataset.status, dataset.reason = "fetching", ""
+        return True
 
     async def _fetch(self, dataset: DatasetStatus, binding: BindingInfo, owner: str) -> list[str] | None:
         """The fetch phase, under the record's lock and a fetch slot: wait for quota, then up to fetch_attempts
-        fetch jobs, each resuming from the cache. Returns the urls the stage must stream, or None (failed)."""
+        fetch jobs, each resuming from the cache. Returns the urls the stage must stream, or None (failed or dropped)."""
         state = self.state
         assert state.round_id and state.pins
         round_id, record = state.round_id, dataset.record
         limits = await self._limits()
         await self._lock(dataset, owner)  # refreshed after the wait for a fetch slot
         dataset.status, dataset.reason = "fetching", ""
-        await self._quota(dataset, owner)
+        if not await self._quota(dataset, owner):
+            return None  # dropped
         for attempt in range(1, limits.fetch_attempts + 1):
             workspace = await self._act(
                 "prepare_fetch", state.issue, round_id, record, attempt, seconds=300, result_type=str

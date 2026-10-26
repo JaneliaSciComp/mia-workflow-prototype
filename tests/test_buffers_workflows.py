@@ -97,6 +97,7 @@ class Mocks:
         raw=None,
         fetches=None,
         quotas=None,
+        limits=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -107,6 +108,7 @@ class Mocks:
         # record -> answers in turn (the last one repeats): take_lock, read_fetch, check_quota; raw_status as is
         self.locks, self.fetches, self.quotas = locks or {}, fetches or {}, quotas or {}
         self.raw = raw or {}  # record -> RawStatus; default: the raw cache is complete, nothing to fetch
+        self.limits = limits or SourcingLimits(2, 120, "http://svc:8765")
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -124,7 +126,7 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> SourcingLimits:
             rec("limits")
-            return SourcingLimits(2, 120, "http://svc:8765")
+            return self.limits
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -1030,10 +1032,15 @@ async def test_blocked_waits_for_quota_then_fetches(env):
         await idle(h, m, "ready")
     assert len([c for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]) == 1
     assert len(m.of("check_quota")) == 2 and len(m.of("submit_fetch")) == 1
-    assert order(m, "check_quota", "submit_fetch", "release_lock") == [
+    assert order(m, "check_quota", "take_lock", "submit_fetch", "release_lock") == [
+        "take_lock",
+        "take_lock",  # once the fetch slot is free
         "check_quota",
+        "release_lock",  # released while blocked (spec §5.2)
         "check_quota",
+        "take_lock",  # taken again before the fetch
         "submit_fetch",
+        "take_lock",  # refreshed once the stage slot is free
         "release_lock",
     ]
 
@@ -1075,3 +1082,49 @@ async def test_timeout_drops_a_blocked_dataset_and_releases_its_lock(env):
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "dropped" and "still blocked" in dataset(state, "u937").reason
     assert m.of("release_lock") == [("raw", "u937", OWNER)] and not m.of("submit_fetch")
+
+
+async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
+    """Review fix: with one fetch slot, `second` waits for it past the timeout; when it then finds the quota over
+    it is dropped rather than blocked forever, and the round ends. A blocked dataset holds no lock while it sleeps."""
+    short = PlanResult(
+        True,
+        [],
+        [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)],
+        1,
+        levels=[1],
+        patch=64,
+        timeout_days=6e-5,  # ~5 s of real time, as test_timeout_lets_a_staging_job_finish_then_announces_ready
+    )
+    over = QuotaCheck(False, over_by=5)
+    m = Mocks(
+        plan=short,
+        raw={record: RawStatus(False, [U937_URL]) for record in ("first", "second")},
+        quotas={"first": over, "second": over},
+        limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        await until(lambda: len(m.of("release_lock")) == 2, m=m)
+        state = await h.query(MiaBuffer.status)
+        history = await h.fetch_history()
+    assert {d.record: (d.status, d.reason) for d in state.datasets} == {
+        "first": ("dropped", "still blocked after 6e-05 days"),
+        "second": ("dropped", "still blocked after 6e-05 days"),
+    }
+    assert sorted(m.of("release_lock")) == [("raw", r, f"mia-buffers i7-e11 {r}") for r in ("first", "second")]
+    assert not m.of("submit_fetch") and "below ready.min_fraction" in m.of("set_stage")[-1][1]
+    # first: check_quota → release_lock → its poll timer (the round's day-limit timer started before any of it)
+    names = []
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            names.append(event.activity_task_scheduled_event_attributes.activity_type.name)
+        elif event.event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+            names.append("timer")
+    after = names[names.index("check_quota") :]
+    assert [n for n in after if n in ("check_quota", "release_lock", "timer")][:3] == [
+        "check_quota",
+        "release_lock",
+        "timer",
+    ]
