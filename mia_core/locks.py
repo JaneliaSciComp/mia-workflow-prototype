@@ -5,13 +5,15 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import logging
 import os
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+log = logging.getLogger(__name__)
 _COUNTER = itertools.count()  # shared by every LockDir in the process, so temporary names never collide
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 
@@ -175,3 +177,20 @@ class LockDir:
             yield
         finally:
             self.release(kind, key, owner)
+
+
+def heartbeat_through(locks: LockDir, lock: Sequence[str], inner: Callable[[str], None]) -> Callable[[str], None]:
+    """A job-wait heartbeat callback that calls `inner(state)`, then refreshes `lock` ([kind, key, owner]).
+
+    A lock that is gone or someone else's is logged once, not raised: the job runs on either way."""
+    kind, key, owner = lock
+    lost = False
+
+    def beat(state: str) -> None:
+        nonlocal lost
+        inner(state)
+        if not locks.heartbeat(kind, key, owner) and not lost:
+            lost = True
+            log.warning("%s lost the lock %s/%s: it lapsed or someone else holds it", owner, kind, key)
+
+    return beat

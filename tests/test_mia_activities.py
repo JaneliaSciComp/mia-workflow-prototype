@@ -10,12 +10,14 @@ import yaml
 from autodev_helpers import GIT_ID, run_git
 from mia_helpers import FakeGH, make_cfg
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 from test_autodev_agent import FakeCsub
 
 from autodev.jobs import CsubJobs
 from mia_core.registry import Registry
 from mia_data.activities import Activities
-from mia_data.models import DatasetState, JobArgs, job_key
+from mia_data.jobspec import lock_dir
+from mia_data.models import DatasetState, JobArgs, JobDone, LockTaken, job_key
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
 RECORD = {
@@ -475,3 +477,85 @@ async def test_publish_crops_refuses_a_binding_outside_the_round(tmp_path):
     (tmp_path / "elsewhere.yaml").write_text("record: rec-1\n")
     with pytest.raises(ApplicationError, match="not one of round"):
         await t.a.publish_crops(1, ROUND, str(cw), [v], SNIP_SHA, str(tmp_path / "elsewhere.yaml"))
+
+
+# --- the raw-cache lock and the raw asset row ---------------------------------------------------
+
+
+async def test_take_lock_names_the_holder(tmp_path):
+    t = _setup(tmp_path)
+    assert (await t.a.limits()).poll_minutes == t.cfg.temporal.poll_minutes  # the wait between tries
+    assert await t.a.take_lock("raw", "rec-1", "mia-data i1-e99 smoke", 900) == LockTaken(True)
+    assert await t.a.take_lock("raw", "rec-1", "mia-data i1-e98 crop", 900) == LockTaken(False, "mia-data i1-e99 smoke")
+    await t.a.release_lock("raw", "rec-1", "mia-data i1-e98 crop")  # not the holder: the lock stays
+    assert not (await t.a.take_lock("raw", "rec-1", "mia-data i1-e98 crop", 900)).ok
+    await t.a.release_lock("raw", "rec-1", "mia-data i1-e99 smoke")
+    assert (await t.a.take_lock("raw", "rec-1", "mia-data i1-e98 crop", 900)).ok
+
+
+async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path, caplog):
+    t = _setup(tmp_path)
+    locks = lock_dir(t.cfg)
+    assert locks.take("raw", "rec-1", "me", 900)
+    before = locks.holder("raw", "rec-1").heartbeat_at
+
+    async def wait(job_id, workspace, heartbeat):
+        heartbeat("PEND")
+        heartbeat("RUN")
+        return SimpleNamespace(job_id=job_id, state="DONE", exit_code=0)
+
+    t.a.jobs = SimpleNamespace(wait=wait)
+    env, beats = ActivityEnvironment(), []
+    env.on_heartbeat = lambda *details: beats.append(details)
+    assert await env.run(t.a.await_job, "j1", "/w", ["raw", "rec-1", "me"]) == JobDone("j1", "DONE", 0)
+    assert beats == [("PEND",), ("RUN",)] and locks.holder("raw", "rec-1").heartbeat_at > before
+    assert await env.run(t.a.await_job, "j2", "/w") == JobDone("j2", "DONE", 0)  # no lock: two arguments still work
+    locks.release("raw", "rec-1", "me")
+    with caplog.at_level(logging.WARNING):
+        await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])  # the lock is gone: logged, not raised
+    assert caplog.text.count("lost the lock raw/rec-1") == 1
+
+
+def _cache_with_files_json(t):
+    cache = t.cfg.paths.work_root / "_cache" / "rec-1"
+    cache.mkdir(parents=True)
+    (cache / "files.json").write_text(json.dumps({"https://data.example.org/a.zip": {"validators": {"size": 3}}}))
+    (cache / "a.zip").write_bytes(b"zip")
+    return cache
+
+
+async def test_read_smoke_puts_the_raw_asset(tmp_path):
+    t = _setup(tmp_path)
+    seen = _registry_seen(t)
+    cache = _cache_with_files_json(t)
+    ws = tmp_path / "sws"
+    ws.mkdir()
+    (ws / "binding.yaml").write_text(yaml.safe_dump(BINDING))
+    (ws / "smoke.json").write_text(json.dumps({"ok": True, "eligible": True}))
+    assert (await t.a.read_smoke(str(ws))).ok and seen == []  # no record: the caller holds no lock, no row
+    assert (await t.a.read_smoke(str(ws), "rec-1")).ok
+    ((path, row),) = seen
+    assert path == "/assets/raw/rec-1" and row["state"] == "ready" and row["last_used"] > 0
+    assert row["path"] == str(cache) and row["bytes"] > 0 and "https://data.example.org/a.zip" in row["files"]
+
+
+async def test_read_verify_puts_the_raw_asset_and_survives_a_down_registry(tmp_path, caplog):
+    def down(request):
+        raise httpx.ConnectError("down")
+
+    t = _setup(tmp_path)
+    seen = _registry_seen(t)
+    _cache_with_files_json(t)
+    cw, vw = tmp_path / "cws", tmp_path / "vws"
+    cw.mkdir()
+    vw.mkdir()
+    (cw / "binding.yaml").write_text(
+        yaml.safe_dump({**BINDING, "labels": [{"urls": ["https://data.example.org/b.zip"]}]})
+    )
+    (vw / "verify.json").write_text(json.dumps({"n": 0}))
+    await t.a.read_verify(str(vw), str(cw), "rec-1")
+    assert [(path, row["state"]) for path, row in seen] == [("/assets/raw/rec-1", "partial")]  # b.zip not cached
+    _registry_seen(t, down)
+    with caplog.at_level(logging.WARNING):
+        assert (await t.a.read_verify(str(vw), str(cw), "rec-1")).errors == ["verify checked no crops"]
+    assert "raw asset rec-1: registry write skipped" in caplog.text

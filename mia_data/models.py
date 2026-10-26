@@ -155,6 +155,15 @@ class RoundLimits:
     per_round: int
     walltime_min: int
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
+    poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
+
+
+@dataclass
+class LockTaken:
+    """The take_lock activity's answer: taken, or not, and then who holds the lock (its owner string)."""
+
+    ok: bool
+    holder: str = ""
 
 
 @dataclass

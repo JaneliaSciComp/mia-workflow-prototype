@@ -104,6 +104,15 @@ record, https only, snippets exist) and runs its own **smoke job**, a plain `har
 if both agree does the round continue. Components: `autodev.jobs` (the csub runner), csub broker and LSF,
 agentic-sandbox, the harness from mia-snippets.
 
+The smoke job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker first
+takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
+`mia-data <round> smoke`. The wait for the job heartbeats it (TTL 900 s) and the lock is released after the smoke
+report is read, whatever it says. When another job holds it (a buffers stage or fetch, another round), the issue
+gets one comment per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and the workflow tries
+again every `temporal.poll_minutes`. After the smoke report the worker puts the cache's `raw` asset row
+(files, bytes, `ready` or `partial`, `last_used`) to buffer-api, when one is configured. The match agent mounts
+no writable cache and takes no lock.
+
 ### 4. Develop (only when no snippet fits)
 
 When the agent answers `needs_snippet`, the worker opens an issue in mia-snippets labelled `snippets:go`, with
@@ -141,6 +150,10 @@ the PNGs go to the `galleries` branch. The final comment carries the crop table,
 crops folder, its gallery and the round's workspace. The issue is `data:done`; a new `data:go` later starts
 another round and adds more crops. If fewer than half pass, the passing ones are still published and the issue
 is `data:needs-human` with the reason.
+
+Every trusted crop job (the test crops at a reviewed commit, the production crops) holds the record's raw lock
+as in step 3, owner `mia-data <round> crop`, from before the crop job until its verify report is read, and puts
+the `raw` asset row afterwards; a PR head's test crops mount the cache read-only and take no lock.
 
 ## How the issue reads
 

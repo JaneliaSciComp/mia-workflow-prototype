@@ -25,6 +25,7 @@ from mia_data.models import (
     JobArgs,
     JobDone,
     LabelEvent,
+    LockTaken,
     MatchResult,
     Pins,
     PrUpdate,
@@ -69,12 +70,14 @@ class Mocks:
         pr_now=None,
         trees=None,
         revisions=5,
+        lock_busy=0,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
         self.test_ok, self.prod_ok, self.n_effective = test_ok, prod_ok, n_effective
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
+        self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -138,13 +141,25 @@ class Mocks:
             )
 
         @activity.defn(name="read_smoke")
-        async def read_smoke(ws: str) -> SmokeResult:
-            rec("read_smoke")
+        async def read_smoke(ws: str, record: str | None = None) -> SmokeResult:
+            rec("read_smoke", ws, record)
             return self.smoke
 
+        @activity.defn(name="take_lock")
+        async def take_lock(kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
+            rec("take_lock", kind, key, owner, ttl_s)
+            if self.lock_busy:
+                self.lock_busy -= 1
+                return LockTaken(False, "mia-buffers b1 stage")
+            return LockTaken(True)
+
+        @activity.defn(name="release_lock")
+        async def release_lock(kind: str, key: str, owner: str) -> None:
+            rec("release_lock", kind, key, owner)
+
         @activity.defn(name="read_verify")
-        async def read_verify(ws: str, crop_ws: str | None = None) -> VerifyResult:
-            rec("read_verify", ws, crop_ws)
+        async def read_verify(ws: str, crop_ws: str | None = None, record: str | None = None) -> VerifyResult:
+            rec("read_verify", ws, crop_ws, *([record] if record else []))
             prod = "production" in ws
             test_ok = next((v for s, v in self.test_ok_by.items() if s in ws), self.test_ok)  # by tested SHA
             k, n = (self.prod_ok, 16) if prod else (test_ok, 4)
@@ -206,6 +221,8 @@ class Mocks:
             submit,
             read_match,
             read_smoke,
+            take_lock,
+            release_lock,
             read_verify,
             publish_gallery,
             publish_crops,
@@ -218,8 +235,8 @@ class Mocks:
 
     def await_act(self):
         @activity.defn(name="await_job")
-        async def await_job(job_id: str, ws: str) -> JobDone:
-            self.calls.append(("await", (job_id, ws)))
+        async def await_job(job_id: str, ws: str, lock: list[str] | None = None) -> JobDone:
+            self.calls.append(("await", (job_id, ws, lock)))
             if self.gate and self.gate_on in ws:
                 await self.gate.wait()
             if self.await_failures:
@@ -317,7 +334,11 @@ async def test_match_test_review_approve_crop_done(env):
     assert m.of("publish_crops") == [("/w/i7-e11/crop-production-1", 16, SHA, "/s/binding-1.yaml")]
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
     assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops", "publish_gallery"]
-    assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1")
+    assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1", "rec-1")
+    owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop", "mia-data i7-e11 crop"]
+    assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
+    smoke_lock, crop_lock = ["raw", "rec-1", owners[0]], ["raw", "rec-1", owners[1]]
+    assert [a[2] for a in m.of("await")] == [None, smoke_lock, *[crop_lock] * 4]  # match: none; crop and verify jobs
     report = m.of("comment")[0][0]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
@@ -379,6 +400,8 @@ async def test_go_while_busy_is_rejected_with_comment(env):
         await idle(h, m, "ineligible")
         await h.signal(MiaDataDataset.go, ev("go", "13"))  # arrives while idle: a new round
         await until(lambda: len(m.of("admit")) == 2)
+        await until(lambda: m.stages.count("ineligible") == 2)  # no activity in flight at shutdown: one would hold
+        await idle(h, m, "ineligible")  # up the test server's time skipping (env.sleep) in later tests
     ((label, reason, eid),) = m.of("refuse_label")
     assert (label, eid) == ("data:go", "12") and "busy" in reason
     assert m.of("admit") == [("11",), ("13",)]
@@ -492,6 +515,40 @@ async def test_continue_as_new_keeps_handled(env, monkeypatch):
     assert m.of("admit") == [("11",), ("12",)]
 
 
+async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke(env):
+    m = Mocks(smoke=SmokeResult(False, errors=["no data"]), lock_busy=2)
+    async with started(env, m) as h:
+        for tries in (1, 2):  # each refused take sleeps poll_minutes (2) before the next
+            await until(lambda tries=tries: len(m.of("take_lock")) == tries)
+            await env.sleep(timedelta(minutes=3))
+        await idle(h, m, "needs-human")
+        timers = [e for e in (await h.fetch_history()).events if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED]
+        assert [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in timers] == [120, 120]
+    owner = "mia-data i7-e11 smoke"
+    assert m.of("take_lock") == [("raw", "rec-1", owner, 900)] * 3
+    waiting = [a for a in m.of("comment") if a[1] == "lock i7-e11"]
+    assert waiting == [
+        ("waiting for the raw cache of `rec-1`: held by mia-buffers b1 stage", "lock i7-e11", "data", None)
+    ]
+    names = [(name, args[1] if name == "submit" else None) for name, args in m.calls]
+    last_take = max(i for i, (name, _) in enumerate(names) if name == "take_lock")
+    assert names.index(("submit", "smoke")) > last_take > names.index(("comment", None))
+    assert [a for a in m.of("await") if "smoke" in a[1]] == [
+        ("job-mia-7-i7-e11-smoke-1", "/w/i7-e11/smoke-1", ["raw", "rec-1", owner])
+    ]
+    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", "rec-1")]
+    assert m.of("release_lock") == [("raw", "rec-1", owner)]
+    assert names.index(("read_smoke", None)) < names.index(("release_lock", None))
+    assert m.stages == ["matching", "needs-human"] and "no data" in m.of("set_stage")[-1][1]
+
+
+async def test_a_failed_smoke_job_still_releases_the_raw_lock(env):
+    m = Mocks(states={"smoke": ("EXIT", 2)})
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert "read_smoke" not in m.names() and m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
+
+
 # --- the development path (§7.3) ------------------------------------------------------------
 
 H1, H2, H3, MC = "1" * 40, "2" * 40, "3" * 40, "e" * 40
@@ -534,6 +591,7 @@ async def test_develop_happy_path(env):
     assert statuses(m) == [(H1, "pending"), (H1, "success")]
     assert m.of("set_crop_status")[1][2] == f"https://github.com/o/snippets/issues/5#test i7-e11 {H1}"  # the PR comment
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no smoke: tested
+    assert [a[2] for a in m.of("take_lock")] == ["mia-data i7-e11 crop"]  # the PR head's test crops take no lock
     test, prod = [a for a in m.jobs() if a.n_crops]
     assert (test.sha, test.trusted, test.n_crops, test.batch) == (H1, False, 4, 0)  # PR head: read-only dataset cache
     assert (prod.sha, prod.trusted, prod.n_crops, prod.batch) == (MC, True, 16, 1)
@@ -835,6 +893,7 @@ async def test_poll_signals_a_pr_only_when_it_changes(tmp_path):
 
 HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
 DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
+LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
 
 
 def _scrub(obj):
@@ -867,6 +926,22 @@ async def test_replay_develop_history(env):
             await happy(h, m)
             DEVELOP_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-develop", DEVELOP_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_dataset_history_c(env):
+    """The match → done run under the `c-raw-lock` patch (smoke waits once for the raw lock), as
+    test_replay_dataset_history. Re-record this one alone, so the older fixtures keep the unpatched path:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_c"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(lock_busy=1)
+        async with started(env, m) as h:
+            await until(lambda: m.of("take_lock"))
+            await env.sleep(timedelta(minutes=3))
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            LOCK_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-raw-lock", LOCK_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 

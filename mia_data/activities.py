@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -26,7 +27,9 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
-from mia_core.registry import Registry
+from mia_core.assets import raw_asset
+from mia_core.locks import heartbeat_through
+from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -46,6 +49,7 @@ from .jobspec import (
     crop_job,
     harness_pin,
     harness_snapshot,
+    lock_dir,
     match_job,
     match_prompt,
     smoke_job,
@@ -57,6 +61,7 @@ from .models import (
     GalleryResult,
     JobArgs,
     JobDone,
+    LockTaken,
     MatchResult,
     Pins,
     PrUpdate,
@@ -214,6 +219,8 @@ class Activities:
             self.read_match,
             self.read_smoke,
             self.read_verify,
+            self.take_lock,
+            self.release_lock,
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
@@ -366,7 +373,11 @@ class Activities:
         """The config values the workflow needs but cannot read itself."""
         cfg = self.cfg
         return RoundLimits(
-            cfg.crops.test_per_round, cfg.crops.per_round, cfg.limits.job_walltime_min, cfg.limits.max_pr_revisions
+            cfg.crops.test_per_round,
+            cfg.crops.per_round,
+            cfg.limits.job_walltime_min,
+            cfg.limits.max_pr_revisions,
+            cfg.temporal.poll_minutes,
         )
 
     @activity.defn(name="set_stage")
@@ -521,9 +532,30 @@ class Activities:
             raise
 
     @activity.defn(name="await_job")
-    async def await_job(self, job_id: str, workspace: str) -> JobDone:
-        outcome = await self.jobs.wait(job_id, workspace, activity.heartbeat)
+    async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
+        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock."""
+        heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
+        outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+
+    # --- locks -------------------------------------------------------------------------------
+
+    @activity.defn(name="take_lock")
+    @mia_permanent_errors
+    async def take_lock(self, kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
+        """Take the lock file `<local_root>/locks/<kind>/<key>`; when someone else holds it, say who."""
+        locks = lock_dir(self.cfg)
+        if await asyncio.to_thread(locks.take, kind, key, owner, ttl_s):
+            return LockTaken(True)
+        holder = await asyncio.to_thread(locks.holder, kind, key)
+        return LockTaken(False, holder.owner if holder else "?")  # "?": released between the take and the look
+
+    @activity.defn(name="release_lock")
+    @mia_permanent_errors
+    async def release_lock(self, kind: str, key: str, owner: str) -> None:
+        """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
+        if not await asyncio.to_thread(lock_dir(self.cfg).release, kind, key, owner):
+            log.warning("%s: the lock %s/%s was no longer held at release", owner, kind, key)
 
     # --- job results -------------------------------------------------------------------------
 
@@ -592,10 +624,35 @@ class Activities:
         write_atomic(path, data := yaml.safe_dump(binding, sort_keys=False).encode())
         return str(path), hashlib.sha256(data).hexdigest()
 
+    def _put_raw_asset(self, record: str, workspace: str) -> None:
+        """Report the record's raw cache (what `_spec` mounts) to the registry, best effort; its urls are those of
+        the binding.yaml in `workspace`, read as untrusted since the job could write there."""
+        if not ID_RE.fullmatch(record):
+            raise ValueError(f"bad record id {record!r}")
+        if (registry := self.registry) is None:
+            return
+        try:
+            binding = yaml.safe_load(read_untrusted(Path(workspace), "binding.yaml", 1 << 20) or "")
+        except yaml.YAMLError:
+            binding = None
+        arrays = [
+            array
+            for name in ("raw", "labels")
+            for array in ((binding.get(name) if isinstance(binding, dict) else None) or [])
+            if isinstance(array, dict) and isinstance(array.get("urls"), list)
+        ]
+        urls = [url for array in arrays for url in array["urls"] if isinstance(url, str)]
+        cache_dir = self.cfg.paths.work_root / "_cache" / record
+        row = {**raw_asset(cache_dir, urls), "last_used": time.time()}
+        best_effort(lambda: registry.put_asset("raw", record, row), f"raw asset {record}", log)
+
     @activity.defn(name="read_smoke")
     @mia_permanent_errors
-    async def read_smoke(self, workspace: str) -> SmokeResult:
-        """Read the smoke job's smoke.json into a SmokeResult, tolerating any shape."""
+    async def read_smoke(self, workspace: str, record: str | None = None) -> SmokeResult:
+        """Read the smoke job's smoke.json into a SmokeResult, tolerating any shape. With `record` (the job held
+        its raw-cache lock), the record's raw asset row is put to the registry first."""
+        if record is not None:
+            await asyncio.to_thread(self._put_raw_asset, record, workspace)
         report = _job_json(workspace, "smoke.json")
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
@@ -612,11 +669,16 @@ class Activities:
 
     @activity.defn(name="read_verify")
     @mia_permanent_errors
-    async def read_verify(self, workspace: str, crop_workspace: str | None = None) -> VerifyResult:
+    async def read_verify(
+        self, workspace: str, crop_workspace: str | None = None, record: str | None = None
+    ) -> VerifyResult:
         """Read verify.json: only crops with ok, a valid id and sha256s for crop.json and raw.png count.
 
         Top-level errors or n == 0 mean nothing was verified. With `crop_workspace`, n_effective and
-        bytes_fetched come from the crop job's report.json."""
+        bytes_fetched come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
+        lock), the record's raw asset row is put to the registry first, with the urls of the crop job's binding."""
+        if record is not None:
+            await asyncio.to_thread(self._put_raw_asset, record, crop_workspace or workspace)
         report = _job_json(workspace, "verify.json")
         if not isinstance(report, dict):
             return VerifyResult(0, 0, ["verify.json is missing, unreadable or not a JSON object"], [])

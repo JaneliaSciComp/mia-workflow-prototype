@@ -32,6 +32,7 @@ with workflow.unsafe.imports_passed_through():
         JobArgs,
         JobDone,
         LabelEvent,
+        LockTaken,
         MatchResult,
         Pins,
         PrUpdate,
@@ -47,6 +48,7 @@ BUSY = "busy, ignored: a round is already running. Add it again once the issue s
 NOT_REVIEW = "`data:approve` counts only while the issue is in `data:review`, for the round under review."
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready")  # the stages spent following a snippet PR
+RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
 class RoundFailed(Exception):
@@ -199,11 +201,19 @@ class MiaDataDataset:
             "prepare_job", state.issue, state.round_id, kind, 1, state.binding, seconds=300, result_type=str
         )
 
-    async def _job(self, kind: str, workspace: str, workspace_kind: str | None = None, **job_args: Any) -> JobDone:
+    async def _job(
+        self,
+        kind: str,
+        workspace: str,
+        workspace_kind: str | None = None,
+        lock: list[str] | None = None,
+        **job_args: Any,
+    ) -> JobDone:
         """Submit a job (at most once per key) and wait for it on the await queue.
 
         The wait is its own activity on a separate queue so a worker restart reattaches to the running job.
-        `workspace_kind` distinguishes several jobs of one kind in a round (crop-<sha>); it defaults to `kind`."""
+        `workspace_kind` distinguishes several jobs of one kind in a round (crop-<sha>); it defaults to `kind`.
+        `lock` ([kind, key, owner], from _hold_raw) is heartbeated by the wait while the job runs."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
         job_id = await self._act(
@@ -217,7 +227,7 @@ class MiaDataDataset:
         walltime = timedelta(minutes=(await self._limits()).walltime_min)
         return await workflow.execute_activity(
             "await_job",
-            args=[job_id, workspace],
+            args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
             result_type=JobDone,
             task_queue=workflow.info().task_queue + "-await",
             start_to_close_timeout=walltime + QUEUE_SLACK,
@@ -225,6 +235,33 @@ class MiaDataDataset:
             heartbeat_timeout=timedelta(minutes=3),
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
         )
+
+    async def _hold_raw(self, kind: str) -> list[str]:
+        """Take the lock on the round record's raw cache for a `kind` (smoke, crop) job that writes it, waiting while
+        another job holds it; the issue says so once per round. Returns the lock as [kind, key, owner]."""
+        state = self.state
+        assert state.round_id and state.pins  # a round is admitted before any job runs
+        record, owner, commented = state.pins.record, f"mia-data {state.round_id} {kind}", False
+        while not (
+            taken := await self._act("take_lock", "raw", record, owner, RAW_LOCK_TTL_S, result_type=LockTaken)
+        ).ok:
+            if not commented:
+                waiting = f"waiting for the raw cache of `{record}`: held by {taken.holder}"
+                await self._act("comment", state.issue, waiting, f"lock {state.round_id}")
+                commented = True
+            # ponytail: one activity and one timer per try, ~250 history events per hour of waiting; a wait of many
+            # hours wants a backoff or a wake-up signal from the releasing worker.
+            await workflow.sleep(timedelta(minutes=(await self._limits()).poll_minutes))
+        return ["raw", record, owner]
+
+    async def _release_raw(self, lock: list[str] | None) -> None:
+        """Release a lock _hold_raw took; never raises: a lock left behind lapses after its TTL."""
+        if lock is None:
+            return
+        try:
+            await self._act("release_lock", *lock, budget=timedelta(minutes=30))
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _crop(
         self, tag: str, sha: str, n_crops: int, seed: str, batch: int, trusted: bool = True
@@ -234,28 +271,41 @@ class MiaDataDataset:
 
         The workspaces are crop-<tag> and verify-<tag>; `tag` is the tested SHA, or "production". The jobs are
         returned so the caller can judge their exit codes; a job whose state is uncertain fails the round.
-        `trusted=False` (a PR head: unreviewed code) mounts the dataset cache read-only."""
-        crop_workspace = await self._prepare(f"crop-{tag}")
-        crop_job = await self._job(
-            "crop",
-            crop_workspace,
-            f"crop-{tag}",
-            sha=sha,
-            n_crops=n_crops,
-            seed=seed,
-            batch=batch,
-            trusted=trusted,
-            existing=batch > 0,
-        )
-        if crop_job.state not in ("DONE", "EXIT"):
-            raise RoundFailed(describe_failure("crop", crop_job))
-        verify_workspace = await self._prepare(f"verify-{tag}")
-        verify_job = await self._job(
-            "verify", verify_workspace, f"verify-{tag}", crop_workspace=crop_workspace, existing=batch > 0
-        )
-        if verify_job.state not in ("DONE", "EXIT"):
-            raise RoundFailed(describe_failure("verify", verify_job))
-        verify = await self._act("read_verify", verify_workspace, crop_workspace, result_type=VerifyResult)
+        `trusted=False` (a PR head: unreviewed code) mounts the dataset cache read-only. A trusted crop job writes the
+        cache, so it holds the record's raw lock from before the crop job until after read_verify."""
+        assert self.state.pins  # a round is admitted before any job runs
+        lock = await self._hold_raw("crop") if trusted and workflow.patched("c-raw-lock") else None
+        try:
+            crop_workspace = await self._prepare(f"crop-{tag}")
+            crop_job = await self._job(
+                "crop",
+                crop_workspace,
+                f"crop-{tag}",
+                lock,
+                sha=sha,
+                n_crops=n_crops,
+                seed=seed,
+                batch=batch,
+                trusted=trusted,
+                existing=batch > 0,
+            )
+            if crop_job.state not in ("DONE", "EXIT"):
+                raise RoundFailed(describe_failure("crop", crop_job))
+            verify_workspace = await self._prepare(f"verify-{tag}")
+            verify_job = await self._job(  # mounts no cache; the wait keeps the lock alive until it is released
+                "verify", verify_workspace, f"verify-{tag}", lock, crop_workspace=crop_workspace, existing=batch > 0
+            )
+            if verify_job.state not in ("DONE", "EXIT"):
+                raise RoundFailed(describe_failure("verify", verify_job))
+            verify = await self._act(
+                "read_verify",
+                verify_workspace,
+                crop_workspace,
+                *([self.state.pins.record] if lock else []),  # with the lock: put the raw asset row
+                result_type=VerifyResult,
+            )
+        finally:
+            await self._release_raw(lock)
         return crop_workspace, verify_workspace, verify, crop_job, verify_job
 
     async def _gallery(
@@ -330,10 +380,23 @@ class MiaDataDataset:
         if match.outcome not in ("matched", "ineligible"):
             return await self._finish("needs-human", f"match blocked: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
-        workspace = await self._prepare("smoke")
-        if not job_succeeded(job := await self._job("smoke", workspace)):
-            return await self._finish("needs-human", describe_failure("smoke", job))
-        smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
+        if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
+            lock = await self._hold_raw("smoke")
+            try:
+                workspace = await self._prepare("smoke")
+                job = await self._job("smoke", workspace, lock=lock)
+                ran = job_succeeded(job)
+                if ran:
+                    smoke = await self._act("read_smoke", workspace, state.pins.record, result_type=SmokeResult)
+            finally:
+                await self._release_raw(lock)
+            if not ran:
+                return await self._finish("needs-human", describe_failure("smoke", job))
+        else:
+            workspace = await self._prepare("smoke")
+            if not job_succeeded(job := await self._job("smoke", workspace)):
+                return await self._finish("needs-human", describe_failure("smoke", job))
+            smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
         if not smoke.ok:
             why = "; ".join(smoke.errors) or "no errors reported"
             return await self._finish(
