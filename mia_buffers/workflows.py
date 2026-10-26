@@ -32,6 +32,7 @@ with workflow.unsafe.imports_passed_through():
         BufferState,
         DatasetIssue,
         DatasetStatus,
+        DegradedSignal,
         DropResult,
         FetchJobArgs,
         FetchResult,
@@ -56,6 +57,15 @@ MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the lat
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
 ABANDONED = "abandoned: a new buffer:go started another round"
 MAX_POLL_MINUTES = 30  # a lock or quota wait polls after poll_minutes, doubling each try up to this (c-cache)
+NO_BUFFER = "this issue has no ready or idle buffer"
+NOT_IDLE = "the buffer is ready, not idle"
+AUTO_APPROVE = "plan.auto_approve: sourcing starts without review"
+IDLE = (
+    "No consumer for {hours:g} hours: idle. `buffer:keep` returns it to ready; `buffer:retire` or {days:g} days of "
+    "idleness retires it."
+)
+RETIRED = "Retired: refs released; draws archived to {path}"
+RAW_GONE = "pyramid missing and raw cache gone"
 
 
 class RoundFailed(Exception):
@@ -103,6 +113,13 @@ class MiaBuffer:
         self.limits: SourcingLimits | None = None
         self.timed_out = False  # the round's day limit fired: a dataset that turns blocked now is dropped (c-cache)
         self.held: set[str] = set()  # owners of the raw-cache locks this run holds (c-cache)
+        self.lifecycle: list[tuple[str, Any]] = []  # (idle|keep|retire|degraded, event or signal) (d-lifecycle)
+        self.lifecycle_on = False  # this run takes the d-lifecycle path, decided once at its start
+        self.board: list[asyncio.Task] = []  # fire-and-forget status board writes, awaited before the round goes on
+        self.progress = 0  # bumped by every dataset status change; the ticker backs off while it stays put
+        self.tick = 0  # the shared ticker's count; lock and quota waiters wake on its next value (d-tick)
+        self.wanted = 0  # the tick a waiter waits for; the ticker starts no timer while it has been reached
+        self._ticker: asyncio.Task | None = None
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -121,6 +138,26 @@ class MiaBuffer:
         """The poller saw the dataset's binding published (`binding`) or its issue go `data:ineligible`."""
         self.dataset_updates[record] = outcome
 
+    @workflow.signal
+    def degraded(self, signal: DegradedSignal) -> None:
+        """The keeper found staged pyramids of these records gone from disk."""
+        self.lifecycle.append(("degraded", signal))
+
+    @workflow.signal
+    def idle(self, event: LabelEvent | None = None) -> None:
+        """The keeper saw no consumer for the spec's idle.hours."""
+        self.lifecycle.append(("idle", event))
+
+    @workflow.signal
+    def keep(self, event: LabelEvent) -> None:
+        """`buffer:keep`: an idle buffer goes back to ready."""
+        self.lifecycle.append(("keep", event))
+
+    @workflow.signal
+    def retire(self, event: LabelEvent | None = None) -> None:
+        """`buffer:retire`, or the keeper after retire_after_days of idleness."""
+        self.lifecycle.append(("retire", event))
+
     @workflow.query
     def status(self) -> BufferState:
         return self.state
@@ -128,13 +165,19 @@ class MiaBuffer:
     @workflow.run
     async def run(self, state: BufferState) -> None:
         rounds = 0
+        self.lifecycle_on = workflow.patched("d-lifecycle")
         if state.stage == "plan-review":  # rolled over while waiting for an approve
             await self._guard(self._from_review())
+        elif self.lifecycle_on and state.stage in ("ready", "idle") and state.buffer_id:  # rolled over serving
+            await self._guard(self._steady())
         while True:
-            await workflow.wait_condition(lambda: bool(self.go_events or self.approve_events) or _rollover_due())
-            if not (self.go_events or self.approve_events):
+            await workflow.wait_condition(
+                lambda: bool(self.go_events or self.approve_events or self._lifecycle()) or _rollover_due()
+            )
+            if not (self.go_events or self.approve_events or self._lifecycle()):
                 workflow.continue_as_new(self.state)  # idle, nothing queued
             await self._refuse_queued(gos=False)  # idle: an approve has no plan under review to apply to
+            await self._refuse_lifecycle()  # nor a lifecycle signal a buffer to act on
             if not self.go_events:
                 continue
             event = self.go_events.pop(0)
@@ -209,6 +252,24 @@ class MiaBuffer:
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
         await self._refuse_queued()
+        await self._refuse_lifecycle()
+
+    def _lifecycle(self) -> bool:
+        """Lifecycle signals are queued and this run acts on them (an old run ignores them, as it always did)."""
+        return self.lifecycle_on and bool(self.lifecycle)
+
+    async def _refuse_lifecycle(self) -> None:
+        """d-lifecycle: refuse the queued lifecycle signals, for there is no ready or idle buffer to apply them to.
+        A label is refused with a comment; the keeper's own signals are only logged."""
+        if not self._lifecycle():
+            return
+        queued, self.lifecycle = self.lifecycle, []
+        for kind, payload in queued:
+            if isinstance(payload, LabelEvent):
+                if not self._seen(payload):
+                    await self._refuse(f"buffer:{kind}", NO_BUFFER, payload)
+            else:
+                workflow.logger.info("issue #%d: %s ignored: %s", self.state.issue, kind, NO_BUFFER)
 
     async def _comment(self, body: str, marker: str) -> None:
         await self._act("comment", self.state.issue, body, marker)
@@ -221,6 +282,7 @@ class MiaBuffer:
         state.round_id = f"i{state.issue}-e{event.event_id}"
         state.pins = state.buffer_id = state.planned_at = None
         state.datasets, state.ready = [], False
+        state.idle_since, state.retired = None, False
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
         await self._stage("planning")
         plan = await self._act("plan", state.issue, state.round_id, state.pins, seconds=1800, result_type=PlanResult)
@@ -239,7 +301,12 @@ class MiaBuffer:
         ]
         state.min_fraction, state.timeout_days = plan.min_fraction, plan.timeout_days
         state.levels, state.patch = list(plan.levels), plan.patch
+        state.idle_hours, state.retire_after_days = plan.idle_hours, plan.retire_after_days
         state.planned_at = workflow.now().isoformat()
+        if plan.auto_approve and self.lifecycle_on:
+            await self._comment(AUTO_APPROVE, f"auto-approve {state.round_id}")
+            await self._refuse_queued()  # gos were busy, and an approve has no plan under review
+            return await self._serve()
         await self._stage(
             "plan-review", "approve the plan with `buffer:approve`, or edit the spec and add `buffer:go` again"
         )
@@ -248,7 +315,12 @@ class MiaBuffer:
 
     async def _from_review(self) -> None:
         if await self._review():
-            await self._sourcing()  # else a new go came during review: the next round plans again
+            await self._serve()  # else a new go came during review: the next round plans again
+
+    async def _serve(self) -> None:
+        """Source the buffer; once it is ready and every dataset settled, serve it (d-lifecycle)."""
+        if await self._sourcing() and self.lifecycle_on:
+            await self._steady()
 
     async def _review(self) -> bool:
         """Wait for an approve newer than the plan (True), or a new go (False). Stale approves are refused."""
@@ -291,8 +363,9 @@ class MiaBuffer:
             group for group, (servable, total) in groups.items() if servable / total < self.state.min_fraction
         )
 
-    async def _sourcing(self) -> None:
-        """Create the buffer, source every dataset in parallel, announce ready when the groups allow it."""
+    async def _sourcing(self) -> bool:
+        """Create the buffer, source every dataset in parallel, announce ready when the groups allow it. True when
+        the buffer is ready and every dataset settled."""
         state = self.state
         assert state.round_id
         self.timed_out = False
@@ -300,6 +373,17 @@ class MiaBuffer:
         state.buffer_id = state.round_id
         limits = await self._limits()
         await self._act("create_buffer", state.round_id, state.buffer_id, seconds=300)
+        for dataset in state.datasets:  # every row is on the board from the start
+            self._post(dataset)
+        self._start_ticker(limits)
+        try:
+            return await self._source_all(limits)
+        finally:
+            await self._stop_ticker()
+            await self._flush_board()
+
+    async def _source_all(self, limits: SourcingLimits) -> bool:
+        state = self.state
         semaphore = asyncio.Semaphore(max(1, limits.parallel))
         fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
         # ponytail: no continue-as-new during sourcing (the tasks live in this run); fine below ~2,000 datasets per
@@ -325,20 +409,182 @@ class MiaBuffer:
                 # the waiters are gone; what is left is a stage job or a registration, bounded by the walltime
                 await workflow.wait_condition(lambda: self._ready_now() or all(task.done() for task in tasks))
                 if not self._ready_now():
-                    return await self._finish(
+                    await self._finish(
                         "needs-human",
                         f"after {state.timeout_days:g} days these weighting groups are below ready.min_fraction "
                         f"{state.min_fraction:g}: {', '.join(below)}",
                     )
+                    return False
         if self._ready_now():
+            await self._refuse_lifecycle()  # they came while there was no ready buffer
             await self._announce_ready(limits)
             if not await self._await_stragglers(tasks):
-                return  # a new go: the main loop plans again
+                return False  # a new go: the main loop plans again
         await asyncio.gather(*tasks, return_exceptions=True)  # every task handles its own failure (_source)
         if not state.ready:
             reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in state.datasets if d.status != "servable")
-            return await self._finish("needs-human", f"no weighting group reached ready.min_fraction: {reasons}")
+            await self._finish("needs-human", f"no weighting group reached ready.min_fraction: {reasons}")
+            return False
         await self._refuse_queued()  # labels that arrived while sourcing ran were busy, as in mia-data
+        return True
+
+    # --- serving: the ready-state loop (d-lifecycle) ---------------------------------------------
+
+    async def _steady(self) -> None:
+        """The buffer is ready or idle: act on lifecycle signals until a go (the main loop plans again; this buffer
+        stays registered), a retire, or a degraded pass that leaves a group below the floor (needs-human). An
+        approve is refused; a quiet history rolls over and the next run comes back here."""
+        while True:
+            await workflow.wait_condition(
+                lambda: bool(self.lifecycle or self.go_events or self.approve_events) or _rollover_due()
+            )
+            if not (self.lifecycle or self.go_events or self.approve_events):
+                workflow.continue_as_new(self.state)  # stage ready or idle: run() comes back here
+            await self._refuse_queued(gos=False)
+            self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
+            if self.go_events:
+                return
+            while self.lifecycle:
+                kind, payload = self.lifecycle.pop(0)
+                if isinstance(payload, LabelEvent) and self._seen(payload):
+                    continue
+                if not await self._on_lifecycle(kind, payload):
+                    return
+
+    async def _on_lifecycle(self, kind: str, payload: Any) -> bool:
+        """One lifecycle signal while ready or idle; False when the round is over (retired, needs-human)."""
+        state = self.state
+        assert state.round_id and state.buffer_id
+        if kind == "idle" and state.stage == "ready":
+            state.idle_since = workflow.now().isoformat()
+            await self._stage("idle", IDLE.format(hours=state.idle_hours, days=state.retire_after_days))
+        elif kind == "keep":
+            if state.stage != "idle":
+                await self._refuse("buffer:keep", NOT_IDLE, payload)
+                return True
+            state.idle_since = None
+            await self._stage("ready")
+            await self._comment("kept", f"keep {state.round_id} {payload.event_id}")
+        elif kind == "retire":
+            retired = await self._act("retire_buffer", state.round_id, state.buffer_id, seconds=600, result_type=dict)
+            state.retired, state.idle_since = True, None
+            await self._stage("retired", RETIRED.format(path=retired.get("archive") or "none"))
+            return False
+        elif kind == "degraded":
+            return await self._rebuild(payload)
+        return True  # an idle while idle: the keeper says it again each pass
+
+    async def _rebuild(self, signal: DegradedSignal) -> bool:
+        """Stage the named servable datasets again from the raw cache (a dataset whose raw cache is gone fails),
+        then stay as we are while every group is at its floor, else needs-human. False: the round is over."""
+        state = self.state
+        assert state.round_id
+        named = set(signal.records)
+        hit = [dataset for dataset in state.datasets if dataset.record in named and dataset.status == "servable"]
+        if not hit:  # the keeper re-sends while a pyramid stays missing: those are failed or rebuilt already
+            return True
+        limits = await self._limits()
+        again = []
+        for dataset in hit:
+            binding = await self._act(
+                "read_binding", state.round_id, dataset.record, seconds=300, result_type=BindingInfo
+            )
+            if binding.staged:  # its pyramid is on disk (rebuilt since the keeper looked): a stale re-send
+                continue
+            if await self._act("raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool):
+                dataset.rebuilds += 1
+                self._set(dataset, "pending")
+                again.append(dataset)
+            else:
+                await self._fail(dataset, RAW_GONE)
+        if again:
+            self.timed_out = False  # the round's day limit is long past; a quota block waits, not drops
+            semaphore = asyncio.Semaphore(max(1, limits.parallel))
+            fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
+            self._start_ticker(limits)
+            try:
+                await asyncio.gather(*(self._source(dataset, semaphore, fetch_slots) for dataset in again))
+            finally:
+                await self._stop_ticker()
+        await self._flush_board()
+        records = ", ".join(sorted(d.record for d in state.datasets if d.record in named and d.status != "servable"))
+        if not self._ready_now():
+            await self._finish(
+                "needs-human",
+                f"pyramids missing ({signal.reason}): {records}; these weighting groups are now below "
+                f"ready.min_fraction {state.min_fraction:g}: {', '.join(self._below())}",
+            )
+            return False
+        if rebuilt := sorted(dataset.record for dataset in again if dataset.status == "servable"):
+            await self._comment(
+                f"rebuilt {', '.join(rebuilt)}", f"rebuilt {state.round_id} {' '.join(rebuilt)} {self.progress}"
+            )
+        return True
+
+    # --- the status board and the shared ticker ------------------------------------------------
+
+    def _set(self, dataset: DatasetStatus, status: str, reason: str = "") -> None:
+        """Set a dataset's status; a change bumps `progress` and goes to the status board (d-lifecycle)."""
+        changed = dataset.status != status
+        dataset.status, dataset.reason = status, reason
+        if changed:
+            self.progress += 1
+            self._post(dataset)
+
+    def _post(self, dataset: DatasetStatus) -> None:
+        """Write the dataset's row on the buffer's status board without waiting: the board is best effort."""
+        if self.lifecycle_on and self.state.buffer_id:
+            args = (self.state.buffer_id, dataset.record, dataset.status, dataset.reason)
+            self.board.append(asyncio.create_task(self._mark(*args)))
+
+    async def _mark(self, buffer_id: str, record: str, status: str, reason: str) -> None:
+        try:
+            await self._act("mark_dataset", buffer_id, record, status, reason, budget=timedelta(minutes=10))
+        except ActivityError as error:
+            workflow.logger.warning(
+                "issue #%d: board %s %s: %s", self.state.issue, record, status, error_message(error)
+            )
+
+    async def _flush_board(self) -> None:
+        """Wait for the board writes in flight, so none outlives the round."""
+        board, self.board = self.board, []
+        await asyncio.gather(*board, return_exceptions=True)
+
+    def _start_ticker(self, limits: SourcingLimits) -> None:
+        """d-tick: one ticker for the sourcing pass, which every lock and quota waiter shares."""
+        if workflow.patched("d-tick"):
+            self._ticker = asyncio.create_task(self._tick_forever(limits))
+
+    async def _stop_ticker(self) -> None:
+        ticker, self._ticker = self._ticker, None
+        if ticker is not None:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    async def _tick_forever(self, limits: SourcingLimits) -> None:
+        """Tick while someone waits: poll_minutes, doubling while no dataset changed status, up to
+        max_tick_minutes; a change resets it. One timer per tick for the whole round, not one per waiter."""
+        quiet, seen = 0, self.progress
+        while True:
+            await workflow.wait_condition(lambda: self.wanted > self.tick)
+            if self.progress != seen:  # a change while nobody waited
+                quiet, seen = 0, self.progress
+            await workflow.sleep(timedelta(minutes=min(limits.poll_minutes * 2**quiet, limits.max_tick_minutes)))
+            self.tick += 1
+            quiet = 0 if self.progress != seen else quiet + 1
+            seen = self.progress
+
+    async def _next_tick(self) -> None:
+        seen = self.tick
+        self.wanted = seen + 1
+        await workflow.wait_condition(lambda: self.tick > seen)
+
+    async def _poll_wait(self, limits: SourcingLimits, tries: int) -> None:
+        """A lock or quota waiter's wait for its next try: the round's ticker (d-tick), else its own backoff."""
+        if self._ticker is not None:
+            await self._next_tick()
+        else:
+            await workflow.sleep(_backoff(limits.poll_minutes, tries))
 
     async def _await_stragglers(self, tasks: list[asyncio.Task]) -> bool:
         """After ready: wait for the remaining datasets, answering labels meanwhile. An approve is refused (nothing
@@ -367,7 +613,7 @@ class MiaBuffer:
                 for task, dataset in pairs:
                     if not task.done():
                         task.cancel()
-                        dataset.status, dataset.reason = "failed", ABANDONED
+                        self._set(dataset, "failed", ABANDONED)
                 return False
         return True
 
@@ -456,9 +702,9 @@ class MiaBuffer:
             binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
             if not binding.found:
                 return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
-        if binding.manual:
+        if binding.manual and not dataset.rebuilds:  # a rebuild found the dropped files in the raw cache
             await self._await_drop(dataset, mark=True)
-            dataset.status = "pending"  # no longer waiting on a human: not dropped at the timeout, nor abandoned
+            self._set(dataset, "pending")  # no longer waiting on a human: not dropped at the timeout, nor abandoned
         if binding.staged:  # the registry holds this binding's pyramid from an earlier round: reuse it, no lock
             return await self._reuse(dataset, semaphore, " The pyramid was staged earlier for this binding and reused.")
         owner = f"mia-buffers {round_id} {record}"
@@ -504,8 +750,11 @@ class MiaBuffer:
             stream += fetched
         async with semaphore:
             await self._retake(dataset, owner)  # refreshed after the wait for a stage slot
-            dataset.status, dataset.reason = "staging", ""
-            workspace = await self._act("prepare_stage", state.issue, round_id, record, seconds=300, result_type=str)
+            self._set(dataset, "staging")
+            rebuild = [dataset.rebuilds] if dataset.rebuilds else []  # a rebuild's own workspace, job and build dir
+            workspace = await self._act(
+                "prepare_stage", state.issue, round_id, record, *rebuild, seconds=300, result_type=str
+            )
             hosts = binding.hosts if stream else []
             job = await self._job(
                 record,
@@ -514,21 +763,27 @@ class MiaBuffer:
                 dataset.voxel_size_nm,
                 cache_writable=bool(stream),
                 lock=["raw", record, owner],
+                rebuild=dataset.rebuilds,
             )
             if job.state not in ("DONE", "EXIT"):
                 return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
             if job.state == "EXIT" and job.exit_code not in (0, None):
                 return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
-            staged = await self._act("read_stage", round_id, record, seconds=300, result_type=StageResult)
+            staged = await self._act("read_stage", round_id, record, *rebuild, seconds=300, result_type=StageResult)
         await self._register(dataset, staged, "")
 
     async def _reuse(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, reused: str) -> None:
         """A pyramid staged from this very binding is on disk: re-read its report and register it, no job."""
         assert self.state.round_id
         async with semaphore:
-            dataset.status = "staging"
+            self._set(dataset, "staging")
             staged = await self._act(
-                "read_stage", self.state.round_id, dataset.record, seconds=300, result_type=StageResult
+                "read_stage",
+                self.state.round_id,
+                dataset.record,
+                *([dataset.rebuilds] if dataset.rebuilds else []),
+                seconds=300,
+                result_type=StageResult,
             )
         await self._register(dataset, staged, reused)
 
@@ -548,7 +803,8 @@ class MiaBuffer:
         if not registered.registered:
             refused = "; ".join(f"{volume}: {why}" for volume, why in registered.refused.items())
             return await self._fail(dataset, f"buffer-api refused every volume: {refused or 'none staged'}")
-        dataset.status, dataset.volumes, dataset.reason = "servable", len(registered.registered), ""
+        dataset.volumes = len(registered.registered)
+        self._set(dataset, "servable")
         await self._comment(
             f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
             f"dataset {round_id} {record} servable",
@@ -565,15 +821,15 @@ class MiaBuffer:
             )
         ).ok:
             holder = taken.holder
-            dataset.status, dataset.reason = "waiting-lock", f"raw cache held by {holder}"
+            self._set(dataset, "waiting-lock", f"raw cache held by {holder}")
             # ponytail: ~10 history events per try, backing off to one try per 30 min (~20 events an hour per
             # waiter); 100 datasets waiting a day fill the 51,200-event history. Upgrade: a wake-up signal from the
             # releasing worker, or continue-as-new during sourcing.
-            await workflow.sleep(_backoff(limits.poll_minutes, tries))
+            await self._poll_wait(limits, tries)
             tries += 1
         self.held.add(owner)
         if holder:  # our own lock is not "held by" anyone on the page
-            dataset.status, dataset.reason = "pending", ""
+            self._set(dataset, "pending")
         return holder
 
     async def _retake(self, dataset: DatasetStatus, owner: str) -> None:
@@ -612,7 +868,7 @@ class MiaBuffer:
             if self.timed_out:  # _drop_waiting has run: nothing would drop this one later
                 await self._drop(dataset, f"still blocked after {state.timeout_days:g} days")
                 return False
-            dataset.status, dataset.reason = "blocked", f"raw quota over by {quota.over_by} bytes"
+            self._set(dataset, "blocked", f"raw quota over by {quota.over_by} bytes")
             await self._release(["raw", dataset.record, owner])
             if dataset.status == "dropped" or dataset.reason == ABANDONED:  # cancelled meanwhile
                 return False
@@ -624,10 +880,10 @@ class MiaBuffer:
                 )
                 said = True
             # ponytail: as _lock, backing off to one try per 30 min; a wake-up from the keeper is the upgrade
-            await workflow.sleep(_backoff(limits.poll_minutes, tries))
+            await self._poll_wait(limits, tries)
             tries += 1
         if owner not in self.held:
-            dataset.status, dataset.reason = "pending", ""
+            self._set(dataset, "pending")
             await self._retake(dataset, owner)
         return True
 
@@ -649,7 +905,7 @@ class MiaBuffer:
                     await self._retake(dataset, owner)  # refreshed after the wait for a fetch slot
                     if not (await self._act("check_quota", state.round_id, dataset.record, result_type=QuotaCheck)).ok:
                         continue
-                dataset.status, dataset.reason = "fetching", ""
+                self._set(dataset, "fetching")
                 return await self._fetch_jobs(dataset, binding, owner)
 
     async def _fetch_jobs(self, dataset: DatasetStatus, binding: BindingInfo, owner: str) -> list[str] | None:
@@ -659,7 +915,8 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         limits = await self._limits()
         last = ""
-        for attempt in range(1, limits.fetch_attempts + 1):
+        first = dataset.rebuilds * limits.fetch_attempts  # a rebuild's fetch jobs get keys of their own
+        for attempt in range(first + 1, first + limits.fetch_attempts + 1):
             workspace = await self._act(
                 "prepare_fetch", state.issue, round_id, record, attempt, seconds=300, result_type=str
             )
@@ -691,7 +948,7 @@ class MiaBuffer:
         if info.stage == "ineligible":
             await self._drop(dataset, f"data:ineligible on {where}")
             return False
-        dataset.status = "waiting-dataset"
+        self._set(dataset, "waiting-dataset")
         what = (
             f"`data:go` added on {where}"
             if info.nudged
@@ -711,7 +968,7 @@ class MiaBuffer:
         """Take the dataset out of the plan and the ready denominator; say so and re-post the plan."""
         state = self.state
         assert state.round_id
-        dataset.status, dataset.reason = "dropped", reason
+        self._set(dataset, "dropped", reason)
         await self._comment(
             f"`{dataset.record}` dropped from the plan: {reason}", f"dataset {state.round_id} {dataset.record} dropped"
         )
@@ -727,7 +984,7 @@ class MiaBuffer:
         for task, dataset in zip(tasks, state.datasets, strict=True):
             if not task.done() and dataset.status in WAITING:
                 task.cancel()
-                dataset.status, dataset.reason = "dropped", reason.format(status=dataset.status)
+                self._set(dataset, "dropped", reason.format(status=dataset.status))
                 dropped[dataset.record] = dataset.reason
         if not dropped:
             return
@@ -748,7 +1005,7 @@ class MiaBuffer:
         the raw asset row says `waiting-drop` first."""
         state = self.state
         assert state.round_id
-        dataset.status = "waiting-drop"
+        self._set(dataset, "waiting-drop")
         if mark:
             await self._act("mark_asset", "raw", dataset.record, {"state": "waiting-drop"})
         await self._act("comment_drop", state.issue, state.round_id, dataset.record, [], seconds=300)
@@ -766,7 +1023,7 @@ class MiaBuffer:
 
     async def _fail(self, dataset: DatasetStatus, reason: str) -> None:
         state = self.state
-        dataset.status, dataset.reason = "failed", reason
+        self._set(dataset, "failed", reason)
         try:
             await self._comment(
                 f"`{dataset.record}` failed: {reason}", f"dataset {state.round_id} {dataset.record} failed"
@@ -784,6 +1041,7 @@ class MiaBuffer:
         voxel_size_nm: dict[str, float] | None,
         cache_writable: bool = True,
         lock: list[str] | None = None,
+        rebuild: int = 0,
     ) -> JobDone:
         """Submit the stage job (at most once per key) and wait for it on the await queue; the wait keeps `lock`
         ([kind, key, owner]) alive."""
@@ -799,9 +1057,10 @@ class MiaBuffer:
             state.patch,
             voxel_size_nm=dict(voxel_size_nm) if voxel_size_nm else None,
             cache_writable=cache_writable,
+            rebuild=rebuild,
         )
         job_id = await self._act(
-            "submit", job_key(state.issue, state.round_id, record), args, seconds=600, result_type=str
+            "submit", job_key(state.issue, state.round_id, record, rebuild), args, seconds=600, result_type=str
         )
         return await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
 

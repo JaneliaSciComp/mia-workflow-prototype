@@ -73,6 +73,7 @@ from .poll import run_poll
 from .register import buffer_config, recipe_for, volume_bodies
 from .spec import SpecError, load_spec
 from .status import render_drop_comment, render_plan_comment
+from .workflows import MAX_POLL_MINUTES
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -274,11 +275,11 @@ class Activities:
         """<staged_root>/<levels key>/<record>/<artifact id>: one immutable directory per distinct pyramid."""
         return self.cfg.paths.staged_root / self._levels_key(round_id) / record / self._artifact(round_id, record)
 
-    def _building_dir(self, round_id: str, record: str) -> Path:
+    def _building_dir(self, round_id: str, record: str, rebuild: int = 0) -> Path:
         """Where the round's stage job writes the pyramid, next to its final directory; read_stage renames it there
-        once the job says ok (`.building-<artifact>-<stage job key>`, so two rounds never share one)."""
+        once the job says ok (`.building-<artifact>-<stage job key>`, so two rounds, or a rebuild, never share one)."""
         staged = self._staged_dir(round_id, record)
-        return staged.parent / f".building-{staged.name}-{job_key(_issue_of(round_id), round_id, record)}"
+        return staged.parent / f".building-{staged.name}-{job_key(_issue_of(round_id), round_id, record, rebuild)}"
 
     def _cache_dir(self, record: str) -> Path:
         if not ID_RE.fullmatch(record):
@@ -370,6 +371,8 @@ class Activities:
             int(patch),
             auto_approve=spec.plan.auto_approve,
             plan_hash=plan_hash(plan_json),
+            idle_hours=spec.idle.hours,
+            retire_after_days=spec.retire_after_days,
         )
 
     @activity.defn(name="limits")
@@ -383,6 +386,7 @@ class Activities:
             fetch_walltime_min=cfg.limits.fetch_walltime_min,
             fetch_attempts=cfg.limits.fetch_attempts,
             poll_minutes=cfg.temporal.poll_minutes,
+            max_tick_minutes=MAX_POLL_MINUTES,
         )
 
     # --- the issue ---------------------------------------------------------------------------
@@ -575,15 +579,16 @@ class Activities:
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
-    async def prepare_stage(self, issue: int, round_id: str, record: str) -> str:
+    async def prepare_stage(self, issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
         """The stage job's workspace with record.yaml and binding.yaml; the raw cache and the round's building
-        directory exist afterwards (a mount must). Returns the workspace path."""
-        workspace = self._round_workspace(issue, round_id) / f"stage-{record}"
+        directory exist afterwards (a mount must). A rebuild gets its own (`stage-<record>-r<n>`). Returns the
+        workspace path."""
+        workspace = self._round_workspace(issue, round_id) / (f"stage-{record}" + (f"-r{rebuild}" if rebuild else ""))
         workspace.mkdir(parents=True, exist_ok=True)
         write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
         shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
         self._cache_dir(record).mkdir(parents=True, exist_ok=True)
-        self._building_dir(round_id, record).mkdir(parents=True, exist_ok=True)
+        self._building_dir(round_id, record, rebuild).mkdir(parents=True, exist_ok=True)
         return str(workspace)
 
     @activity.defn(name="submit")
@@ -593,7 +598,7 @@ class Activities:
         hosts a fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged
         asset row says `staging` under it (best effort), at the final path read_stage publishes to."""
         staged = self._staged_dir(args.round_id, args.record)
-        args.out = str(self._building_dir(args.round_id, args.record))
+        args.out = str(self._building_dir(args.round_id, args.record, args.rebuild))
         job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: stage_job(self.cfg, args, snap))
         fields = {
             "state": "staging",
@@ -642,12 +647,12 @@ class Activities:
 
     @activity.defn(name="read_stage")
     @mia_permanent_errors
-    async def read_stage(self, round_id: str, record: str) -> StageResult:
+    async def read_stage(self, round_id: str, record: str, rebuild: int = 0) -> StageResult:
         """The stage job's stage.json, reduced; tolerant of any shape. An ok build is published: the artifact block
         written into its stage.json, then the building directory renamed to the final one (when that exists already,
         an identical pyramid won: the build is removed and the final one reused). A failed build stays where it is,
         for the keeper's `.building-*` rule. Idempotent on retry."""
-        final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record)
+        final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record, rebuild)
         report = _stage_json(building if building.exists() else final)
         if isinstance(report, dict) and report.get("ok") is True and building.exists():
             report = await asyncio.to_thread(self._publish, round_id, record, report, building, final)

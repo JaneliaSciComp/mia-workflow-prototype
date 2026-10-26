@@ -46,6 +46,8 @@ class PlanResult:
     patch: int = 0
     auto_approve: bool = False  # spec plan.auto_approve: sourcing starts without a review
     plan_hash: str = ""  # sha256 of the round's plan.json text, as the buffer config records it
+    idle_hours: float = 72  # spec idle.hours, for the idle comment
+    retire_after_days: float = 14  # spec retire_after_days, for the idle comment
 
 
 @dataclass
@@ -93,6 +95,7 @@ class StageJobArgs:
     out: str = ""
     voxel_size_nm: dict[str, float] | None = None
     cache_writable: bool = True  # False: an offline stage after the fetch phase reads the raw cache only
+    rebuild: int = 0  # the dataset's rebuilds: a re-stage of a degraded pyramid gets its own job key and build dir
 
 
 @dataclass
@@ -200,6 +203,7 @@ class SourcingLimits:
     fetch_attempts: int = 4
     poll_minutes: int = 2
     lock_ttl_s: int = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
+    max_tick_minutes: int = 30  # the round's shared ticker backs off from poll_minutes up to this (d-tick)
 
 
 @dataclass
@@ -233,6 +237,7 @@ class DatasetStatus:
     folder: str = ""  # <storage_root>/<folder>/binding.yaml is what the poller watches while waiting-dataset
     voxel_size_nm: dict[str, float] | None = None  # from the plan, handed to the stage job
     weight: float = 0.0  # the plan's weight, so the heaviest datasets are fetched first
+    rebuilds: int = 0  # times a degraded (missing) pyramid was staged again from the raw cache
 
 
 @dataclass
@@ -253,12 +258,17 @@ class BufferState:
     timeout_days: float = 14
     levels: list[int] = field(default_factory=list)
     patch: int = 0
+    idle_since: str | None = None  # when the buffer went idle; None while ready
+    retired: bool = False  # the round's buffer was retired: refs released, draws archived
+    idle_hours: float = 72  # spec idle.hours and retire_after_days, for the idle comment
+    retire_after_days: float = 14
 
 
-def job_key(issue: int, round_id: str, record: str) -> str:
-    """csub job key of a dataset's stage job: unique per round and record, within csub's 120 characters."""
+def job_key(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
+    """csub job key of a dataset's stage job: unique per round, record and rebuild, within csub's 120 characters."""
     digest = hashlib.sha256(record.encode()).hexdigest()[:8]
-    return f"buf-{issue}-{round_id}-stage-{record[:40]}-{digest}"
+    stage = f"stage{rebuild}" if rebuild else "stage"
+    return f"buf-{issue}-{round_id}-{stage}-{record[:40]}-{digest}"
 
 
 def fetch_job_key(issue: int, round_id: str, record: str, attempt: int) -> str:

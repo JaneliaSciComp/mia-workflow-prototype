@@ -26,6 +26,7 @@ from mia_buffers.models import (
     BufferState,
     DatasetIssue,
     DatasetPlan,
+    DegradedSignal,
     DropResult,
     FetchJobArgs,
     FetchResult,
@@ -37,6 +38,7 @@ from mia_buffers.models import (
     StageJobArgs,
     StageResult,
     fetch_job_key,
+    job_key,
 )
 from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
@@ -100,6 +102,8 @@ class Mocks:
         quotas=None,
         limits=None,
         release_gates=None,
+        raw_ready=None,
+        quota_after=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -112,6 +116,9 @@ class Mocks:
         self.raw = raw or {}  # record -> RawStatus; default: the raw cache is complete, nothing to fetch
         self.limits = limits or SourcingLimits(2, 120, "http://svc:8765")
         self.release_gates = release_gates or {}  # record -> asyncio.Event its release_lock waits for
+        self.raw_ready = raw_ready or {}  # record -> raw_ready's answer; default True
+        self.board: list[tuple[str, str]] = []  # (record, status) as mark_dataset received them
+        self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -173,9 +180,9 @@ class Mocks:
             return turn(self.bindings, record, default)
 
         @activity.defn(name="prepare_stage")
-        async def prepare_stage(issue: int, round_id: str, record: str) -> str:
-            rec("prepare_stage", record)
-            return f"/w/{round_id}/stage-{record}"
+        async def prepare_stage(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
+            rec("prepare_stage", record, *([rebuild] if rebuild else []))
+            return f"/w/{round_id}/stage-{record}" + (f"-r{rebuild}" if rebuild else "")
 
         @activity.defn(name="submit")
         async def submit(key: str, args: StageJobArgs) -> str:
@@ -183,8 +190,8 @@ class Mocks:
             return f"job-{key}"
 
         @activity.defn(name="read_stage")
-        async def read_stage(round_id: str, record: str) -> StageResult:
-            rec("read_stage", record)
+        async def read_stage(round_id: str, record: str, rebuild: int = 0) -> StageResult:
+            rec("read_stage", record, *([rebuild] if rebuild else []))
             return self.stage.get(record, StageResult(True, 1))
 
         @activity.defn(name="verify_drop")
@@ -247,6 +254,9 @@ class Mocks:
 
         @activity.defn(name="check_quota")
         async def check_quota(round_id: str, record: str) -> QuotaCheck:
+            if other := self.quota_after.get(record):  # the activities of two datasets race: fix their order
+                while not any(args[1].record == other for args in self.of("submit_fetch")):
+                    await asyncio.sleep(0.01)
             rec("check_quota", record)
             return turn(self.quotas, record, QuotaCheck(True))
 
@@ -269,7 +279,34 @@ class Mocks:
         async def mark_asset(kind: str, key: str, fields: dict) -> None:
             rec("mark_asset", kind, key, fields)
 
-        return [take_lock, release_lock, raw_status, check_quota, prepare_fetch, submit_fetch, read_fetch, mark_asset]
+        @activity.defn(name="mark_dataset")
+        async def mark_dataset(buffer: str, record: str, status: str, reason: str = "", job: str | None = None) -> None:
+            rec("mark_dataset", buffer, record, status, reason)
+            self.board.append((record, status))
+
+        @activity.defn(name="retire_buffer")
+        async def retire_buffer(round_id: str, buffer_id: str) -> dict:
+            rec("retire_buffer", buffer_id)
+            return {"refs": 2, "draws": 5, "archive": f"/state/archive/{buffer_id}.draws.jsonl.gz"}
+
+        @activity.defn(name="raw_ready")
+        async def raw_ready(round_id: str, record: str) -> bool:
+            rec("raw_ready", record)
+            return self.raw_ready.get(record, True)
+
+        return [
+            take_lock,
+            release_lock,
+            raw_status,
+            check_quota,
+            prepare_fetch,
+            submit_fetch,
+            read_fetch,
+            mark_asset,
+            mark_dataset,
+            retire_buffer,
+            raw_ready,
+        ]
 
     def await_act(self):
         @activity.defn(name="await_job")
@@ -313,14 +350,23 @@ async def idle(h, m, stage):
     """Wait until set_stage(stage) ran and the workflow is blocked again."""
     await until(lambda: m.stages[-1:] == [stage])
     for _ in range(500):
-        if (await h.fetch_history()).events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+        if (await h.fetch_history()).events[-1].event_type in IDLE_EVENTS:
             return
         await asyncio.sleep(0.02)
     raise AssertionError("workflow never went idle")
 
 
+# a completed workflow task ends the history, or a command of it that needs no answer: the search attribute upsert
+# of a patch marker, a timer cancelled (the round's ticker)
+IDLE_EVENTS = (
+    EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED,
+    EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+    EventType.EVENT_TYPE_TIMER_CANCELED,
+)
+
+
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None):
+async def started(env, m, first=None, runner=None, signal="go"):
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -332,7 +378,7 @@ async def started(env, m, first=None, runner=None):
             BufferState(7),
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
-            start_signal="go",
+            start_signal=signal,
             start_signal_args=[first or ev("go", "11")],
         )
         h = env.client.get_workflow_handle(h0.id)  # follows continue-as-new
@@ -671,6 +717,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
 
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
 CACHE_HISTORY = HISTORY.with_name("buffer_history_c.json")
+LIFECYCLE_HISTORY = HISTORY.with_name("buffer_history_d.json")
 
 
 def _scrub(obj):
@@ -1133,6 +1180,7 @@ async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
         limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
         gate=asyncio.Event(),
         gate_on="fetch-first",
+        quota_after={"second": "first"},
     )
     async with started(env, m) as h:
         await approve(h, m)
@@ -1252,3 +1300,235 @@ async def test_cache_keeper_runs_one_keep_pass(env):
     async with Worker(env.client, task_queue=tq, workflows=[MiaCacheKeeper], activities=[keep]):
         report = await env.client.execute_workflow(MiaCacheKeeper.run, id=f"wf-{uuid.uuid4()}", task_queue=tq)
     assert report == KeeperReport(scanned=2, evicted=["staged a"], over_quota={"raw": 5}) and passes == [False]
+
+
+# --- milestone D: auto-approve, the status board, the shared ticker, the ready-state loop -----------------------
+
+TWO = PlanResult(
+    True,
+    [],
+    [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "TEM", 0.5, False)],
+    1,
+    min_fraction=0.5,
+    levels=[1],
+    patch=64,
+)
+
+
+def ticker_timers_pending(events) -> list[int]:
+    """The ids of the poll timers (under an hour) started and neither fired nor cancelled."""
+    started_ids = {
+        e.event_id
+        for e in events
+        if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+        and e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta() < timedelta(hours=1)
+    }
+    for e in events:
+        if e.event_type == EventType.EVENT_TYPE_TIMER_FIRED:
+            started_ids.discard(e.timer_fired_event_attributes.started_event_id)
+        elif e.event_type == EventType.EVENT_TYPE_TIMER_CANCELED:
+            started_ids.discard(e.timer_canceled_event_attributes.started_event_id)
+    return sorted(started_ids)
+
+
+async def test_auto_approve_skips_review(env):
+    m = Mocks(plan=replace(ONLY_U937, auto_approve=True))
+    async with started(env, m) as h:
+        await idle(h, m, "ready")
+    assert m.stages == ["planning", "sourcing", "ready"] and not m.of("refuse_label")
+    (auto,) = [c for c in m.of("comment") if c[1] == "auto-approve i7-e11"]
+    assert auto[0] == "plan.auto_approve: sourcing starts without review"
+
+
+async def test_board_is_written_on_every_status_change(env):
+    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await until(lambda: len(m.board) == 4, m=m)
+    assert m.board == [("u937", "pending"), ("u937", "fetching"), ("u937", "staging"), ("u937", "servable")]
+    assert {args[0] for args in m.of("mark_dataset")} == {"i7-e11"}
+
+
+async def test_idle_keep_and_retire(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.idle)
+        await idle(h, m, "idle")
+        assert (await h.query(MiaBuffer.status)).idle_since
+        await h.signal(MiaBuffer.idle)  # the keeper says it again: nothing changes
+        await h.signal(MiaBuffer.keep, ev("keep", "31"))
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+        assert state.idle_since is None and state.stage == "ready"
+        await h.signal(MiaBuffer.retire, ev("retire", "32"))
+        await idle(h, m, "retired")
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready", "idle", "ready", "retired"]
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.retired and state.stage == "retired"
+    idle_detail = m.of("set_stage")[4][1]
+    assert idle_detail.startswith("No consumer for 72 hours: idle.") and "14 days of idleness" in idle_detail
+    assert ("kept", "keep i7-e11 31") in m.of("comment")
+    assert m.of("set_stage")[-1][1] == "Retired: refs released; draws archived to /state/archive/i7-e11.draws.jsonl.gz"
+    assert not m.of("refuse_label")
+
+
+async def test_a_lifecycle_label_without_a_ready_buffer_is_refused(env):
+    """`buffer:retire` on an issue whose workflow had finished starts a fresh run with that signal: refused."""
+    m = Mocks()
+    async with started(env, m, first=ev("retire", "21"), signal="retire") as h:
+        await until(lambda: m.of("refuse_label"), m=m)
+        await h.signal(MiaBuffer.keep, ev("keep", "22"))
+        await until(lambda: len(m.of("refuse_label")) == 2, m=m)
+        assert (await h.describe()).status.name == "RUNNING"
+    assert m.of("refuse_label") == [
+        ("buffer:retire", "this issue has no ready or idle buffer", "21"),
+        ("buffer:keep", "this issue has no ready or idle buffer", "22"),
+    ]
+    assert not m.of("admit") and not m.of("retire_buffer")
+
+
+async def test_degraded_rebuilds_from_the_raw_cache(env):
+    unstaged = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"])
+    # sourcing reads the binding twice, the rebuild once to check and twice to source, the re-send once: staged
+    m = Mocks(plan=ONLY_U937, bindings={"u937": [unstaged] * 5 + [replace(unstaged, staged=True)]})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr"))
+        await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr"))  # a stale re-send
+        await until(lambda: len(m.of("read_binding")) == 6, m=m)
+        await asyncio.sleep(0.3)
+        state = await h.query(MiaBuffer.status)
+    u937 = dataset(state, "u937")
+    assert (u937.status, u937.rebuilds) == ("servable", 1) and state.stage == "ready"
+    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
+    assert m.of("raw_ready") == [("u937",)] and m.of("prepare_stage") == [("u937",), ("u937", 1)]
+    assert [args[0] for args in m.of("submit")] == [job_key(7, "i7-e11", "u937"), job_key(7, "i7-e11", "u937", 1)]
+    assert m.of("submit")[1][1].rebuild == 1 and m.of("read_stage") == [("u937",), ("u937", 1)]
+    assert len(m.of("register_dataset")) == 2
+    assert m.board[-4:] == [("u937", "servable"), ("u937", "pending"), ("u937", "staging"), ("u937", "servable")]
+
+
+async def test_degraded_manual_dataset_rebuilds_without_a_new_drop(env):
+    """The dropped files are in the raw cache (raw_ready): the rebuild stages from them, it asks no human again."""
+    only = PlanResult(True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64)
+    m = Mocks(plan=only)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"), m=m)
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["bcss"], "pyramid missing: bcss/v0.zarr"))
+        await until(lambda: any(c[0] == "rebuilt bcss" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert len(m.of("comment_drop")) == 1 and m.of("verify_drop") == [("bcss",)]
+    assert dataset(state, "bcss").rebuilds == 1 and m.of("prepare_stage") == [("bcss",), ("bcss", 1)]
+
+
+async def test_degraded_without_raw_is_needs_human_only_below_the_floor(env):
+    m = Mocks(plan=TWO, raw_ready={"a": False, "b": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing: a/v0.zarr"))
+        await until(lambda: any("`a` failed" in c[0] for c in m.of("comment")), m=m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing: a/v0.zarr"))  # the next keeper pass
+        await asyncio.sleep(0.5)
+        state = await h.query(MiaBuffer.status)
+        assert (
+            dataset(state, "a").status == "failed"
+            and dataset(state, "a").reason == "pyramid missing and raw cache gone"
+        )
+        assert state.stage == "ready" and m.of("raw_ready") == [("a",)]
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["a", "b"], "pyramid missing: a/v0.zarr, b/v0.zarr"))
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("raw_ready") == [("a",), ("b",)] and dataset(state, "b").status == "failed"
+    detail = m.of("set_stage")[-1][1]
+    assert "a, b" in detail and "TEM" in detail and not m.of("prepare_fetch")
+
+
+async def test_waiters_share_one_ticker(env):
+    """Three datasets wait for their raw locks: one timer per tick, doubling while no status changes; a change (w's
+    drop staged meanwhile) resets it to poll_minutes."""
+    pool = [DatasetPlan(record, "TEM", 0.2, False) for record in ("x", "y", "z")] + [DatasetPlan("w", "TEM", 0.4, True)]
+    m = Mocks(plan=PlanResult(True, [], pool, 4, levels=[1], patch=64), locks={r: HELD for r in ("x", "y", "z")})
+    async with started(env, m) as h:
+        await approve(h, m)
+        for record in ("x", "y", "z"):
+            await waits_on_lock(h, record)
+        await until(lambda: m.of("comment_drop"), m=m)
+        for _ in range(40):  # quiet: the ticks back off until the 16-minute timer
+            if (await poll_timers(h))[-1:] == [16]:
+                break
+            await env.sleep(timedelta(minutes=1))
+        await h.signal(MiaBuffer.dropped, "w")
+        for _ in range(400):
+            if dataset(await h.query(MiaBuffer.status), "w").status == "servable":
+                break
+            await asyncio.sleep(0.05)
+        await env.sleep(timedelta(minutes=17))  # the 16 fires; w changed status meanwhile
+        for _ in range(200):  # until the timer after the 16 started
+            if (timers := await poll_timers(h)).index(16) < len(timers) - 1:
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.3)
+        events = (await h.fetch_history()).events
+    timers = [
+        e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta() / timedelta(minutes=1)
+        for e in events
+        if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+        and e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta() < timedelta(hours=1)
+    ]
+    # one leading 2 more when a status changed during the first tick (the four datasets settle in any order)
+    assert timers[: timers.index(16) + 2] in ([2, 4, 8, 16, 2], [2, 2, 4, 8, 16, 2])
+    assert len(ticker_timers_pending(events)) <= 1
+    fired = len(timers) - len(ticker_timers_pending(events))
+    takes = [args[1] for args in m.of("take_lock")]
+    assert [takes.count(record) for record in ("x", "y", "z")] == [fired + 1] * 3  # each tries once per tick
+
+
+async def test_ticker_stops_with_the_round(env):
+    """b is blocked on quota (it waits on the ticker) when a go abandons it: the ticker is cancelled with the
+    round and no further timers fire."""
+    m = Mocks(plan=TWO, raw={"b": RawStatus(False, [U937_URL])}, quotas={"b": QuotaCheck(False, over_by=5)})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await waits_on_lock(h, "b", "blocked")
+        await env.sleep(timedelta(minutes=3))
+        await until(lambda: len(m.of("check_quota")) >= 2, m=m)
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "plan-review")
+        events = (await h.fetch_history()).events
+        timers, checks = await poll_timers(h), len(m.of("check_quota"))
+        await env.sleep(timedelta(hours=1))
+        await asyncio.sleep(0.3)
+        assert await poll_timers(h) == timers and len(m.of("check_quota")) == checks
+    assert len(timers) >= 2 and ticker_timers_pending(events) == []
+
+
+async def test_replay_buffer_history_d(env):
+    """The run under `d-lifecycle` and `d-tick`: the plan auto-approves, u937 waits one tick for its raw lock, the
+    buffer goes ready, idle, back to ready and is retired; as test_replay_buffer_history. Re-record this one alone:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_d"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(plan=replace(ONLY_U937, auto_approve=True), locks={"u937": [HELD, LockTaken(True)]})
+        async with started(env, m) as h:
+            await until(lambda: m.of("take_lock"), m=m)
+            await waits_on_lock(h, "u937")
+            await env.sleep(timedelta(minutes=3))
+            await idle(h, m, "ready")
+            await h.signal(MiaBuffer.idle)
+            await idle(h, m, "idle")
+            await h.signal(MiaBuffer.keep, ev("keep", "31"))
+            await idle(h, m, "ready")
+            await h.signal(MiaBuffer.retire, ev("retire", "32"))
+            await idle(h, m, "retired")
+            LIFECYCLE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-d-lifecycle", LIFECYCLE_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)

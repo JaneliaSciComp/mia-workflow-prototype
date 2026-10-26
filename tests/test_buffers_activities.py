@@ -453,6 +453,9 @@ async def test_prepare_stage_makes_workspace_and_dirs(acts):
     assert yaml.safe_load((workspace / "binding.yaml").read_text())["record"] == U937
     assert (acts.cfg.paths.raw_root / U937).is_dir() and acts._building_dir(ROUND, U937).is_dir()
     assert not staged_dir(acts, U937).exists()  # the final directory appears only when read_stage publishes it
+    rebuilt = Path(await acts.prepare_stage(7, ROUND, U937, 1))  # a degraded pyramid's rebuild: its own dirs
+    assert rebuilt == workspace.with_name(f"stage-{U937}-r1") and acts._building_dir(ROUND, U937, 1).is_dir()
+    assert acts._building_dir(ROUND, U937, 1) != acts._building_dir(ROUND, U937)
 
 
 async def test_read_stage_reduces_report(acts, server):  # read_stage registers what it read
