@@ -193,6 +193,7 @@ class Activities:
             self.create_buffer,
             self.register_dataset,
             self.mark_dataset,
+            self.buffer_event,
             self.retire_buffer,
             self.raw_ready,
             self.missing_records,
@@ -994,6 +995,18 @@ class Activities:
         """The records of the buffer's volumes whose path is gone from disk now (buffer-api stats each one)."""
         missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]
         return sorted({str(volume).split("/", 1)[0] for volume in missing})
+
+    @activity.defn(name="buffer_event")
+    @mia_permanent_errors
+    async def buffer_event(self, buffer_id: str, kind: str, detail: str = "") -> None:
+        """Append a lifecycle event to a buffer that is not the round's own (a superseded one), best effort."""
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.event(buffer_id, kind, issue=_issue_of(buffer_id), event_id=None, detail=detail[:200]),
+            f"{kind} event of {buffer_id}",
+            log,
+        )
 
     @activity.defn(name="retire_buffer")
     @mia_permanent_errors

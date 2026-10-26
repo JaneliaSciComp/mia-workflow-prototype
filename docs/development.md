@@ -278,8 +278,8 @@ connection outside the service's lock, then deleted up to the last seq seen at t
 stays for the next retire). The worker then writes the `retired` event, after which `next`, `split` and
 `POST consumers` answer `410 buffer retired`. Volumes and the config stay for the page. Both thresholds travel in
 the buffer config. Run `mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`.
-`mia exec mia-buffers retire <buffer>` does the registry half by hand (refs and archive; it writes no event and
-leaves the issue's stage alone) and exits 1 when buffer-api refuses. `GET /buffers` lists each buffer
+`mia exec mia-buffers retire <buffer>` does it by hand (refs, archive, then the `retired` event, so consumers get
+410; the issue's stage stays as it is) and exits 1 when buffer-api refuses. `GET /buffers` lists each buffer
 with its latest event, volume and `missing` counts, servable volumes per split, the newest consumer `last_seen` and
 today's draws.
 
@@ -294,8 +294,8 @@ weighting group falls below `ready.min_fraction`; a record whose raw cache is go
 **Whose signal.** The keeper's `idle`, `retire` and `degraded` name the buffer they are about; the workflow ignores
 one about another buffer, but for a superseded one: a `go` from ready or idle records the buffer it leaves
 registered in `BufferState.superseded`, and the keeper's `retire` of it releases it (comment "superseded buffer
-`<id>` retired: refs released"); its `idle` writes nothing, so a buffer superseded while ready never idles by
-itself. A `buffer:keep` or `buffer:retire` label while there is no ready or idle buffer is refused with a comment at
+`<id>` retired: refs released"); its `idle` writes the `idle` event on that buffer (no stage label), so the
+keeper's retire rule runs `retire_after_days` later. A `buffer:keep` or `buffer:retire` label while there is no ready or idle buffer is refused with a comment at
 once: while datasets source (before ready, or stragglers after it) with "N datasets still sourcing; add
 `buffer:<label>` again once they settle", in planning, review or a finished workflow with "this issue has no ready
 or idle buffer".

@@ -1187,11 +1187,14 @@ async def test_mark_dataset_and_retire(acts, server):
         (U937, "fetching", "j1")
     ]
     assert await acts.raw_ready(ROUND, U937) is False  # nothing fetched
+    await acts.buffer_event(ROUND, "idle", "superseded")  # a superseded buffer's idle, as the workflow writes it
     assert set(await acts.retire_buffer(ROUND, ROUND)) >= {"refs", "draws"}
-    [retired] = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]
+    idle, retired = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]
+    assert (idle["kind"], idle["issue"], idle["detail"]) == ("idle", 7, "superseded")
     assert (retired["kind"], retired["issue"], retired["detail"]) == ("retired", 7, "archive none")
     acts.registry = Registry("http://127.0.0.1:9")
     await acts.mark_dataset(ROUND, U937, "staging")
+    await acts.buffer_event(ROUND, "idle")  # best effort: logged, not raised
     with pytest.raises(RegistryError):  # the workflow retries a retire
         await acts.retire_buffer(ROUND, ROUND)
 

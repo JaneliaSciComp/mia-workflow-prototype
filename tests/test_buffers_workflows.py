@@ -286,6 +286,10 @@ class Mocks:
             rec("mark_dataset", buffer, record, status, reason)
             self.board.append((record, status))
 
+        @activity.defn(name="buffer_event")
+        async def buffer_event(buffer_id: str, kind: str, detail: str = "") -> None:
+            rec("buffer_event", buffer_id, kind, detail)
+
         @activity.defn(name="retire_buffer")
         async def retire_buffer(round_id: str, buffer_id: str) -> dict:
             rec("retire_buffer", buffer_id)
@@ -313,6 +317,7 @@ class Mocks:
             read_fetch,
             mark_asset,
             mark_dataset,
+            buffer_event,
             retire_buffer,
             raw_ready,
             missing_records,
@@ -1657,19 +1662,19 @@ async def test_the_keepers_retire_of_a_ready_buffer_is_ignored(env):
 
 
 async def test_a_superseded_buffer_is_retired_by_the_keeper(env):
-    """A go from the idle loop leaves the buffer registered: the keeper's idle about it writes nothing, its retire
-    releases it and says so; the new round is untouched."""
+    """A go from the ready loop leaves the buffer registered: the keeper's idle about it writes the `idle` event on
+    it (so the keeper's retire rule can fire), its retire releases it and says so; the new round is untouched."""
     m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "ready")
-        await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
-        await idle(h, m, "idle")
         await h.signal(MiaBuffer.go, ev("go", "15"))
         await idle(h, m, "plan-review")
         assert (await h.query(MiaBuffer.status)).superseded == ["i7-e11"]
         await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
-        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
+        await until(lambda: m.of("buffer_event"), m=m)
+        assert m.of("buffer_event") == [("i7-e11", "idle", "superseded")] and not m.of("retire_buffer")
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])  # retire_after_days later
         await until(lambda: m.of("retire_buffer"), m=m)
         await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])  # the next keeper pass, before it saw the event
         await until(lambda: any(c[1] == "retired i7-e11" for c in m.of("comment")), m=m)

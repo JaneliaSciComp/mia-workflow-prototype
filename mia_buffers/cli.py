@@ -358,11 +358,12 @@ async def cmd_datasets_sync(cfg: Config, args: argparse.Namespace) -> int:
 
 
 async def cmd_retire(cfg: Config, args: argparse.Namespace) -> int:
-    """Release a buffer's references and archive its draws by hand (what a `buffer:retire` does, without the
-    workflow: the issue's stage and the buffer's events stay as they are)."""
+    """Release a buffer's references and archive its draws by hand, then write its `retired` event (buffer-api then
+    refuses its consumers). The issue's stage stays as it is: this is a `buffer:retire` without the workflow."""
     try:
         with Registry.from_config(cfg.service) as registry:
             retired = registry.retire(args.buffer)
+            registry.event(args.buffer, "retired", detail=f"by hand; archive {retired.get('archive') or 'none'}")
     except RegistryError as error:
         print(error.message, file=sys.stderr)
         return 1

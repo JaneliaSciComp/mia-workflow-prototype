@@ -253,9 +253,11 @@ def test_retire_prints_the_result_and_fails_on_a_registry_error(tmp_path, monkey
     from mia_core.registry import RegistryError
 
     registry = _sync_cfg(tmp_path, monkeypatch)
-    calls = []
+    calls, events = [], []
     monkeypatch.setattr(registry, "retire", lambda self, buffer: calls.append(buffer) or {"refs": 2, "draws": 5})
+    monkeypatch.setattr(registry, "event", lambda self, buffer, kind, **fields: events.append((buffer, kind, fields)))
     assert cli.main(["retire", "i7-e11"]) == 0 and calls == ["i7-e11"]
+    assert events == [("i7-e11", "retired", {"detail": "by hand; archive none"})]  # next/split now answer 410
     assert '"refs": 2' in capsys.readouterr().out
 
     def unknown(self, buffer):
@@ -263,6 +265,7 @@ def test_retire_prints_the_result_and_fails_on_a_registry_error(tmp_path, monkey
 
     monkeypatch.setattr(registry, "retire", unknown)
     assert cli.main(["retire", "zz"]) == 1 and "unknown buffer zz" in capsys.readouterr().err
+    assert len(events) == 1  # no event for a retire that failed
 
 
 def test_schedule_applies_the_poll_and_the_keeper(tmp_path, monkeypatch, capsys):

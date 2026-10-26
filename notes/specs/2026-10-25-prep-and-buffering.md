@@ -714,8 +714,8 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
   datasets source, with "N datasets still sourcing; add `buffer:<label>` again once they settle". After a `go`
   during ready or idle the old buffer stays registered and goes into `BufferState.superseded`; the keeper's
   signals carry the buffer id. A keeper `retire` of a superseded buffer releases it (refs, draws archived, comment
-  "superseded buffer <id> retired: refs released"); its `idle` writes nothing, so a buffer superseded while ready
-  never idles by itself (deferred).
+  "superseded buffer <id> retired: refs released"); its `idle` writes the `idle` event on that buffer
+  (`buffer_event`), so the keeper retires it `retire_after_days` later.
 - A degraded re-send is judged against buffer-api's current missing volumes (`missing_records`); a rebuild ignores
   `binding.staged` and its publish replaces the final directory. Under the raw lock the rebuild asks again: a
   record another buffer of the same artifact rebuilt meanwhile is registered as it is, with no second job.
@@ -723,7 +723,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
   workflow ignores a keeper `retire` unless the stage is `idle`, and buffer-api answers `410 buffer retired` to
   `next`, `split` and new consumers once the latest event is `retired` (written by `retire_buffer`). The archive
   is read outside the service's lock; draws recorded meanwhile stay for the next retire. `mia-buffers retire
-  <buffer>` does the registry half by hand.
+  <buffer>` does the same by hand (refs, archive, `retired` event), leaving the issue's stage alone.
 
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 

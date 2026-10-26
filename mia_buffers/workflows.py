@@ -293,10 +293,17 @@ class MiaBuffer:
                 workflow.logger.info("issue #%d: %s ignored: %s", self.state.issue, kind, why)
 
     async def _superseded(self, kind: str, buffer: str) -> bool:
-        """A keeper signal about a buffer a go left serving (`state.superseded`): its retire (the keeper waited
-        retire_after_days after its idle) releases it; anything else is logged. False: not a superseded buffer."""
+        """A keeper signal about a buffer a go left serving (`state.superseded`): its idle writes the `idle` event on
+        that buffer (so the keeper's retire rule runs from it), its retire releases it; anything else is logged.
+        False: not a superseded buffer."""
         if not buffer or buffer not in self.state.superseded:
             return False
+        if kind == "idle":  # best effort: the keeper says it again on its next pass until the event is there
+            try:
+                await self._act("buffer_event", buffer, "idle", "superseded", budget=timedelta(minutes=10))
+            except ActivityError as error:
+                workflow.logger.warning("issue #%d: idle of %s: %s", self.state.issue, buffer, error_message(error))
+            return True
         if kind != "retire":
             workflow.logger.info("issue #%d: %s of superseded buffer %s ignored", self.state.issue, kind, buffer)
             return True
