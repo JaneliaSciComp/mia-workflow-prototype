@@ -6,6 +6,7 @@ JSON (plan.json) and markdown (the plan comment). Pure functions over Spec and F
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ class Row:
     positions: int = 0
     weight: float = 0.0
     splits: dict[str, int] = field(default_factory=dict)
+    split: dict | None = None  # the policy registration cuts planes by: {policy, fractions, seed}; pool rows only
     notes: list[str] = field(default_factory=list)
     voxel_size_nm: dict[str, float | None] = field(default_factory=dict)
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
@@ -248,6 +250,11 @@ def weights(rows: list[Row], over: Sequence[str], temperature: float) -> dict[st
     return result
 
 
+def plan_hash(plan_json_text: str) -> str:
+    """What a buffer's `plan_hash` is: the sha256 of the plan file's text."""
+    return hashlib.sha256(plan_json_text.encode()).hexdigest()
+
+
 def split_counts(n: int, fractions: dict[str, float]) -> dict[str, int]:
     """Largest-remainder apportionment of `n` keys; ties go to the earlier split in the spec's order."""
     exact = {name: n * fraction for name, fraction in fractions.items()}
@@ -363,6 +370,8 @@ def build_plan(
     rows.sort(key=lambda row: row.path)
     pool = [row for row in rows if row.in_pool]
     errors = _policy_errors(pool, spec)
+    if spec.splits.stratify_by:
+        errors.append("splits.stratify_by is not implemented; remove it")
     if pool:
         weighting = spec.sampling.weighting
         temperature = {"uniform_over": 0.0, "proportional": 1.0}.get(weighting.scheme, weighting.temperature)
@@ -370,7 +379,13 @@ def build_plan(
         for row_id, weight in weights(pool, weighting.over, temperature).items():
             pool_by_id[row_id].weight = weight
         for row in pool:
-            if row.id in spec.splits.holdout_ids:
+            held_out = row.id in spec.splits.holdout_ids
+            row.split = {
+                "policy": "holdout" if held_out else "fractions",
+                "fractions": dict(spec.splits.fractions),
+                "seed": spec.splits.seed,
+            }
+            if held_out:
                 row.splits = {name: (row.n_items if name == "test" else 0) for name in spec.splits.fractions}
             else:
                 row.splits = split_counts(row.n_items, spec.splits.fractions)

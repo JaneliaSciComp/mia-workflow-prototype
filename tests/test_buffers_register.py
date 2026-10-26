@@ -8,7 +8,7 @@ import pytest
 
 from mia_buffers.api import BufferService, make_server
 from mia_buffers.ledger import Ledger
-from mia_buffers.register import buffer_config, normalize_bounds, register, volume_bodies
+from mia_buffers.register import buffer_config, normalize_bounds, recipe_for, register, volume_bodies
 from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed, spec_with  # noqa: F401  (fixtures)
 
 
@@ -43,10 +43,14 @@ ROW = {
     "weight": 0.5,
     "channel_recipe": {"op": "mean"},
     "splits": {"train": 20, "val": 3, "test": 2},
+    "split": {"policy": "fractions", "fractions": {"train": 0.8, "val": 0.1, "test": 0.1}, "seed": 0},
     "n_items": 25,
     "admitted": True,
     "fit": {"ok": True},
 }
+
+
+RECIPE = {"tensorizer": "muvit-2d", "params": {}, "harness_commit": "a" * 40, "env_digest": "d"}
 
 
 def test_volume_bodies_split_planes_by_fraction(tmp_path, spec_2d):  # noqa: F811
@@ -113,8 +117,29 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
     }
     sizes = {"val": 4, "test": 4}
     with pytest.raises(httpx.HTTPStatusError):  # worker routes need the token
-        register(token_server, "demo", plan, spec_2d, root, tensorizer="muvit-2d", split_sizes=sizes)
-    out = register(token_server, "demo", plan, spec_2d, root, tensorizer="muvit-2d", split_sizes=sizes, token="t")
+        register(
+            token_server,
+            "demo",
+            plan,
+            spec_2d,
+            root,
+            tensorizer="muvit-2d",
+            split_sizes=sizes,
+            recipe=RECIPE,
+            plan_hash="h",
+        )
+    out = register(
+        token_server,
+        "demo",
+        plan,
+        spec_2d,
+        root,
+        tensorizer="muvit-2d",
+        split_sizes=sizes,
+        recipe=RECIPE,
+        plan_hash="h",
+        token="t",
+    )
     assert out["registered"] == ["u937/v0.zarr"] and out["skipped"] == {"bcss": "not staged"}
     assert out["refused"] == {"tiny/v0.zarr": "footprint 1024 exceeds 512×512"}
     status = httpx.get(f"{token_server}/buffers/demo/status").json()
@@ -136,7 +161,7 @@ def test_single_plane_volumes_split_by_fraction_across_a_dataset(tmp_path, spec_
 
 def test_volume_bodies_accepts_a_report(tmp_path, spec_2d):  # noqa: F811
     staged = write_stage_json(tmp_path / "staged" / "rec")
-    row = {"id": "rec", "weight": 1.0, "channel_recipe": None}
+    row = {**ROW, "id": "rec", "weight": 1.0, "channel_recipe": None}
     from_file = volume_bodies(row, staged, spec_2d)
     report = json.loads((staged / "stage.json").read_text())
     (staged / "stage.json").unlink()
@@ -239,3 +264,35 @@ def test_dataset_scope_refuses_volumes_with_other_channel_counts(tmp_path, spec_
         SAMPLE_V0, (1, 99)
     )
     assert "channel" in refused["u937/v1.zarr"]
+
+
+def test_holdout_volume_registers_all_test(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    row = {**ROW, "split": {**ROW["split"], "policy": "holdout"}}
+    [(_, vb)] = volume_bodies(row, staged, spec_2d)
+    assert vb["split_planes"] == {"train": [], "val": [], "test": list(range(25))}
+
+
+def test_split_seed_comes_from_the_row_not_the_spec(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+
+    def planes(row, spec_):
+        return volume_bodies(row, staged, spec_)[0][1]["split_planes"]
+
+    other = {**ROW, "split": {**ROW["split"], "seed": 7}}
+    assert planes(ROW, spec_2d) != planes(other, spec_2d)
+    assert planes(ROW, spec_2d) == planes(ROW, spec_with(spec_2d, **{"sampling.seed": 99}))
+
+
+def test_volume_bodies_refuse_a_row_without_a_split(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    with pytest.raises(ValueError, match="no split policy; plan again"):
+        volume_bodies({**ROW, "split": None}, staged, spec_2d)
+
+
+def test_buffer_config_carries_recipe_plan_hash_and_lifecycle(spec_2d):  # noqa: F811
+    plan = {"spec_name": "s", "spec_hash": "abc", "catalog_ref": "r", "rows": []}
+    recipe = recipe_for(spec_2d, tensorizer="muvit-2d", harness_commit="a" * 40, env_digest="d")
+    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={}, recipe=recipe, plan_hash="ph")
+    assert recipe["params"] == cfg["tensorizer_params"] and cfg["recipe"] == recipe and cfg["plan_hash"] == "ph"
+    assert (cfg["idle_hours"], cfg["retire_after_days"], cfg["auto_approve"]) == (72, 14, False)

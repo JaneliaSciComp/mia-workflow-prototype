@@ -65,7 +65,6 @@ sampling:
 
 splits:
   fractions: {train: 0.8, val: 0.1, test: 0.1}
-  stratify_by: [modality, dims]
   holdout_ids: []                       # whole datasets reserved for OOD eval
   seed: 0
 

@@ -18,12 +18,39 @@ from .plan import split_counts
 from .spec import Spec
 
 
-def buffer_config(plan: dict, spec: Spec, *, tensorizer: str, split_sizes: dict[str, int]) -> dict:
+def _tensorizer_params(spec: Spec) -> dict:
+    normalize = spec.sampling.normalize
+    return {
+        "normalize": normalize.method,
+        "range": list(normalize.range),
+        "clip": normalize.clip,
+        "scope": normalize.scope,
+    }
+
+
+def recipe_for(spec: Spec, *, tensorizer: str, harness_commit: str, env_digest: str) -> dict:
+    """What a buffer's crops are made with: the tensorizer, its params and the harness that staged them."""
+    return {
+        "tensorizer": tensorizer,
+        "params": _tensorizer_params(spec),
+        "harness_commit": harness_commit,
+        "env_digest": env_digest,
+    }
+
+
+def buffer_config(
+    plan: dict,
+    spec: Spec,
+    *,
+    tensorizer: str,
+    split_sizes: dict[str, int],
+    recipe: dict | None = None,
+    plan_hash: str | None = None,
+) -> dict:
     """The `PUT buffers/<id>` body from a plan and its spec."""
     patch = spec.patch_for("2D") or {}
     if patch.get("y") != patch.get("x"):
         raise ValueError(f"MuViT crops are square; the 2D patch is {patch}")
-    normalize = spec.sampling.normalize
     return {
         "spec_name": plan["spec_name"],
         "spec_hash": plan["spec_hash"],
@@ -33,30 +60,33 @@ def buffer_config(plan: dict, spec: Spec, *, tensorizer: str, split_sizes: dict[
         "channels": spec.sampling.patch.c,
         "seed": spec.sampling.seed,
         "tensorizer": tensorizer,
-        "tensorizer_params": {
-            "normalize": normalize.method,
-            "range": list(normalize.range),
-            "clip": normalize.clip,
-            "scope": normalize.scope,
-        },
+        "tensorizer_params": _tensorizer_params(spec),
         "splits": dict(spec.splits.fractions),
         "split_sizes": dict(split_sizes),
+        "recipe": recipe,
+        "plan_hash": plan_hash,
+        "idle_hours": spec.idle.hours,
+        "retire_after_days": spec.retire_after_days,
+        "auto_approve": spec.plan.auto_approve,
     }
 
 
-def _split_planes(volume_id: str, planes: int, spec: Spec) -> dict[str, list[int]]:
-    """Seeded shuffle of the planes, cut by the spec's fractions (largest remainder); split keys are (volume, plane)."""
-    rng = random.Random(f"{spec.sampling.seed}:{volume_id}")
+def _split_planes(volume_id: str, planes: int, split: dict) -> dict[str, list[int]]:
+    """The plan row's split policy applied to a volume's planes: `holdout` puts every plane in test; `fractions` is a
+    seeded shuffle cut by the row's fractions (largest remainder); split keys are (volume, plane)."""
+    fractions = split["fractions"]
+    if split["policy"] == "holdout":
+        return {name: list(range(planes)) if name == "test" else [] for name in fractions}
+    rng = random.Random(f"{split['seed']}:{volume_id}")
     order = list(range(planes))
     rng.shuffle(order)
-    fractions = spec.splits.fractions
-    out: dict[str, list[int]] = {split: [] for split in fractions}
+    out: dict[str, list[int]] = {name: [] for name in fractions}
     if planes < len(fractions):  # too few planes to apportion: each plane picks its split by fraction, so a dataset
         for plane in order:  # of single-image volumes still splits by fraction overall (review C1)
             out[rng.choices(list(fractions), weights=list(fractions.values()))[0]].append(plane)
-        return {split: sorted(chosen) for split, chosen in out.items()}
-    for split, count in split_counts(planes, fractions).items():
-        out[split], order = sorted(order[:count]), order[count:]
+        return {name: sorted(chosen) for name, chosen in out.items()}
+    for name, count in split_counts(planes, fractions).items():
+        out[name], order = sorted(order[:count]), order[count:]
     return out
 
 
@@ -123,6 +153,8 @@ def volume_bodies(
     or dataset, each body carries `normalize` bounds from the stage job's `intensity_sample` (a volume without a
     usable sample is refused: it must be staged again with a harness that records one). Each body names the staged
     `artifact` its volume lives in (default: the staged directory's name, the hand-registration layout)."""
+    if row.get("split") is None:
+        raise ValueError(f"{row['id']}: plan row has no split policy; plan again")
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
     scope = spec.sampling.normalize.scope
@@ -176,7 +208,7 @@ def volume_bodies(
                         {key: level[key] for key in ("factor", "shape", "scale_nm", "translation_nm")}
                         for level in volume["levels"]
                     ],
-                    "split_planes": _split_planes(volume_id, planes, spec),
+                    "split_planes": _split_planes(volume_id, planes, row["split"]),
                     "labels": dict(volume.get("labels") or {}),
                     "weight": float(row["weight"]) * planes / total_planes,
                     "channels_stored": _channels(volume),
@@ -209,6 +241,8 @@ def register(
     *,
     tensorizer: str,
     split_sizes: dict[str, int],
+    recipe: dict,
+    plan_hash: str,
     token: str | None = None,
 ) -> dict:
     """Create the buffer and register every pooled, staged volume (with the worker `token`, when the service
@@ -217,7 +251,10 @@ def register(
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     with httpx.Client(base_url=url, timeout=30.0, headers=headers) as client:
         client.put(
-            f"/buffers/{buffer}", json=buffer_config(plan, spec, tensorizer=tensorizer, split_sizes=split_sizes)
+            f"/buffers/{buffer}",
+            json=buffer_config(
+                plan, spec, tensorizer=tensorizer, split_sizes=split_sizes, recipe=recipe, plan_hash=plan_hash
+            ),
         ).raise_for_status()
         for row in plan["rows"]:
             if not (row.get("admitted") and (row.get("fit") or {}).get("ok")):

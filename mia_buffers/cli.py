@@ -26,7 +26,7 @@ from mia_data.jobspec import harness_env, harness_pin
 
 from .config import HUMAN_LABELS, STAGES, load_config
 from .jobspec import catalog_snapshot
-from .plan import build_plan, load_records
+from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ def _serve(args: argparse.Namespace) -> int:
 
 
 def _register(args: argparse.Namespace) -> int:
-    from .register import register
+    from .register import recipe_for, register
 
     try:
         spec = load_spec(args.spec)
@@ -84,14 +84,18 @@ def _register(args: argparse.Namespace) -> int:
     except RegistryError as error:
         print(error.message, file=sys.stderr)
         return 1
+    plan_text = args.plan.read_text()
+    commit, digest = harness_pin(load_config(args.config))
     out = register(
         args.url,
         args.buffer,
-        json.loads(args.plan.read_text()),
+        json.loads(plan_text),
         spec,
         args.staged_root,
         tensorizer=args.tensorizer,
         split_sizes={"val": args.val_size, "test": args.test_size},
+        recipe=recipe_for(spec, tensorizer=args.tensorizer, harness_commit=commit, env_digest=digest),
+        plan_hash=args.plan_hash or plan_hash(plan_text),
         token=token,
     )
     print(json.dumps(out, indent=1))
@@ -390,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--buffer", required=True, help="buffer id")
     reg.add_argument("--token-file", type=Path, help="the service's worker token (needed when buffer-api has one)")
     reg.add_argument("--tensorizer", default="muvit-2d")
+    reg.add_argument("--config", help="path to mia.yaml, for the harness pin (default: $MIA_CONFIG or ./mia.yaml)")
+    reg.add_argument("--plan-hash", help="the plan's hash (default: sha256 of the plan file's text)")
     reg.add_argument("--val-size", type=int, default=256, help="frozen val list length")
     reg.add_argument("--test-size", type=int, default=256, help="frozen test list length")
     reg.set_defaults(func=_register)

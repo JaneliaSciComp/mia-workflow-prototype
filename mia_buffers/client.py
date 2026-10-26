@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import warnings
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -107,6 +109,17 @@ except ImportError:
     Base = _Base
 
 
+def harness_commit(tensorizers: Path) -> str | None:
+    """The harness commit this checkout is at: $MIA_HARNESS_COMMIT, else `git rev-parse HEAD` in `tensorizers`."""
+    if commit := os.environ.get("MIA_HARNESS_COMMIT"):
+        return commit
+    try:
+        run = subprocess.run(["git", "-C", str(tensorizers), "rev-parse", "HEAD"], capture_output=True, text=True)
+    except OSError:
+        return None
+    return run.stdout.strip() or None if run.returncode == 0 else None
+
+
 def collate(batch: list[dict]) -> dict:
     """`DataLoader(..., collate_fn=BufferDataset.collate)`: a buffer mixes datasets whose label layers differ (and
     whose meta keys differ), which torch's default_collate rejects. Stacks every key all samples share; `meta`
@@ -141,6 +154,7 @@ class BufferDataset(Base):
         tensorizers: Path | str | None = None,
         prefetch: int = 64,
         timeout: float = 30.0,
+        allow_recipe_mismatch: bool = False,
     ):
         tensorizers = tensorizers or os.environ.get(TENSORIZERS_ENV)
         if tensorizers is None:
@@ -151,6 +165,21 @@ class BufferDataset(Base):
         self.split, self.mode, self.prefetch = split, mode, max(1, prefetch)
         self.tensorizers = Path(tensorizers)
         self.config = self.client.status()["config"]
+        self._pinned_mismatch: str | None = None  # this checkout's commit when it differs from the buffer's pin
+        pinned = (self.config.get("recipe") or {}).get("harness_commit")
+        actual = harness_commit(self.tensorizers)
+        if pinned and actual and pinned != actual:
+            if not allow_recipe_mismatch:
+                raise RuntimeError(
+                    f"buffer {buffer} was staged with harness {pinned[:12]}, this checkout is {actual[:12]}; "
+                    "pass allow_recipe_mismatch=True to use it anyway"
+                )
+            warnings.warn(
+                f"buffer {buffer} was staged with harness {pinned[:12]}, this checkout is {actual[:12]}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._pinned_mismatch = actual
         self._levels = tuple(int(level) for level in self.config["levels"])
         self._consumer: tuple[int, str] | None = None  # (pid, consumer_id): DataLoader workers register anew
         self._queue: deque[dict] = deque()
@@ -221,6 +250,8 @@ class BufferDataset(Base):
         convert: Callable[[Any], Any] = torch.from_numpy if torch is not None else (lambda array: array)
         out: dict = {key: convert(value) for key, value in sample.items()}
         out["meta"] = _collatable(meta)
+        if self._pinned_mismatch:
+            out["meta"]["harness_commit"] = self._pinned_mismatch
         return out
 
 

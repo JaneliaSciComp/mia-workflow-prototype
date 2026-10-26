@@ -209,6 +209,25 @@ class Sourcing(_Strict):
     """How long a weighting group may stay without a servable dataset before the issue needs a human (spec §1)."""
 
     dataset_timeout_days: float = Field(default=14, gt=0)
+    unprepared: Literal["skip"] = "skip"  # what to do with a record nobody prepared; only skipping exists
+
+
+class PlanOptions(_Strict):
+    """What happens to a fresh plan: wait for a human's approval (default) or go ahead."""
+
+    auto_approve: bool = False
+
+
+class Idle(_Strict):
+    """A buffer nobody draws from for this many hours is idle."""
+
+    hours: float = Field(default=72, gt=0)
+
+
+class Health(_Strict):
+    """When a buffer counts as degraded."""
+
+    max_empty_fraction: float = Field(default=0.05, ge=0, le=1)
 
 
 class Spec(_Strict):
@@ -221,6 +240,10 @@ class Spec(_Strict):
     cache: Cache | None = None
     ready: Ready = Ready()
     sourcing: Sourcing = Sourcing()
+    plan: PlanOptions = PlanOptions()
+    idle: Idle = Idle()
+    retire_after_days: float = Field(default=14, gt=0)  # an idle buffer is retired after this many more days
+    health: Health = Health()
     warnings: list[str] = []  # filled by the validator, not by the file
 
     @model_validator(mode="after")

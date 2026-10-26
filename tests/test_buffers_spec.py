@@ -76,3 +76,17 @@ def test_load_spec_text_matches_load_spec():
     path = FIXTURES / "spec.yaml"
     assert load_spec_text(path.read_text()) == load_spec(path)
     assert spec_text_hash(path.read_text()) == spec_hash(path)
+
+
+def test_lifecycle_fields_and_defaults(tmp_path):
+    spec = load_spec(FIXTURES / "spec.yaml")
+    assert spec.plan.auto_approve is False and spec.sourcing.unprepared == "skip"
+    assert spec.idle.hours == 72 and spec.retire_after_days == 14 and spec.health.max_empty_fraction == 0.05
+    path = tmp_path / "spec.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            _merge(yaml.safe_load((FIXTURES / "spec.yaml").read_text()), {"sourcing": {"unprepared": "request"}})
+        )
+    )
+    with pytest.raises(SpecError, match="unprepared"):
+        load_spec(path)

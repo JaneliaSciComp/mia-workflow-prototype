@@ -154,3 +154,25 @@ def test_collate_stacks_the_shared_keys_and_keeps_meta_as_a_list(monkeypatch):
         "meta": [a["meta"], b["meta"]],
     }
     assert BufferDataset.collate is collate
+
+
+def _pinned(buffer_server, commit):
+    cfg = {**CFG, "tensorizer_params": {"normalize": "percentile", "scope": "volume"}}
+    cfg["recipe"] = {"tensorizer": "muvit-2d", "params": {}, "harness_commit": commit, "env_digest": "d"}
+    assert httpx.put(f"{buffer_server}/buffers/b", json=cfg).status_code == 200
+
+
+def test_dataset_refuses_a_checkout_at_another_commit(buffer_server, monkeypatch):
+    _pinned(buffer_server, "a" * 40)
+    monkeypatch.setenv("MIA_HARNESS_COMMIT", "b" * 40)
+    with pytest.raises(RuntimeError, match="staged with harness aaaaaaaaaaaa, this checkout is bbbbbbbbbbbb"):
+        BufferDataset(buffer_server, "b", n_samples=2, tensorizers=SNAP)
+    with pytest.warns(RuntimeWarning) as caught:
+        dataset = BufferDataset(buffer_server, "b", n_samples=2, tensorizers=SNAP, allow_recipe_mismatch=True)
+    assert len(caught) == 1
+    assert dataset[0]["meta"]["harness_commit"] == "b" * 40
+
+
+def test_dataset_without_a_recipe_is_accepted(buffer_server, monkeypatch):
+    monkeypatch.setenv("MIA_HARNESS_COMMIT", "b" * 40)
+    assert "harness_commit" not in BufferDataset(buffer_server, "b", n_samples=2, tensorizers=SNAP)[0]["meta"]

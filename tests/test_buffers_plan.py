@@ -240,3 +240,15 @@ def test_not_prepared_rows_are_out_with_their_rule(spec_2d):
     by_id = {row["id"]: row for row in plan.to_dict({U937: "prepared"})["rows"]}
     assert by_id[U937]["prepared"] == "prepared" and by_id[BCSS]["prepared"] == "unprepared"
     assert "prepared" not in plan.to_dict()["rows"][0]
+
+
+def test_rows_carry_the_split_policy(spec_2d):
+    plan = build_plan(spec_with(spec_2d, **{"splits.holdout_ids": [U937]}), "h", None, records())
+    fractions = {"train": 0.8, "val": 0.1, "test": 0.1}
+    assert plan.rows_by_id[U937].split == {"policy": "holdout", "fractions": fractions, "seed": 0}
+    assert plan.rows_by_id[BCSS].split["policy"] == "fractions" and plan.to_dict()["rows"][0]["split"]
+
+
+def test_stratify_by_is_a_plan_error(spec_2d):
+    plan = build_plan(spec_with(spec_2d, **{"splits.stratify_by": ["modality"]}), "h", None, records())
+    assert "splits.stratify_by is not implemented; remove it" in plan.errors
