@@ -124,12 +124,14 @@ def test_concurrent_next_gives_unique_seqs(tmp_path):
 
 
 def test_over_http(tmp_path):
-    server = make_server(svc(tmp_path), "127.0.0.1", 0)
+    server = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t"), "127.0.0.1", 0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        assert httpx.put(f"{base}/buffers/b", json=CFG).status_code == 200
-        assert httpx.put(f"{base}/buffers/b/volumes/a", json=body()).status_code == 200
+        auth = {"Authorization": "Bearer t"}
+        assert httpx.put(f"{base}/buffers/b", json=CFG).status_code == 401
+        assert httpx.put(f"{base}/buffers/b", json=CFG, headers=auth).status_code == 200
+        assert httpx.put(f"{base}/buffers/b/volumes/a", json=body(), headers=auth).status_code == 200
         cid = httpx.post(f"{base}/buffers/b/consumers", json=CONSUMER).json()["consumer_id"]
         r = httpx.get(f"{base}/buffers/b/next", params={"n": 2, "consumer": cid})
         assert r.status_code == 200 and len(r.json()["descriptors"]) == 2
@@ -137,10 +139,30 @@ def test_over_http(tmp_path):
         empty = httpx.get(f"{base}/buffers/b/split/val", params={"from": 0, "n": 1, "consumer": cid})
         assert empty.status_code == 200
         assert httpx.get(f"{base}/nothing").status_code == 404
-        assert httpx.put(f"{base}/buffers/b/volumes/rec%2Fv0.zarr", json=body("rec")).status_code == 200
+        assert httpx.put(f"{base}/buffers/b/volumes/rec%2Fv0.zarr", json=body("rec"), headers=auth).status_code == 200
         assert httpx.get(f"{base}/buffers/b/status").json()["volumes"] == 2
     finally:
         server.shutdown()
+
+
+def test_worker_routes_need_the_token(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="secret")
+    assert call(s, "PUT", "/buffers/b", payload=CFG)[:2] == (401, {"error": "unauthorized"})
+    for bad in ({}, {"Authorization": "Bearer secre"}, {"Authorization": "Bearer "}, {"authorization": "secret"}):
+        assert s.handle("PUT", "/buffers/b", {}, json.dumps(CFG).encode(), bad)[0] == 401
+    ok = {"Authorization": "Bearer secret"}
+    assert s.handle("PUT", "/buffers/b", {}, json.dumps(CFG).encode(), ok)[0] == 200
+    assert s.handle("PUT", "/assets/raw/r", {}, b"{}", {"authorization": "Bearer secret"})[0] == 200  # any case
+    assert s.handle("PUT", "/buffers/b", {}, b"not json", {})[0] == 401  # refused before parsing
+
+
+def test_consumer_and_read_routes_are_open(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="secret")
+    ok = {"Authorization": "Bearer secret"}
+    s.handle("PUT", "/buffers/b", {}, json.dumps(CFG).encode(), ok)
+    assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[0] == 201
+    assert call(s, "GET", "/buffers/b/status")[0] == 200
+    assert call(s, "GET", "/assets/raw")[0] == 200
 
 
 def test_next_n_is_bounded_and_from_is_non_negative(tmp_path):

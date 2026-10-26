@@ -7,6 +7,7 @@ only name its split.
 
 from __future__ import annotations
 
+import hmac
 import json
 import random
 import re
@@ -109,33 +110,45 @@ def _int(query: dict[str, str], key: str, default: int | None = None, *, low: in
     return parsed
 
 
+# (method, pattern, handler, capability): consumer and read routes are open, worker routes need the bearer token
 ROUTES = [
-    ("PUT", re.compile(r"^/buffers/([^/]+)$"), "put_buffer"),
-    ("PUT", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "put_volume"),
-    ("POST", re.compile(r"^/buffers/([^/]+)/consumers$"), "add_consumer"),
-    ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next"),
-    ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split"),
-    ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status"),
-    ("PUT", re.compile(r"^/assets/([a-z]+)/(.+)$"), "put_asset"),
-    ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset"),
-    ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets"),
+    ("PUT", re.compile(r"^/buffers/([^/]+)$"), "put_buffer", "worker"),
+    ("PUT", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "put_volume", "worker"),
+    ("POST", re.compile(r"^/buffers/([^/]+)/consumers$"), "add_consumer", "consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next", "consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split", "consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status", "consumer"),
+    ("PUT", re.compile(r"^/assets/([a-z]+)/(.+)$"), "put_asset", "worker"),
+    ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset", "read"),
+    ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets", "read"),
 ]
 
 
 class BufferService:
     """Routes → ledger operations. One train rng per buffer, seeded from the config; frozen lists seeded per split."""
 
-    def __init__(self, ledger: Ledger, stale_s: float = 300.0):
+    def __init__(self, ledger: Ledger, stale_s: float = 300.0, *, token: str | None = None):
         self.ledger = ledger
+        self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
 
-    def handle(self, method: str, path: str, query: dict[str, str], body: bytes) -> Response:
+    def _authorized(self, headers: dict[str, str]) -> bool:
+        if self.token is None:
+            return True
+        given = {key.lower(): value for key, value in headers.items()}.get("authorization", "")
+        return hmac.compare_digest(given.encode(), f"Bearer {self.token}".encode())
+
+    def handle(
+        self, method: str, path: str, query: dict[str, str], body: bytes, headers: dict[str, str] | None = None
+    ) -> Response:
         try:
-            for route_method, pattern, name in ROUTES:
+            for route_method, pattern, name, capability in ROUTES:
                 match = pattern.match(path)
                 if match and route_method == method:
+                    if capability == "worker" and not self._authorized(headers or {}):
+                        return 401, {"error": "unauthorized"}, {}
                     segments = [unquote(group) for group in match.groups()]  # volume ids hold "/" (record/v0.zarr)
                     return getattr(self, f"_{name}")(*segments, query=query, body=body)
             raise HttpError(404, f"no route {method} {path}")
@@ -296,7 +309,9 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
             parts = urlsplit(self.path)
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
-            status, payload, headers = service.handle(self.command, parts.path, dict(parse_qsl(parts.query)), body)
+            status, payload, headers = service.handle(
+                self.command, parts.path, dict(parse_qsl(parts.query)), body, dict(self.headers.items())
+            )
             data = json.dumps(payload).encode() if payload is not None else b""
             self.send_response(status)
             for key, value in headers.items():
@@ -308,7 +323,7 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
             if data:
                 self.wfile.write(data)
 
-        do_GET = do_PUT = do_POST = _dispatch
+        do_GET = do_PUT = do_POST = do_DELETE = _dispatch
 
         def log_message(self, format: str, *args: object) -> None:  # quiet; the ledger is the record
             return
