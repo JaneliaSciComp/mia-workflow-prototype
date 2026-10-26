@@ -161,6 +161,21 @@ def test_sync_assets_marks_missing_but_keeps_building_rows(tmp_path):
     assert {a["key"]: a["data"]["state"] for a in ledger.assets("staged")}["late"] == "ready"
 
 
+def test_sync_assets_readies_stateless_and_evicted_rows_and_skips_rows_written_during_the_scan(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("staged", "old", {"binding_hash": "b", "bytes": 1})  # a milestone-B row: no state
+    ledger.put_asset("staged", "evicted", {"state": "evicted", "bytes": 0})
+    started = time.time() + 1
+    found = {("staged", key): {"bytes": 7, "scanned_at": 9.0} for key in ("old", "evicted")}
+    assert ledger.sync_assets(found, older_than=started) == {"scanned": 2, "new": 0, "missing": 0}
+    assert ledger.asset("staged", "old") == {"binding_hash": "b", "bytes": 7, "scanned_at": 9.0, "state": "ready"}
+    assert ledger.asset("staged", "evicted")["state"] == "ready"
+    # evicted by a worker after the scan saw the directory: the scan's row is not merged back
+    ledger.put_asset("staged", "evicted", {"state": "evicted", "bytes": 0})
+    ledger.sync_assets({("staged", "evicted"): {"bytes": 7, "scanned_at": 10.0}}, older_than=time.time() - 60)
+    assert ledger.asset("staged", "evicted") == {"state": "evicted", "bytes": 0, "scanned_at": 9.0}
+
+
 def test_staged_last_used_comes_from_draws(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
     ledger.put_buffer("b", {})

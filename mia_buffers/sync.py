@@ -64,23 +64,24 @@ def _bytes(path: Path, known: dict | None) -> int:
 
 
 def _artifact_fields(report: Any) -> dict:
-    """The identity fields of a stage.json's `artifact` block, reduced to bounded typed values."""
+    """The identity fields of a stage.json's `artifact` block, reduced to bounded typed values. Only names present
+    and well-typed are returned, so a sync never merges blanks over what the worker wrote."""
     block = report.get("artifact") if isinstance(report, dict) else None
     if not isinstance(block, dict):
         return {}
     fields: dict[str, Any] = {
-        name: text(block.get(name), 200) for name in ("binding_hash", "harness_commit", "env_digest")
+        name: text(block[name], 200)
+        for name in ("binding_hash", "harness_commit", "env_digest")
+        if isinstance(block.get(name), str) and block[name]
     }
     voxel = block.get("voxel_size_nm")
-    fields["voxel_size_nm"] = (
-        {
-            text(axis, 10): float(size)
-            for axis, size in voxel.items()
-            if isinstance(size, int | float) and not isinstance(size, bool)
-        }
-        if isinstance(voxel, dict)
-        else {}
-    )
+    sizes = {
+        text(axis, 10): float(size)
+        for axis, size in (voxel.items() if isinstance(voxel, dict) else ())
+        if isinstance(size, int | float) and not isinstance(size, bool)
+    }
+    if sizes:
+        fields["voxel_size_nm"] = sizes
     return fields
 
 
@@ -109,7 +110,7 @@ def scan_assets(
             if (record_dir / "stage.json").is_file():
                 log.info("skipping %s: a pre-artifact stage.json directly under the record", record_dir)
                 continue
-            building += sorted(record_dir.glob(".building-*"))
+            building += sorted(path for path in record_dir.glob(".building-*") if path.is_dir())
             for artifact_dir in _children(record_dir) or []:
                 if not (artifact_dir / "stage.json").is_file():
                     continue

@@ -95,7 +95,11 @@ def test_scan_assets_finds_raw_and_artifact_dirs_and_reuses_sizes(tmp_path, capl
 def test_scan_assets_reduces_an_odd_stage_json(tmp_path):
     art = tmp_path / "staged" / "lk" / "rec" / "art"
     art.mkdir(parents=True)
-    (art / "stage.json").write_text(json.dumps({"artifact": {"binding_hash": ["x"], "voxel_size_nm": {"y": "big"}}}))
-    found = scan_assets(tmp_path / "raw", tmp_path / "staged", {})[0]
+    (art / "stage.json").write_text(
+        json.dumps({"artifact": {"binding_hash": ["x"], "harness_commit": "h", "voxel_size_nm": {"y": "big"}}})
+    )
+    (art.parent / ".building-art-job.log").write_text("a file, not a building directory")
+    found, building, _ = scan_assets(tmp_path / "raw", tmp_path / "staged", {})
     row = found[("staged", "art")]
-    assert row["binding_hash"] == "['x']" and row["voxel_size_nm"] == {}
+    assert row["harness_commit"] == "h" and building == []
+    assert not {"binding_hash", "env_digest", "voxel_size_nm"} & row.keys()  # absent or ill-typed: not emitted
