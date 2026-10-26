@@ -44,6 +44,7 @@ from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
+from .api import BufferConfig
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
@@ -85,6 +86,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"i\d+-e\d+")
+BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
@@ -361,6 +363,13 @@ class Activities:
             if row.in_pool
         ]
         patch = (spec.patch_for("2D") or {}).get("y") or 0
+        if plan.valid and spec.plan.auto_approve:  # no plan-review stage to write `planned`: the timeline needs it
+            await asyncio.to_thread(
+                best_effort,
+                lambda: registry.event(round_id, "planned", issue=issue, event_id=None, detail="auto-approved"),
+                f"planned event of {round_id}",
+                log,
+            )
         return PlanResult(
             plan.valid,
             plan.errors[:20],
@@ -600,6 +609,7 @@ class Activities:
         asset row says `staging` under it (best effort), at the final path read_stage publishes to."""
         staged = self._staged_dir(args.round_id, args.record)
         args.out = str(self._building_dir(args.round_id, args.record, args.rebuild))
+        Path(args.out).mkdir(parents=True, exist_ok=True)  # a mount must exist; the sweep may have taken it since
         job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: stage_job(self.cfg, args, snap))
         fields = {
             "state": "staging",
@@ -669,7 +679,7 @@ class Activities:
             fetched if type(fetched) is int and fetched >= 0 else 0,
             text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
         )
-        await self._record_assets(round_id, record, result)
+        await self._record_assets(round_id, record, result, rebuild > 0)
         return result
 
     def _artifact_block(self, round_id: str, record: str) -> dict:
@@ -691,12 +701,14 @@ class Activities:
         the published report: the build's, or the final directory's when that was there first. `replace` (a rebuild
         of a degraded pyramid): the final directory, broken though its stage.json says ok, is set aside first."""
         report["artifact"] = self._artifact_block(round_id, record)
-        write_atomic(building / "stage.json", json.dumps(report, indent=2))
+        write_atomic(building / "stage.json", json.dumps(report))  # compact: it carries ~150 KB of samples
         if replace and final.exists():  # for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
         try:
             os.rename(building, final)
         except OSError:
+            if not final.exists():  # not a lost race: the rename itself failed
+                raise
             published = _stage_json(final)
             if isinstance(published, dict) and published.get("ok") is True:
                 log.info("%s: %s was published already; reusing it, removing %s", record, final, building.name)
@@ -707,32 +719,38 @@ class Activities:
             os.rename(building, final)
         return report
 
-    async def _record_assets(self, round_id: str, record: str, result: StageResult) -> None:
+    async def _record_assets(self, round_id: str, record: str, result: StageResult, rebuild: bool = False) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
         input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
-        record's raw cache as files.json lists it, both just used."""
+        record's raw cache as files.json lists it, both just used. A failed build beside a published artifact (not
+        a rebuild of it) leaves that artifact's row as it was before submit marked it `staging`."""
         block, cache = self._artifact_block(round_id, record), self._cache_dir(record)
         binding = yaml.safe_load(self._binding_path(round_id, record).read_text())
         staged_dir, now, artifact = self._staged_dir(round_id, record), time.time(), block["id"]
-        staged = {
-            "record": record,
-            "levels_key": block["levels_key"],
-            "path": str(staged_dir),
-            "artifact": artifact,
-            "binding_hash": block["binding_hash"],
-            "harness_commit": block["harness_commit"],
-            "env_digest": block["env_digest"],
-            "voxel_size_nm": block["voxel_size_nm"],
-            "round": round_id,
-            "ok": result.ok,
-            "volumes": result.volumes,
-            "bytes_fetched": result.bytes_fetched,
-            "snippets_commit": str(binding.get("snippets_commit") or "") if isinstance(binding, dict) else "",
-            "state": "ready" if result.ok else "partial",
-            "bytes": await asyncio.to_thread(dir_bytes, staged_dir),
-            "last_used": now,
-            "job": None,
-        }
+        published = _stage_json(staged_dir)
+        if not result.ok and not rebuild and isinstance(published, dict) and published.get("ok") is True:
+            log.info("%s: the build failed; %s stays published and reusable", record, staged_dir)
+            staged: dict[str, Any] = {"state": "ready", "ok": True, "job": None, "last_used": now}  # undo `staging`
+        else:
+            staged = {
+                "record": record,
+                "levels_key": block["levels_key"],
+                "path": str(staged_dir),
+                "artifact": artifact,
+                "binding_hash": block["binding_hash"],
+                "harness_commit": block["harness_commit"],
+                "env_digest": block["env_digest"],
+                "voxel_size_nm": block["voxel_size_nm"],
+                "round": round_id,
+                "ok": result.ok,
+                "volumes": result.volumes,
+                "bytes_fetched": result.bytes_fetched,
+                "snippets_commit": str(binding.get("snippets_commit") or "") if isinstance(binding, dict) else "",
+                "state": "ready" if result.ok else "partial",
+                "bytes": await asyncio.to_thread(dir_bytes, staged_dir),
+                "last_used": now,
+                "job": None,
+            }
         raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
         del raw["state"]  # the fetch phase owns the raw state (it knows the stream urls); a stage updates the rest
         raw["last_used"] = now
@@ -1052,41 +1070,49 @@ class Activities:
     async def _keeper_buffers(self, report: KeeperReport, now: float, dry_run: bool) -> None:
         """Watch the ready and idle buffers of a workflow (id `i<issue>-e<event>`): a pyramid gone from disk signals
         `degraded` with its records, a ready buffer no consumer has seen for `idle_hours` signals `idle`, an idle one
-        older than `retire_after_days` signals `retire`. Dry run, or no Temporal client (the CLI): only reported."""
+        older than `retire_after_days`, with no consumer since it went idle, signals `retire`. A buffer that fails
+        (an odd config, buffer-api refusing its status) is an error entry; the next buffer is still watched. Dry
+        run, or no Temporal client (the CLI): only reported."""
+        for buffer in await asyncio.to_thread(self.registry.buffers):
+            latest = buffer.get("latest_event") or {}
+            if not (ROUND_RE.fullmatch(buffer["id"]) and latest.get("kind") in ("ready", "idle")):
+                continue
+            try:
+                await self._keeper_buffer(report, buffer, latest, now, dry_run)
+            except Exception as error:  # one buffer's failure must not stop the watch of the others
+                log.warning("keeper: buffer %s failed: %s", buffer["id"], error)
+                report.errors.append(text(f"buffers: {buffer['id']}: {error}", 500))
+
+    async def _keeper_buffer(self, report: KeeperReport, buffer: dict, latest: dict, now: float, dry_run: bool) -> None:
         from temporalio.service import RPCError, RPCStatusCode
 
-        registry = self.registry
-        for buffer in await asyncio.to_thread(registry.buffers):
-            buffer_id, latest, config = buffer["id"], buffer.get("latest_event") or {}, buffer["config"]
-            kind = latest.get("kind")
-            if not (ROUND_RE.fullmatch(buffer_id) and kind in ("ready", "idle")):
-                continue
-            signals: list[tuple[str, list[Any], str]] = []
-            missing = (await asyncio.to_thread(registry.status, buffer_id))["missing"]  # stats the pyramids
-            if missing:
-                records = sorted({volume.split("/", 1)[0] for volume in missing})
-                reason = "pyramid missing: " + ", ".join(missing)
-                signal = DegradedSignal(records, text(reason, 500), buffer_id)
-                signals.append(("degraded", [signal], ",".join(records)))
-            idle_s, age = float(config["idle_hours"]) * 3600, now - float(latest["at"])
-            seen = buffer.get("consumers_seen")
-            if kind == "ready" and age > idle_s and (seen is None or now - float(seen) > idle_s):
-                signals.append(("idle", [None, buffer_id], ""))  # no label event; the buffer it is about
-            if kind == "idle" and age > float(config["retire_after_days"]) * 86400:
-                signals.append(("retire", [None, buffer_id], ""))
-            workflow_id = self.cfg.workflow_id(_issue_of(buffer_id))
-            for name, args, detail in signals:
-                line = f"{name} {buffer_id} {detail}".rstrip()
-                if not dry_run and self.client is not None:
-                    try:
-                        await self.client.get_workflow_handle(workflow_id).signal(name, args=args)
-                    except RPCError as error:
-                        if error.status != RPCStatusCode.NOT_FOUND:
-                            raise
-                        log.info("keeper: no workflow %s for %s, %s not signalled", workflow_id, buffer_id, name)
-                        continue
-                    log.info("keeper: signalled %s", line)
-                report.signalled.append(line)
+        buffer_id, kind = buffer["id"], latest["kind"]
+        config = BufferConfig.model_validate(buffer["config"])  # a config stored before D gets D's defaults
+        signals: list[tuple[str, list[Any], str]] = []
+        missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]  # stats the pyramids
+        if missing:
+            records = sorted({volume.split("/", 1)[0] for volume in missing})
+            reason = "pyramid missing: " + ", ".join(missing)
+            signals.append(("degraded", [DegradedSignal(records, text(reason, 500), buffer_id)], ",".join(records)))
+        idle_s, at, seen = config.idle_hours * 3600, float(latest["at"]), buffer.get("consumers_seen")
+        if kind == "ready" and now - at > idle_s and (seen is None or now - float(seen) > idle_s):
+            signals.append(("idle", [None, buffer_id], ""))  # no label event; the buffer it is about
+        unused = seen is None or float(seen) < at  # no consumer since the idle event: nothing is training on it
+        if kind == "idle" and now - at > config.retire_after_days * 86400 and unused:
+            signals.append(("retire", [None, buffer_id], ""))
+        workflow_id = self.cfg.workflow_id(_issue_of(buffer_id))
+        for name, args, detail in signals:
+            line = f"{name} {buffer_id} {detail}".rstrip()
+            if not dry_run and self.client is not None:
+                try:
+                    await self.client.get_workflow_handle(workflow_id).signal(name, args=args)
+                except RPCError as error:
+                    if error.status != RPCStatusCode.NOT_FOUND:
+                        raise
+                    log.info("keeper: no workflow %s for %s, %s not signalled", workflow_id, buffer_id, name)
+                    continue
+                log.info("keeper: signalled %s", line)
+            report.signalled.append(line)
 
     def _job_finished(self, job_id: str) -> bool:
         """Whether csub says the job ended (or no longer knows it); a csub error counts as still running."""
@@ -1121,6 +1147,13 @@ class Activities:
             return  # the job finished and renamed it since the scan
         if modified + hold_s >= now:
             return
+        # a stage job writes deep inside its build, which leaves the build directory's own mtime old: spare a build
+        # whose artifact row says `staging` (the stale-builds step has already reset one whose job ended)
+        if building := BUILDING_DIR_RE.fullmatch(path.name):
+            row = await asyncio.to_thread(self.registry.asset, "staged", building[1])
+            if isinstance(row, dict) and row.get("state") == "staging":
+                log.info("keeper: %s is old but its artifact is staging: kept", path)
+                return
         if not dry_run:
             if not await asyncio.to_thread(evict_path, path, roots):
                 raise RuntimeError(f"could not remove {path}")

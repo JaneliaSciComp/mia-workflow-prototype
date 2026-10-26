@@ -203,6 +203,8 @@ async def test_plan_reads_the_registry_and_syncs_the_ref_on_demand(acts, server,
     row = next(row for row in json.loads(plan_text)["rows"] if row["id"] == U937)
     assert row["rule"] == "not prepared" and not row["admitted"]
     assert result.plan_hash == plan_hash(plan_text) and result.auto_approve is True
+    [planned] = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]  # no plan-review stage writes it
+    assert (planned["kind"], planned["issue"], planned["detail"]) == ("planned", 7, "auto-approved")
     await acts.plan(7, ROUND, pins)
     assert synced == [REF]  # synced once: the ref is in the registry now
     acts.registry = Registry("http://127.0.0.1:9")
@@ -855,8 +857,10 @@ async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, serve
     assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, ["zenodo.org"], 1)) == "j42"
     assert acts.registry.asset("raw", U937) == {"state": "fetching", "job": "j42"}
     stage_workspace = await acts.prepare_stage(7, ROUND, U937)
+    acts._building_dir(ROUND, U937).rmdir()  # the keeper's sweep took it between prepare and submit
     args = StageJobArgs(stage_workspace, ROUND, pins, U937, [], [1, 2, 4], 256, cache_writable=False)
     assert await acts.submit("k2", args) == "j42" and args.out == str(acts._building_dir(ROUND, U937))
+    assert acts._building_dir(ROUND, U937).is_dir()  # the job's `out` mount exists again
     row = acts.registry.asset("staged", staged_dir(acts, U937).name)
     assert row == {
         "state": "staging",
@@ -1111,6 +1115,7 @@ async def test_read_stage_publishes_by_rename_and_reuses_an_existing_artifact(ac
     staged_into(building)
     assert (await acts.read_stage(ROUND, U937)).ok
     assert not building.exists() and (final / "stage.json").is_file()
+    assert "\n" not in (final / "stage.json").read_text()  # compact: it carries the sampled values
     report = json.loads((final / "stage.json").read_text())
     binding = acts.cfg.paths.state_dir / "rounds" / ROUND / "bindings" / f"{U937}.yaml"
     assert report["artifact"] == {
@@ -1256,3 +1261,85 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
     report = KeeperReport()
     await acts._keeper_buffers(report, now, dry_run=False)
     assert report.signalled == expected
+
+
+async def test_publish_reraises_a_failed_rename_when_nothing_was_published(acts, server, monkeypatch):
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    staged_into(acts._building_dir(ROUND, U937))
+
+    def refuse(src, dst):
+        raise PermissionError(13, "read-only file system")
+
+    monkeypatch.setattr(acts_module.os, "rename", refuse)
+    with pytest.raises(PermissionError):
+        await acts.read_stage(ROUND, U937)
+    assert acts._building_dir(ROUND, U937).is_dir() and not staged_dir(acts, U937).exists()
+
+
+async def test_a_failed_build_beside_a_published_artifact_leaves_its_row(acts, server):
+    """Another round published the artifact (this one staged again while the registry was away): this build's
+    failure must not mark the published pyramid partial; submit's `staging` mark is undone."""
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    staged_into(acts._building_dir(ROUND, U937))
+    assert (await acts.read_stage(ROUND, U937)).ok
+    artifact = staged_dir(acts, U937).name
+    acts.registry.put_asset("staged", artifact, {"state": "staging", "ok": False, "job": "j9"})  # as submit marks it
+    await acts.prepare_stage(7, ROUND, U937)
+    staged_into(acts._building_dir(ROUND, U937), ok=False, errors=["boom"])
+    assert not (await acts.read_stage(ROUND, U937)).ok
+    row = acts.registry.asset("staged", artifact)
+    assert (row["state"], row["ok"], row["job"], row["volumes"]) == ("ready", True, None, 1)
+    await acts.prepare_stage(7, ROUND, U937, 1)  # a rebuild of a degraded pyramid that fails: partial, as before
+    staged_into(acts._building_dir(ROUND, U937, 1), ok=False)
+    assert not (await acts.read_stage(ROUND, U937, 1)).ok
+    assert acts.registry.asset("staged", artifact)["state"] == "partial"
+
+
+async def test_keeper_spares_an_old_build_whose_artifact_is_staging(acts, keeper_server):
+    registry, record_dir = keeper_server, acts.cfg.paths.staged_root / "p256-l1-2-4" / "rec"
+    catalog_not_due(acts)
+    stamp = time.time() - 49 * 3600
+    builds = {name: record_dir / f".building-{name * 16}-buf-7-i7-e11-stage-rec-0a1b2c3d" for name in "ab"}
+    for path in builds.values():
+        path.mkdir(parents=True)
+        os.utime(path, (stamp, stamp))
+    registry.put_asset("staged", "a" * 16, {"state": "staging"})  # its job still runs: no job id, never stale
+    registry.put_asset("staged", "b" * 16, {"state": "partial"})
+    report = await acts.keep()
+    assert report.errors == [] and report.removed_building == [str(builds["b"])]
+    assert builds["a"].is_dir() and not builds["b"].exists()
+
+
+async def test_keeper_watch_survives_a_pre_d_config_and_a_failing_buffer(acts, keeper_server, monkeypatch):
+    """A config stored before D has no idle_hours; a buffer whose status fails is an error entry; the buffers
+    after both are still watched. An idle buffer a consumer used since it went idle is not retired."""
+    from test_buffers_api import CFG, CONSUMER
+
+    registry = keeper_server
+    for buffer_id, kinds in (("i2-e3", ["ready"]), ("i4-e5", ["ready"]), ("i6-e7", ["ready", "idle"])):
+        registry.request("PUT", f"/buffers/{buffer_id}", json={**CFG, "idle_hours": 1, "retire_after_days": 0.01})
+        for kind in kinds:
+            registry.event(buffer_id, kind)
+    registry.request("POST", "/buffers/i6-e7/consumers", json=CONSUMER)  # after its idle event
+    listed, status = registry.buffers, registry.status
+
+    def pre_d(self=None):
+        rows = listed()
+        for key in ("idle_hours", "retire_after_days", "recipe", "plan_hash", "auto_approve"):
+            rows[0]["config"].pop(key)
+        return rows
+
+    def failing(buffer_id):
+        if buffer_id == "i4-e5":
+            raise RegistryError(500, "boom")
+        return status(buffer_id)
+
+    monkeypatch.setattr(registry, "buffers", pre_d)
+    monkeypatch.setattr(registry, "status", failing)
+    acts.client = FakeTemporal()
+    report = KeeperReport()
+    await acts._keeper_buffers(report, time.time() + 30 * 86400, dry_run=False)
+    assert report.signalled == ["idle i2-e3"]  # 72 h by default; i6-e7 was used after it went idle
+    assert report.errors == ["buffers: i4-e5: boom"]
