@@ -35,6 +35,7 @@ from mia_buffers.models import (
 from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
 from mia_data.models import JobDone, LabelEvent
+from mia_data.publish import reindex
 
 PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
 PLAN = PlanResult(
@@ -145,7 +146,7 @@ class Mocks:
         async def read_binding(round_id: str, record: str) -> BindingInfo:
             rec("read_binding", record)
             if record in self.unbound and record not in self.bound:
-                return BindingInfo(False, errors=[f"no binding at /s/{record}: the dataset is not data:done"])
+                return BindingInfo(False, errors=[f"no prepared dataset at /s/{record}: the dataset is not data:done"])
             manual = next(d.manual for d in self.plan.pool if d.record == record)
             default = (
                 BindingInfo(True, f"/s/{record}.yaml", "bh", [], [[f"manual://{record}/a.zip", "a.zip"]])
@@ -746,6 +747,8 @@ async def test_poll_signals_dataset_updates(tmp_path):
     assert await run_poll(acts) == ["dataset #2 bcss ineligible"]  # u937's issue is still in progress
     (cfg.paths.storage_root / "lm-u937").mkdir(parents=True)
     (cfg.paths.storage_root / "lm-u937" / "binding.yaml").write_text("record: u937\n")
+    assert await run_poll(acts) == []  # a bare binding.yaml is not prepared (spec §4.2)
+    reindex(cfg.paths.storage_root / "lm-u937", {})  # mia-data's publish writes the manifest for that binding
     assert await run_poll(acts) == ["dataset #2 u937 binding"]
     assert client.signals == [
         (cfg.workflow_id(2), "dataset_update", ("bcss", "ineligible")),

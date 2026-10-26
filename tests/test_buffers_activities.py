@@ -24,6 +24,7 @@ from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment
 from mia_core.registry import Registry, RegistryError
 from mia_data.catalog import dataset_folder
+from mia_data.publish import reindex
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
 REF = "c" * 40
@@ -108,6 +109,7 @@ def write_binding(acts, record_id: str, urls: list[str], snippet: str = "tiff-zi
         "reasons": ["test"],
     }
     (folder / "binding.yaml").write_text(yaml.safe_dump(binding))
+    reindex(folder, {})  # as mia-data's publish does: manifest.json records the binding it was verified with
     return folder / "binding.yaml"
 
 
@@ -318,11 +320,25 @@ async def test_read_binding_manual_when_host_not_allowed(acts):
 async def test_read_binding_missing_or_wrong_record(acts):
     await acts.plan(7, ROUND, await admitted(acts))
     info = await acts.read_binding(ROUND, U937)
-    assert not info.found and info.errors and "no binding at" in info.errors[0]
+    assert not info.found and info.errors and "no prepared dataset at" in info.errors[0]
     path = write_binding(acts, U937, ["https://zenodo.org/a.tif"])
     path.write_text(path.read_text().replace(f"record: {U937}", "record: other"))
+    reindex(path.parent, {})
     info = await acts.read_binding(ROUND, U937)
     assert not info.found and "names record 'other'" in info.errors[0]
+
+
+async def test_read_binding_needs_the_manifest_mia_data_published_for_it(acts):
+    """Spec §4.2: a binding.yaml alone (placed by hand, or edited after the crops were verified) is not prepared."""
+    await acts.plan(7, ROUND, await admitted(acts))
+    path = write_binding(acts, U937, ["https://zenodo.org/a.tif"])
+    (path.parent / "manifest.json").unlink()
+    info = await acts.read_binding(ROUND, U937)
+    assert not info.found and "matching manifest.json" in info.errors[0]
+    reindex(path.parent, {})
+    assert (await acts.read_binding(ROUND, U937)).found
+    path.write_text(path.read_text() + "# edited after verification\n")
+    assert not (await acts.read_binding(ROUND, U937)).found
 
 
 async def test_verify_drop_moves_files_and_writes_manifest(acts):

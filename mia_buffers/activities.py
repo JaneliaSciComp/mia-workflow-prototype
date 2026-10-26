@@ -35,6 +35,7 @@ from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, snapshot
 from mia_data.models import JobDone
+from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
@@ -391,10 +392,10 @@ class Activities:
         if stage == "ineligible" or "licence-excluded" in names:
             return DatasetIssue(number, "ineligible", False, folder=folder)
         if stage == "done":
-            path = self.cfg.paths.storage_root / folder / "binding.yaml"
+            path = self.cfg.paths.storage_root / folder
             note = (
-                f"the dataset issue is `data:done` but there is no binding at `{path}`: run the dataset again "
-                "(add `data:go` on it) so mia-data publishes the binding"
+                f"the dataset issue is `data:done` but `{path}` has no binding.yaml with a matching manifest.json: "
+                "run the dataset again (add `data:go` on it) so mia-data publishes both"
             )
             return DatasetIssue(number, stage, False, note, folder)
         if DATA_GO in names or stage in DATA_IN_PROGRESS:
@@ -442,19 +443,25 @@ class Activities:
     @mia_permanent_errors
     async def read_binding(self, round_id: str, record: str) -> BindingInfo:
         """The dataset's approved binding from <storage_root>/<dataset folder>/binding.yaml (mia-data's output,
-        trusted), copied into the round dir. Hosts the stage job needs, or the files a human must drop when a
-        host is not allowed to jobs or a URL is manual://."""
+        trusted; prepared means a manifest.json published for that binding), copied into the round dir. Hosts the
+        stage job needs, or the files a human must drop when a host is not allowed to jobs or a URL is manual://."""
         try:
             folder = dataset_folder(self._record(round_id, record), record)
         except ValueError as error:
             return BindingInfo(False, errors=[str(error)])
-        source = self.cfg.paths.storage_root / folder / "binding.yaml"
-        if not source.is_file():
-            return BindingInfo(False, errors=[f"no binding at {source}: the dataset is not data:done"])
+        dataset_dir = self.cfg.paths.storage_root / folder
+        source = dataset_dir / "binding.yaml"
+        if (row := prepared_row(dataset_dir)) is None:  # spec §4.2: the registry's rule, a hand-placed binding is not
+            return BindingInfo(
+                False,
+                errors=[
+                    f"no prepared dataset at {dataset_dir}: mia-data publishes binding.yaml with a matching manifest.json"
+                    " (the dataset is not data:done)"
+                ],
+            )
+        if row["record"] != record:
+            return BindingInfo(False, errors=[f"{source} names record {row['record']!r}, not {record}"])
         binding = yaml.safe_load(source.read_text())
-        if not isinstance(binding, dict) or binding.get("record") != record:
-            named = binding.get("record") if isinstance(binding, dict) else None
-            return BindingInfo(False, errors=[f"{source} names record {named!r}, not {record}"])
         urls = [
             str(url)
             for array in (binding.get("raw") or []) + (binding.get("labels") or [])

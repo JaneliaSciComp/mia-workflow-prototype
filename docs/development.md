@@ -187,7 +187,8 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    comment, and a new `buffer:go` (after editing the spec) plans again.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<issue>-e<event>`). Per dataset, in
    parallel (`sourcing.parallel` stage jobs at a time): the binding is read from
-   `<storage_root>/<dataset folder>/binding.yaml`; a stage job runs the harness's `stage` with the raw cache
+   `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data published for
+   it (spec §4.2, `mia_data.publish.prepared_row`, the registry's rule too); a stage job runs the harness's `stage` with the raw cache
    `raw_root/<record>/` mounted read-write and the binding's hosts allowed, writing the pyramid to
    `staged_root/<levels key>/<record>/` (`p256-l1-2-4` for patch 256, levels 1,2,4); then every volume is
    registered. `read_stage` registers what the job left with buffer-api's registry (`PUT assets/staged/<staged
@@ -215,7 +216,8 @@ run as the same GitHub App, so it is mia-data's own login) so its poller accepts
 no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
 `record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.
 
-**The hand-off.** When `read_binding` finds no `<storage_root>/<dataset folder>/binding.yaml`, the worker's
+**The hand-off.** When `read_binding` finds no prepared `<storage_root>/<dataset folder>/` (a bare `binding.yaml`
+placed by hand does not count), the worker's
 `nudge_dataset` looks the record up in the datasets repo by mia-data's marker (`<!-- mia-data:record=<id> -->`),
 opens the issue if there is none (mia-data's usual body, pinned to the buffer's catalog ref) and adds `data:go`
 unless the issue is already in progress (`data:matching … cropping`), `data:done` or `data:ineligible`. The dataset

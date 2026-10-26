@@ -5,7 +5,7 @@
 - for issues in `buffer:sourcing` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
   directory holds a file gets a `dropped` signal once that directory's listing has been stable for a whole poll
   interval (a file still being copied grows between passes), and once per change of it;
-- for the same issues, a dataset waiting on mia-data gets a `dataset_update` signal when its binding appears
+- for the same issues, a dataset waiting on mia-data gets a `dataset_update` signal when its folder is prepared
   under storage_root (`binding`) or its dataset issue is labelled `data:ineligible` (`ineligible`), once each.
 
 Runs as the `poll` activity and uses the activity object's clients and helpers.
@@ -18,6 +18,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from mia_data.poll import deliver_label
+from mia_data.publish import prepared_row
 
 from .config import HUMAN_LABELS
 from .models import BufferState
@@ -106,7 +107,7 @@ async def notice_datasets(activities: Activities, number: int, ineligible: dict[
         if dataset.status != "waiting-dataset":
             continue
         outcome = None
-        if dataset.folder and (cfg.paths.storage_root / dataset.folder / "binding.yaml").is_file():
+        if dataset.folder and prepared_row(cfg.paths.storage_root / dataset.folder) is not None:  # spec §4.2
             outcome = "binding"
         elif dataset.issue is not None and dataset.issue in await _ineligible_issues(activities, ineligible):
             outcome = "ineligible"

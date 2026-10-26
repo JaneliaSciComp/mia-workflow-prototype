@@ -251,8 +251,10 @@ the trusted one from the issue marker, never from the record body. mia-data ther
 ### 4.2 Readiness
 
 A dataset is **prepared** when `storage_root/<folder>/binding.yaml` exists with a `manifest.json` whose
-`binding.sha256` matches it. That is exactly what `read_binding` checks today; the registry row is the index
-of it. `evaluation` is **not** required for `prepared` in this version: the planner falls back to the static
+`binding.sha256` matches it. One function decides it, `mia_data.publish.prepared_row`: the worker's `read_binding`
+and the registry's `datasets sync` both call it, so a `binding.yaml` placed by hand without crops is not prepared
+anywhere, and the buffer opens the dataset's mia-data issue instead (before milestone B `read_binding` accepted a
+bare `binding.yaml`; the registry row is the index of the same rule). `evaluation` is **not** required for `prepared` in this version: the planner falls back to the static
 tables (`mia_buffers/assume.py`) when it is null and the plan row says so, as it does now. When the evaluation
 step exists, a buffer spec may demand it (`select.where.evaluated: true`).
 
