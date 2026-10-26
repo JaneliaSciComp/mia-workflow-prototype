@@ -415,6 +415,17 @@ async def test_register_dataset_against_live_service(acts, server):
     assert httpx.get(f"{server}/assets/staged/{artifact}").json()["refs"] == [ROUND]
 
 
+async def test_register_dataset_raises_when_buffer_api_is_down(acts, server):
+    """An outage is retried by Temporal, not turned into refused volumes (which would fail the dataset)."""
+    await planned_and_bound(acts)
+    write_stage_json(staged_dir(acts, U937))
+    await acts.create_buffer(ROUND, ROUND)
+    acts.registry = Registry("http://127.0.0.1:9")
+    with pytest.raises(RegistryError) as error:
+        await acts.register_dataset(ROUND, U937, ROUND)
+    assert error.value.status is None
+
+
 async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):
     """Review (milestone 4): 30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
     1 MiB cap the generic job-JSON reader uses; read_stage and register_dataset must still read it."""

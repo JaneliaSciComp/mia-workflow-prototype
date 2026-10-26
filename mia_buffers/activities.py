@@ -662,6 +662,8 @@ class Activities:
             try:
                 await asyncio.to_thread(self.registry.request, "PUT", path, json=body)
             except RegistryError as error:
+                if error.status is None or error.status == 401 or error.status >= 500:
+                    raise  # buffer-api down, our token refused, or its own fault: retry, never refuse the volume
                 result.refused[volume_id] = text(error.message, 500)
             else:
                 result.registered.append(volume_id)
