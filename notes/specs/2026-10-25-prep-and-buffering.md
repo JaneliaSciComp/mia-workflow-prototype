@@ -654,6 +654,29 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 | F | the page: datasets with YAML and issue links, buffers, cache, preparation views | the lead composes a 2D gray buffer on the page, opens the issue from it, and follows it to `ready` without opening the issue again |
 | G | evaluation step | its own spec and plan; the row schema in §4.3 is the contract |
 
+**Built in C (2026-10-26).** Deviations from this spec and rulings made during the build:
+
+- Every workflow change sits behind `workflow.patched` (`c-cache`, `c-raw-lock`) because a live round existed;
+  old replay fixtures stay, `*_c.json` are new.
+- `PUT /assets/<kind>/<key>` merges fields into the row, like `PUT /datasets`.
+- Staged `last_used` is set from `draws` during `POST /sync/assets`, not by an hourly thread; it is
+  set at first scan only.
+- `POST /sync/assets` skips a missing or empty root and reports it under `skipped`.
+- A zip member is cached under its own key; "a zip's members fetch the zip once" is not built.
+- Non-stream datasets, and dropped ones, stage offline; only a dataset with a `stream` URL keeps the cache read-write.
+- Stream URLs are excluded from a raw row's readiness and recorded on the row.
+- `gc` is `assets sync --dry-run`; there is no separate command.
+- The asset list stays at `GET /assets/<kind>` with `?state=&record=` and a `bytes` total.
+- Quotas are per root, so "staged before raw" (§5.4) is not implemented.
+- `waiting-lock`, `fetching` and `blocked` are `DatasetStatus.status` values only; the status board is D.
+- The daily catalog sync reuses `cmd_catalog_sync`; its mark is `<state_dir>/keeper/catalog-synced-at`.
+- Lock files are created by `os.link` of a written temp (never empty); a stale takeover verifies
+  after the rename; `release` is rename-then-check.
+- The keeper takes the record's lock before evicting its assets (closes the §5.4 gap).
+- The lock is released while a dataset is `blocked` (§5.2), and a dataset that becomes
+  blocked after the day limit is dropped.
+
+
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 
 ## 11. Open questions (defaults in bold)

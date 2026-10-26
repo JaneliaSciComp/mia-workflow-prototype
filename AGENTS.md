@@ -28,6 +28,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   files are deprecated. `paths.local_root` and a managed `temporal.state_dir` must be host-local disk.
 - **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer routes needs
   `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx call.
+- **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
+  `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). Hand-run
+  harness commands bypass it.
+- **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
+  `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

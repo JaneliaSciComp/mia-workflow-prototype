@@ -54,14 +54,14 @@ network:
 service:                                  # the buffer-api (`mia-buffers serve`) and its clients
   url: http://host.example.org:8765       # the port is required
   token_file: ~/.config/mia/service-token # chmod 600
-quota:                                    # worker-side eviction of the shared caches; 0 = unlimited
-  raw_bytes: 0                            # bytes
-  staged_bytes: 0
-  headroom_bytes: 200e9                   # evict down to quota minus this
-  hold_hours: 48                          # an asset unused this long is evictable
-keeper:                                   # buffer-api's housekeeping (milestone C adds quota and eviction)
-  minutes: 30                             # SQLite backup cadence; the keeper pass in milestone C
-  catalog_sync_hours: 24
+quota:                                    # the buffers worker's keeper evicts free assets per root; 0 = unlimited
+  raw_bytes: 0                            # bytes under paths.raw_root; 0 = unlimited
+  staged_bytes: 0                         # bytes under paths.staged_root; 0 = unlimited
+  headroom_bytes: 200e9                   # a pass over quota evicts until usage is under quota minus this
+  hold_hours: 48                          # an asset unused this long is evictable; older .building-* dirs are removed
+keeper:
+  minutes: 30                             # SQLite backup cadence and the MiaCacheKeeper schedule (mia-buffers schedule)
+  catalog_sync_hours: 24                  # the keeper syncs the catalog's main head when older than this
 services:                                 # per service: app + the sections that differ, in the app's own shape
   autodev:
     app: autodev
