@@ -24,6 +24,7 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
             "storage_root": str(tmp_path / "storage"),
             "raw_root": str(tmp_path / "raw"),
             "staged_root": str(tmp_path / "staged"),
+            "local_root": str(tmp_path / "local"),
         },
         "harness": {"dir": str(harness)},
         "service": {"url": "http://127.0.0.1:8765"},

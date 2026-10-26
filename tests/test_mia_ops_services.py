@@ -386,6 +386,7 @@ def test_mia_buffers_app_mounts(tmp_path):
         ("--ro", cfg.paths.storage_root),
         ("--rw", cfg.paths.raw_root),
         ("--rw", cfg.paths.staged_root),
+        ("--rw", cfg.paths.local_root / "locks"),
     ]
 
 

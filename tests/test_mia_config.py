@@ -94,7 +94,7 @@ def test_namespace_defaults_to_the_app_under_a_shared_temporal_section(tmp_path,
 
 
 def test_local_root_and_service_are_optional(tmp_path):
-    cfg = make_cfg(tmp_path)
+    cfg = make_cfg(tmp_path, paths={"local_root": None})
     assert cfg.paths.local_root is None and cfg.service is None
 
 

@@ -17,6 +17,7 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
             "state_dir": str(tmp_path / "state"),
             "work_root": str(tmp_path / "work"),
             "storage_root": str(tmp_path / "storage"),
+            "local_root": str(tmp_path / "local"),
         },
         "harness": {"dir": str(harness)},
     }

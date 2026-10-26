@@ -97,7 +97,7 @@ def _harness_bin(cfg, mode=0o755):
 
 def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys):
     _fake_env(monkeypatch, ["*"])
-    for d in ("state", "work", "storage"):
+    for d in ("state", "work", "storage", "local"):
         (tmp_path / d).mkdir()
     cfg = make_cfg(tmp_path)
     _harness_bin(cfg)
@@ -105,7 +105,7 @@ def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
     out = capsys.readouterr().out.split("\n")
-    assert [line[:3] for line in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
+    assert [line[:3] for line in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert "github snippets" in out[1] and "RuntimeError" in out[1]
 
 

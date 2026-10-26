@@ -15,7 +15,6 @@ does, and every builder then refuses (PinMoved).
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import re
@@ -32,6 +31,7 @@ import yaml
 
 from autodev.gitops import GitError, Mirror, git
 from autodev.jobs import JobSpec
+from mia_core.locks import LockDir
 
 from .binding import hosts, missing_hosts, record_urls
 from .seed import ID_RE
@@ -111,14 +111,13 @@ def archive_snapshot(
     """`paths` of the repository behind `git_url` at commit `sha`, extracted once and read-only at `dest`.
 
     The bare mirror `state_dir/mirror/<mirror>` is fetched only when it lacks `sha`; concurrent callers share one
-    extraction through a lock file beside `dest`. mia-buffers uses this for the catalog at a spec's `catalog.ref`."""
+    extraction through a lock file on the local root. mia-buffers uses this for the catalog at a spec's `catalog.ref`."""
     if not SHA_RE.fullmatch(sha):
         raise ValueError(f"not a full commit SHA: {sha!r}")
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest.with_name(f".{sha}.lock"), "w") as lock:  # one fetch + extract per SHA at a time
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with lock_dir(cfg).hold("snapshot", sha, _lock_owner(cfg), ttl_s=900, timeout_s=3600):  # one per sha at a time
         if dest.exists():
             return dest
         repo = Mirror(cfg.paths.state_dir / "mirror" / mirror, git_url, tokens)
@@ -163,6 +162,17 @@ def archive_snapshot(
         return dest
 
 
+def lock_dir(cfg: Config) -> LockDir:
+    """The lock files on this host's local disk: `<paths.local_root>/locks/<kind>/<key>`."""
+    if cfg.paths.local_root is None:
+        raise RuntimeError("paths.local_root is not set: locks need host-local disk")
+    return LockDir(cfg.paths.local_root / "locks")
+
+
+def _lock_owner(cfg: Config) -> str:
+    return f"{cfg.deployment} pid {os.getpid()}"
+
+
 def _env_digest(cfg: Config) -> str:
     return hashlib.sha256((cfg.harness.dir / "harness" / "pixi.lock").read_bytes()).hexdigest()
 
@@ -185,8 +195,9 @@ def harness_snapshot(cfg: Config, commit: str) -> Path:
     if dest.exists():
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest.with_name(f".{commit}.lock"), "w") as lock:  # one extract per commit at a time
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with lock_dir(cfg).hold(
+        "snapshot", commit, _lock_owner(cfg), ttl_s=900, timeout_s=3600
+    ):  # one per commit at a time
         if dest.exists():
             return dest
         tmp = dest.with_name(f".{commit}.tmp")
