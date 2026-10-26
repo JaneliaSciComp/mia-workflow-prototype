@@ -729,10 +729,14 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 
 - Patch marker `e-prep` on the one `MiaBuffer` change: a not-found binding fails the dataset instead of nudging and
   waiting. `dataset_update` and `_await_dataset` stay for pre-E runs.
-- A prep issue's records are the explicit `records:` list or the buffer spec's `select` block run over the registry's
-  records at `catalog.ref` (selection only: no fit, no weights); the spec adds `timeout_days` (default 14).
+- A prep issue's records are the explicit `records:` list or the buffer spec's `select` block run over the git
+  catalog snapshot at `catalog.ref`, not the registry (selection only: no fit, no weights); the spec adds
+  `timeout_days` (default 14). At most 200 records per request (a `# ponytail:`; split a larger one).
 - Progress is read from the registry (`GET /datasets`) on a backoff, `poll_minutes` doubling to 30 minutes; a record
-  settles when `prepared`, `ineligible` or `needs-human`. `prep:done` needs all settled and none `needs-human`.
+  settles when `prepared`, `ineligible` or `needs-human`. `prep:done` needs all settled and none `needs-human`;
+  `prep:needs-human` is reported when the request settles or times out, not when a record turns `needs-human`.
+- A failed nudge (outcome `unknown`, the error as its note) and a `done-unpublished` record settle as `needs-human`
+  at once and the rest are still followed; a failed outcomes comment is logged and the request goes on.
 - `evaluate.enabled: false` is a switch in mia-data's config only; no evaluate job is built.
 - Workflow id `mia-buffers/<buffers_repo>/prep-<issue>`, round id `p<issue>-e<event>`; `ROUND_RE` accepts `p` ids.
 - The outcomes comment shows the dataset issue as `<datasets repo>#<n>`, and a registry `needs-human` row is an outcome.

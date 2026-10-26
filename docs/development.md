@@ -328,12 +328,14 @@ schema_version: 1
 kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
-select: {...}                   # the buffer spec's select block, run over the registry's records at catalog.ref
+select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
 timeout_days: 14                # optional, default 14
 ```
 
-A `select` only selects: no fit, no weights. `PrepSpec` in `mia_buffers/spec.py` is the model. An id that is not in
-the catalog at `ref`, or a `select` that admits nothing, ends the request in `prep:needs-human`.
+A `select` only selects: no fit, no weights; it reads the catalog's records at `ref`, not the registry.
+`PrepSpec` in `mia_buffers/spec.py` is the model. An id that is not in the catalog at `ref`, a `select` that admits
+nothing, or more than 200 records (`MAX_PREP_RECORDS`, a `# ponytail:`: split a larger request) ends the request in
+`prep:needs-human` at once.
 
 **Labels.** `prep:go` (human) starts `MiaPrep`; the workflow owns the rest. `prep:requested`: the records are admitted
 and handed to mia-data. `prep:done`: every record is `prepared` or `ineligible`. `prep:needs-human`: the request
@@ -344,10 +346,13 @@ creates all four.
 `needs-human` settles the record without touching GitHub. Otherwise it opens the mia-data issue with `data:go` (or
 nudges the open one; two requests for one record share one issue). One comment lists `record | outcome | issue` with
 the outcomes `opened`, `nudged`, `in-progress`, `done-unpublished`, `ineligible`, `prepared` and
-`needs-human`; the issue column is `<datasets repo>#<n>`. The workflow then polls
+`needs-human`, and `unknown` for a nudge that failed (its error is the note); the issue column is
+`<datasets repo>#<n>`, from the registry row for a record settled there. A failed nudge and a `done-unpublished`
+record settle as `needs-human` at once (a human must act either way); the others are still followed, and a failed
+comment is only logged (the outcomes stay in the workflow's state). The workflow then polls
 `GET /datasets` on a backoff (`poll_minutes` doubling to 30 minutes). A record settles when its row is `prepared`, `ineligible` or `needs-human`. The request ends `prep:done` when
-all records are settled and none is `needs-human`; it ends `prep:needs-human` when any record is `needs-human`, or when
-`timeout_days` pass with records unsettled.
+all records are settled and none is `needs-human`. Otherwise it ends `prep:needs-human`, but only once every record
+has settled or `timeout_days` have passed: a `needs-human` record is reported then, not when it turns so.
 
 **A busy `prep:go`.** A second `prep:go` while a request runs is refused with the busy comment, but only after the
 next poll, up to 30 minutes later (a `# ponytail:` in `MiaPrep`). Add it again once the issue shows a final stage.
@@ -366,8 +371,9 @@ gone); `dataset_update` and `_await_dataset` stay in the file for runs recorded 
 exists, and setting it to true does nothing yet.
 
 **Restart.** Run `init-labels` for the `prep:*` labels, then restart the worker (it registers `MiaPrep`) and the
-poller. `prep_history.json` and `buffer_history_e.json` are the new replay fixtures; the older buffer fixtures are
-untouched.
+poller. `prep_history.json` and `buffer_history_e.json` are the new replay fixtures, and `buffer_history_pre_e.json`
+pins the pre-E `waiting-dataset` path (recorded with `_prep_requests` patched off, replayed with the real one); the
+older buffer fixtures are untouched.
 
 ## Running a buffer from an issue (milestone 3)
 

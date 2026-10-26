@@ -75,6 +75,8 @@ RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
 PREP_GO = "prep:go"
 PREP_SETTLED = ("prepared", "ineligible", "needs-human")  # registry states a preparation request stops following
+# nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
+PREP_HUMAN = ("done-unpublished", "unknown")
 
 
 class RoundFailed(Exception):
@@ -1303,12 +1305,22 @@ class MiaPrep:
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )
         await self._stage("requested")
+        why: dict[str, str] = {}  # records settled as needs-human at the nudge -> what the nudge said
         for record in pins.records:  # one at a time: each may open an issue in the datasets repo
-            outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
+            try:
+                outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
+            except ActivityError as error:  # this record alone: an unclear catalog record, a refused issue
+                outcome = PrepOutcome(record, "unknown", note=error_message(error))
             state.outcomes.append(outcome)
             if outcome.outcome in PREP_SETTLED:
                 state.settled[record] = outcome.outcome
-        await self._act("comment_prep", state.issue, state.round_id, state.outcomes)
+            elif outcome.outcome in PREP_HUMAN:  # mia-data will not get to it without a human
+                state.settled[record] = "needs-human"
+                why[record] = outcome.outcome + (f": {outcome.note}" if outcome.note else "")
+        try:  # best effort: the outcomes stay in the state, and the final stage names what needs a human
+            await self._act("comment_prep", state.issue, state.round_id, state.outcomes)
+        except ActivityError as error:
+            workflow.logger.error("issue #%d: could not post the outcomes: %s", state.issue, error_message(error))
         poll_minutes = (await self._act("limits", result_type=SourcingLimits)).poll_minutes
         deadline, tries = started + timedelta(days=pins.timeout_days), 0
         last: dict[str, str] = {}  # the latest registry state of each unsettled record
@@ -1324,7 +1336,11 @@ class MiaPrep:
         stuck = [record for record in pins.records if state.settled.get(record, "") not in ("prepared", "ineligible")]
         if not stuck:
             return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
-        humans = [f"`{record}`" for record in stuck if state.settled.get(record) == "needs-human"]
+        humans = [
+            f"`{record}`" + (f" ({why[record]})" if record in why else "")
+            for record in stuck
+            if state.settled.get(record) == "needs-human"
+        ]
         waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
         detail = "; ".join(
             ([f"needs a human on its dataset issue: {', '.join(humans)}"] if humans else [])

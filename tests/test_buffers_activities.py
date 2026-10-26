@@ -1394,6 +1394,14 @@ async def test_prep_admit_refuses_unknown_records(acts):
     assert error.value.non_retryable and U937 not in str(error.value)
 
 
+async def test_prep_admit_refuses_too_many_records(acts, monkeypatch):
+    monkeypatch.setattr(acts_module, "MAX_PREP_RECORDS", 1)
+    prep_issue(acts, records=[U937, BCSS])
+    with pytest.raises(ApplicationError, match="names 2 records, more than 1") as error:
+        await acts.prep_admit(8, "21")
+    assert error.value.non_retryable
+
+
 async def test_prep_admit_selects_records_with_a_select_block(acts):
     select = yaml.safe_load(spec_text())["select"]
     prep_issue(acts, select=select, timeout_days=3)
@@ -1421,8 +1429,8 @@ async def test_prep_nudge_maps_the_dataset_issue(acts):
     done = await acts.prep_nudge(PREP_ROUND, U937)
     assert (done.outcome, done.issue) == ("done-unpublished", 5) and "binding.yaml" in done.note
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    acts.registry.put_dataset(BCSS, state="ineligible")
-    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "ineligible")
+    acts.registry.put_dataset(BCSS, state="ineligible", issue=6)  # settled in the registry: its row names the issue
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "ineligible", 6)
 
 
 async def test_prep_status_reads_the_registry(acts):

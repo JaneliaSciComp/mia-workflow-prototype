@@ -1724,11 +1724,22 @@ class PrepMocks:
     """The activities MiaPrep calls, recorded; `statuses` gives each record's prep_status answers in turn (the last
     repeats; default `unprepared`)."""
 
-    def __init__(self, records=("a", "b", "c"), outcomes=None, statuses=None, admit_error="", status_error="", days=1):
+    def __init__(
+        self,
+        records=("a", "b", "c"),
+        outcomes=None,
+        statuses=None,
+        admit_error="",
+        status_error="",
+        days=1,
+        nudge_errors=None,
+        comment_error="",
+    ):
         self.calls: list[tuple[str, tuple]] = []
         self.days = days  # the request's timeout_days
         self.records, self.outcomes, self.statuses = list(records), outcomes or {}, statuses or {}
         self.admit_error, self.status_error = admit_error, status_error
+        self.nudge_errors, self.comment_error = nudge_errors or {}, comment_error  # record -> its nudge's error
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -1751,11 +1762,15 @@ class PrepMocks:
         @activity.defn(name="prep_nudge")
         async def prep_nudge(round_id: str, record: str) -> PrepOutcome:
             rec("prep_nudge", round_id, record)
+            if record in self.nudge_errors:
+                raise ApplicationError(self.nudge_errors[record], non_retryable=True)
             return self.outcomes.get(record, PrepOutcome(record, "nudged", 5))
 
         @activity.defn(name="comment_prep")
         async def comment_prep(issue: int, round_id: str, outcomes: list[PrepOutcome]) -> None:
             rec("comment_prep", round_id, outcomes)
+            if self.comment_error:
+                raise ApplicationError(self.comment_error, non_retryable=True)
 
         @activity.defn(name="prep_status")
         async def prep_status(records: list[str]) -> dict[str, str]:
@@ -1824,7 +1839,7 @@ def prep_round():
             "b": PrepOutcome("b", "prepared"),
             "c": PrepOutcome("c", "in-progress", 6),
         },
-        statuses={"a": ["unprepared", "prepared"], "c": ["preparing", "ineligible"]},
+        statuses={"a": ["unprepared", "prepared"], "c": ["in-progress", "ineligible"]},
     )
 
 
@@ -1850,7 +1865,7 @@ async def test_prep_round_opens_nudges_and_closes_done(env):
 async def test_prep_needs_human_on_timeout(env):
     m = PrepMocks(
         outcomes={"c": PrepOutcome("c", "needs-human", 6)},
-        statuses={"a": "prepared", "b": "preparing"},
+        statuses={"a": "prepared", "b": "in-progress"},
         days=SHORT_DAYS,
     )  # b never settles: still preparing at the day limit
     async with prep_started(env, m) as h:
@@ -1858,7 +1873,7 @@ async def test_prep_needs_human_on_timeout(env):
         state = await h.query(workflows.MiaPrep.status)
     detail = m.of("set_prep_stage")[-1][1]
     assert m.stages == ["requested", "needs-human"] and "`b`" in detail and "`c`" in detail and "`a`" not in detail
-    assert "preparing" in detail and state.settled == {"a": "prepared", "c": "needs-human"}
+    assert "in-progress" in detail and state.settled == {"a": "prepared", "c": "needs-human"}
 
 
 async def test_prep_registry_outage_ends_needs_human(env):
@@ -1875,6 +1890,34 @@ async def test_prep_admit_error_is_needs_human(env):
         await prep_settled(h, m, "needs-human")
     assert m.stages == ["needs-human"] and "records not in the catalog" in m.of("set_prep_stage")[0][1]
     assert not m.of("prep_nudge") and not m.of("comment_prep")
+
+
+async def test_prep_a_failed_nudge_settles_that_record_alone(env):
+    """b's nudge fails and c is done but unpublished: both need a human, while a is still followed to prepared."""
+    m = PrepMocks(
+        outcomes={"c": PrepOutcome("c", "done-unpublished", 6, "no binding.yaml")},
+        statuses={"a": "prepared"},
+        nudge_errors={"b": "ValueError: record b: unclear modality"},
+    )
+    async with prep_started(env, m) as h:
+        await polled(env, m, 1)
+        await prep_settled(h, m, "needs-human")
+        state = await h.query(workflows.MiaPrep.status)
+    ((_, outcomes),) = m.of("comment_prep")
+    assert [(o.record, o.outcome) for o in outcomes] == [("a", "nudged"), ("b", "unknown"), ("c", "done-unpublished")]
+    assert "unclear modality" in outcomes[1].note and m.of("prep_status") == [(["a"],)]
+    detail = m.of("set_prep_stage")[-1][1]
+    assert "`b` (unknown: ValueError: record b: unclear modality)" in detail and "`c` (done-unpublished" in detail
+    assert "`a`" not in detail and state.settled == {"a": "prepared", "b": "needs-human", "c": "needs-human"}
+
+
+async def test_prep_a_failed_outcomes_comment_keeps_polling(env):
+    m = PrepMocks(records=["a"], statuses={"a": "prepared"}, comment_error="GitHubError: 502")
+    async with prep_started(env, m) as h:
+        await polled(env, m, 1)
+        await prep_settled(h, m, "done")
+        state = await h.query(workflows.MiaPrep.status)
+    assert m.stages == ["requested", "done"] and [o.outcome for o in state.outcomes] == ["nudged"]
 
 
 async def test_buffer_fails_an_unprepared_record_instead_of_waiting(env):
@@ -1913,4 +1956,27 @@ async def test_replay_buffer_history_e(env):
             await idle(h, m, "ready")
             PREP_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-e-prep", PREP_E_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+PRE_E_HISTORY = HISTORY.with_name("buffer_history_pre_e.json")
+
+
+async def test_replay_buffer_history_pre_e(env, monkeypatch):
+    """A run from before `e-prep`, recorded with `_prep_requests` patched off: b has no binding, so mia-data is
+    nudged and b sits in `waiting-dataset` while a alone makes the buffer ready. It replays on today's MiaBuffer with
+    the real `_prep_requests` (no e-prep marker in the history: the old branch). Re-record this one alone:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_pre_e"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        monkeypatch.setattr(workflows, "_prep_requests", lambda: False)
+        m = Mocks(plan=ONE_GROUP, unbound={"b"})
+        async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+            await approve(h, m)
+            await until(lambda: any("Waiting for mia-data" in a[0] for a in m.of("comment")), m=m)
+            await idle(h, m, "ready")
+            assert dataset(await h.query(MiaBuffer.status), "b").status == "waiting-dataset"
+            PRE_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+        monkeypatch.undo()
+    assert workflows._prep_requests.__name__ == "_prep_requests"  # the real one replays
+    history = WorkflowHistory.from_json("buffers-pre-e", PRE_E_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
