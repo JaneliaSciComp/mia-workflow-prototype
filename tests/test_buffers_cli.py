@@ -174,3 +174,12 @@ def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch
     assert [r[:3] for r in rows] == ["ok ", "ok ", "ok ", "BAD", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert rows[3].startswith("BAD  github catalog") and "down" in rows[4]
     assert rows[9].startswith("ok   buffer-api") and "http://svc:1" in rows[9]
+
+
+def test_serve_takes_config_only(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["serve", "--help"])
+    out = capsys.readouterr().out
+    assert "--config" in out and "--port" not in out

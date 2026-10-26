@@ -62,7 +62,7 @@ def _plan(args: argparse.Namespace) -> int:
 def _serve(args: argparse.Namespace) -> int:
     from .api import serve
 
-    serve(args.state_dir.expanduser(), args.host, args.port)
+    serve(load_config(args.config))
     return 0
 
 
@@ -277,11 +277,6 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-ref-mismatch", action="store_true", help="plan even when the checkout is not at catalog.ref"
     )
     plan.set_defaults(func=_plan)
-    serve = sub.add_parser("serve", help="run buffer-api, the sampler and ledger for buffers (spec §5)")
-    serve.add_argument("--state-dir", type=Path, default=Path("~/.local/state/mia-buffers"))
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
-    serve.set_defaults(func=_serve)
     reg = sub.add_parser("register", help="register a plan's staged volumes with a running buffer-api")
     reg.add_argument("plan", type=Path, help="plan.json from `mia-buffers plan --json`")
     reg.add_argument("spec", type=Path)
@@ -293,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--test-size", type=int, default=256, help="frozen test list length")
     reg.set_defaults(func=_register)
     for name, help_text in (
+        ("serve", "run buffer-api, the sampler and ledger for buffers (spec §5)"),
         ("worker", "run the Temporal workers (main and await queues)"),
         ("schedule", "create or update the poll Schedule"),
         ("init-labels", "create the buffer:* labels on the issue repo"),
@@ -304,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if name == "schedule":
             command.add_argument("action", choices=["apply"])
-        command.set_defaults(func=_deployment)
+        command.set_defaults(func=_serve if name == "serve" else _deployment)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

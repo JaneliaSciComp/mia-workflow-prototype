@@ -17,8 +17,8 @@ sections are shared; each block under `services` overlays them for one service, 
 sets `MIA_SERVICE` for you (a per-app YAML file still loads when `MIA_SERVICE` is unset, deprecated). The mia-data and
 mia-buffers services need `paths.local_root`, and mia-buffers also `service.token_file`; `mia up` refuses to start them
 without. `paths.local_root` must be host-local disk, not NFS (`mia up` refuses otherwise): it holds `locks/`, and
-`<local_root>/service/` is reserved for buffer-api's state from milestone B; until then buffer-api's SQLite ledger stays
-in the service's `state_dir` (`<state_root>/<name>/buffers.sqlite`). `service.token_file` (mode 600; `mia init-token`
+`<local_root>/service/buffers.sqlite` is buffer-api's SQLite ledger (the first `serve` copies an old
+`<state_dir>/buffers.sqlite` there once), with timed backups under `<state_dir>/backups/`. `service.token_file` (mode 600; `mia init-token`
 creates it) holds the buffer-api worker token and is mounted read-only into the workers.
 
 ## The four checks
@@ -110,8 +110,9 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    writes the data pool with a weight, a voxel size (documented or assumed) and a channel recipe per record.
 2. **Stage** each dataset you want to serve with the mia-snippets harness (`harness stage`, see that repo's
    `SPEC.md` §7) into `<staged root>/<record id>/`, which then holds `stage.json` and one `v<i>.zarr` per volume.
-3. **Serve.** `mia-buffers serve --state-dir <state> --port 8765` runs buffer-api on the local host; the ledger is
-   `<state>/buffers.sqlite`. It holds no credentials and never reads pixels.
+3. **Serve.** `mia-buffers serve` runs buffer-api from the configuration: host and port from `service.url`, the ledger at
+   `<local_root>/service/buffers.sqlite`, backups under `<state_dir>/backups/` every `keeper.minutes`, and every
+   worker write needs the token from `service.token_file`. It holds no credentials and never reads pixels.
 4. **Register.** `mia-buffers register plan.json <spec> --staged-root <staged root> --url http://host:8765
    --buffer <id> [--val-size 256 --test-size 256]` creates the buffer and registers every pooled, staged volume;
    planes are split train/val/test by the spec's fractions (split key = volume plus plane). Unstaged records are

@@ -414,7 +414,7 @@ def test_up_mia_buffers_starts_buffer_api_on_the_host_and_lets_the_worker_reach_
     assert [name for name, _ in windows_] == ["api", "worker"]
     api = dict(windows_)["api"]
     assert "sandbox-run.sh" not in api
-    assert f"-m mia_buffers.cli serve --state-dir {tmp_path}/mb-state --host buffer-host.example.org --port 8765" in api
+    assert "-m mia_buffers.cli serve" in api and "--state-dir" not in api and "MIA_BUFFERS_CONFIG=" in api
     assert f"{tmp_path}/mb-state-host/logs/api.log" in api
     assert "--allow localhost --allow buffer-host.example.org" in worker_command(fake, "mia-buffers")
     assert s.services["mia-buffers"].logs()["api"] == tmp_path / "mb-state-host/logs/api.log"

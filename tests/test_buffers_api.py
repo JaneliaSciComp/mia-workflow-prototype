@@ -5,11 +5,13 @@ import re
 import threading
 
 import httpx
+import pytest
 import yaml
 
-from mia_buffers.api import BufferService, make_server
+from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger, prune_backups
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
+from tests.test_buffers_config import make_cfg
 from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
 from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
 from tests.test_buffers_sync import write_prepared
@@ -339,3 +341,35 @@ def test_sync_409_while_running(tmp_path):
         status, out, _ = call(s, "POST", "/sync/datasets")
     assert status == 409 and out == {"error": "a datasets sync is running"}
     assert s.ledger.datasets() == []
+
+
+def buffers_cfg(tmp_path, local_root):
+    return make_cfg(tmp_path, paths={"local_root": str(local_root) if local_root else None})
+
+
+def test_open_ledger_moves_the_old_file_once(tmp_path, capsys):
+    cfg = buffers_cfg(tmp_path, tmp_path / "local")
+    (tmp_path / "state").mkdir()
+    Ledger(cfg.paths.state_dir / "buffers.sqlite").put_buffer("b", {"x": 1})
+    assert open_ledger(cfg).buffer("b") == {"x": 1} and "moved the ledger" in capsys.readouterr().out
+    Ledger(cfg.paths.state_dir / "buffers.sqlite").put_buffer("b", {"x": 2})
+    assert open_ledger(cfg).buffer("b") == {"x": 1}  # already moved: the old file is not read again
+
+
+def test_prune_backups_keeps_the_newest(tmp_path):
+    for i in range(50):
+        (tmp_path / f"buffers-2026010100{i:02d}00Z.sqlite").write_text("")
+    prune_backups(tmp_path, keep=48)
+    assert len(list(tmp_path.glob("buffers-*.sqlite"))) == 48
+    assert not (tmp_path / "buffers-20260101000000Z.sqlite").exists()
+
+
+def test_serve_refuses_without_local_root(tmp_path):
+    with pytest.raises(RuntimeError, match="local_root"):
+        ledger_path(buffers_cfg(tmp_path, None))
+
+
+def test_serve_refuses_a_network_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("mia_core.fs.mount_type", lambda path, mounts=None: "nfs4")
+    with pytest.raises(RuntimeError, match="network filesystem"):
+        open_ledger(buffers_cfg(tmp_path, tmp_path / "local"))

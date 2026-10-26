@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import random
 import re
 import threading
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Literal
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from mia_core.fs import require_local_dir
+from mia_core.registry import read_token
+
+from .config import Config
 from .ledger import Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, draw, fits, servable
@@ -30,6 +36,7 @@ DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 DATASET_STATES = ("in-progress", "prepared", "ineligible", "needs-human")  # no row = unprepared
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
+log = logging.getLogger(__name__)
 Response = tuple[int, dict | None, dict[str, str]]
 
 
@@ -426,14 +433,65 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def serve(state_dir: Path, host: str, port: int) -> None:
-    """Run buffer-api until interrupted; the ledger lives at <state_dir>/buffers.sqlite."""
-    server = make_server(BufferService(Ledger(state_dir / "buffers.sqlite")), host, port)
+def ledger_path(cfg: Config) -> Path:
+    """Where buffer-api keeps its SQLite file: host-local disk, never the shared state directory."""
+    if cfg.paths.local_root is None:
+        raise RuntimeError("set paths.local_root in mia.yaml: buffer-api keeps its SQLite file on host-local disk")
+    return cfg.paths.local_root / "service" / "buffers.sqlite"
+
+
+def open_ledger(cfg: Config) -> Ledger:
+    """The ledger on the local root; the first start copies the old `<state_dir>/buffers.sqlite` there."""
+    path = ledger_path(cfg)
+    require_local_dir(path.parent)
+    old = cfg.paths.state_dir / "buffers.sqlite"
+    if not path.exists() and old.exists():
+        Ledger(old).backup(path)
+        print(f"buffer-api: moved the ledger from {old} to {path}", flush=True)
+    return Ledger(path)
+
+
+def prune_backups(directory: Path, keep: int = 48) -> None:
+    """Delete the oldest `buffers-*.sqlite` files beyond `keep` (the UTC stamp in the name sorts by age)."""
+    for stale in sorted(directory.glob("buffers-*.sqlite"))[:-keep]:
+        stale.unlink(missing_ok=True)
+
+
+def backup_forever(ledger: Ledger, directory: Path, minutes: int, stop: threading.Event) -> None:
+    """Back the ledger up every `minutes` until `stop` is set; a failed backup is logged, never raised."""
+    while not stop.wait(minutes * 60):
+        try:
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            ledger.backup(directory / f"buffers-{stamp}.sqlite")
+            prune_backups(directory)
+        except Exception:
+            log.exception("ledger backup failed")
+
+
+def serve(cfg: Config) -> None:
+    """Run buffer-api until interrupted, as configured: URL, ledger on the local root, backups, worker token."""
+    if cfg.service.token_file is None:
+        raise SystemExit("set service.token_file in mia.yaml and run `mia init-token`")
+    token = read_token(cfg.service.token_file)
+    try:
+        ledger = open_ledger(cfg)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    url = urlparse(cfg.service.url)
+    server = make_server(
+        BufferService(ledger, token=token, storage_root=cfg.paths.storage_root),
+        url.hostname or "127.0.0.1",
+        url.port or 8765,
+    )
+    backups = cfg.paths.state_dir / "backups"
+    stop = threading.Event()
+    threading.Thread(target=backup_forever, args=(ledger, backups, cfg.keeper.minutes, stop), daemon=True).start()
     host_name, port_number = server.server_address[0], server.server_address[1]
-    print(f"buffer-api on http://{host_name!s}:{port_number} ledger {state_dir}", flush=True)
+    print(f"buffer-api on http://{host_name!s}:{port_number} ledger {ledger_path(cfg)} backups {backups}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         server.server_close()

@@ -65,6 +65,10 @@ directory, or move that directory to `<state_root>/<name>` while no round is run
 `rounds/<id>/pins.json` and csub job-id files there). Keep `temporal.namespace` in the block when the old file set
 one. Then `mia restart <service>`.
 
+buffer-api (`mia-buffers serve`) keeps its SQLite ledger at `<local_root>/service/buffers.sqlite` (host-local disk,
+never NFS) and writes backups to `<state_dir>/backups/` every `keeper.minutes`; worker writes need the token in
+`service.token_file`. The first start moves an old `<state_dir>/buffers.sqlite` to the new place.
+
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
 round summary count, so a short prefix approved earlier cannot approve a later head.

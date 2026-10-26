@@ -366,9 +366,9 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
     allow = ["github.com", "api.github.com", temporal.host]
     if endpoint:  # buffer-api: on the host, unsandboxed like the broker
-        host, port = endpoint
-        allow.append(host)
-        api = shell(PY, "-m", svc.app.module, "serve", "--state-dir", svc.state, "--host", host, "--port", port)
+        allow.append(endpoint[0])
+        env_pairs = [f"{name}={value}" for name, value in svc.env().items()]
+        api = shell("env", *env_pairs, PY, "-m", svc.app.module, "serve")
         new_window(svc.name, "api", f"{api} 2>&1 | tee -a {shell(svc.host / 'logs/api.log')}")
     # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
     # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
