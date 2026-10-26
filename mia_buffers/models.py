@@ -114,10 +114,13 @@ class QuotaCheck:
 
 @dataclass
 class RawStatus:
-    """Whether the record's raw cache holds every file of its binding; `missing` lists the whole-file urls not."""
+    """Whether the record's raw cache holds every file of its binding; `missing` lists the whole-file urls not.
+    `stream`: urls an earlier fetch found the harness reads in place, so a stage needs their hosts and a writable
+    cache (at most 20 listed)."""
 
     ready: bool
     missing: list[str] = field(default_factory=list)
+    stream: list[str] = field(default_factory=list)
 
 
 @dataclass

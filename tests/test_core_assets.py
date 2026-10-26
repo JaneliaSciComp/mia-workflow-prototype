@@ -1,6 +1,6 @@
 import json
 
-from mia_core.assets import ASSET_STATES, raw_asset, read_files_json, whole_file_url
+from mia_core.assets import ASSET_STATES, cache_missing, raw_asset, read_files_json, whole_file_url
 
 
 def test_raw_asset_is_ready_when_every_binding_url_is_cached(tmp_path):
@@ -21,6 +21,9 @@ def test_raw_asset_is_ready_when_every_binding_url_is_cached(tmp_path):
     )
     assert raw_asset(tmp_path, ["https://h/a.zip", "https://h/c.tif"])["state"] == "partial"
     assert raw_asset(tmp_path / "none", [])["state"] == "partial" and read_files_json(tmp_path / "none") == {}
+    stream = ["https://h/c.zarr"]  # read in place by the harness: never in files.json, still ready
+    assert raw_asset(tmp_path, ["https://h/b.tif", *stream], stream)["state"] == "ready"
+    assert cache_missing({}, stream, stream) == (True, []) and cache_missing({}, stream) == (False, stream)
     assert whole_file_url("https://h/a.zip::m.png") == "https://h/a.zip" and "evicted" in ASSET_STATES
 
 

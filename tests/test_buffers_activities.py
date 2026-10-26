@@ -536,11 +536,11 @@ async def test_read_stage_records_the_staged_and_raw_assets(acts, server):
     }
     assert (staged["binding_hash"], staged["harness_commit"], staged["env_digest"]) == (info.hash, "h" * 40, "d" * 64)
     raw = acts.registry.asset("raw", U937)
-    assert {key: raw[key] for key in ("path", "files", "state")} == {
+    assert {key: raw[key] for key in ("path", "files")} == {
         "path": str(acts.cfg.paths.raw_root / U937),
         "files": {url: {"size": 12, "source": "download"}},
-        "state": "ready",
     }
+    assert "state" not in raw  # the fetch phase owns the raw state
     acts.cfg.service.url = server  # the service's worker routes refuse a client without the token
     with pytest.raises(RegistryError) as error:
         Registry.from_config(acts.cfg.service).put_asset("staged", artifact, {})
@@ -671,6 +671,7 @@ async def test_read_fetch_maps_outcomes_and_writes_the_raw_row(acts, server):
     assert result.ok and not result.partial and result.bytes_fetched == 0 and result.stream == [files[2]["url"]]
     row = acts.registry.asset("raw", U937)
     assert row["state"] == "ready" and set(row["files"]) == {A_TIF, B_ZIP} and row["bytes"] > 0
+    assert row["stream"] == []  # c.zarr streams but is not a url of this binding
     pending = {**report, "files": [*files[:2], {"url": "https://zenodo.org/e.tif", "outcome": "pending"}]}
     blocked = {**report, "ok": False, "files": [], "host_not_allowed": {"host": "evil.example", "chain": []}}
     (workspace / "fetch.json").write_text(json.dumps(pending))
@@ -680,6 +681,37 @@ async def test_read_fetch_maps_outcomes_and_writes_the_raw_row(acts, server):
     assert not result.ok and result.host_not_allowed == "evil.example"
     acts.registry = Registry("http://127.0.0.1:9")  # the row is best effort: the result still comes back
     assert (await acts.read_fetch(ROUND, U937, str(workspace))).host_not_allowed == "evil.example"
+    odd = {"ok": True, "files": [{"outcome": "failed"}, {"url": "", "outcome": "failed"}, {"url": 5}, "x"]}
+    (workspace / "fetch.json").write_text(json.dumps(odd))  # entries without a url string are dropped
+    assert await acts.read_fetch(ROUND, U937, str(workspace)) == FetchResult(True)
+    for files in (5, True, "x", {"url": A_TIF}):
+        (workspace / "fetch.json").write_text(json.dumps({**odd, "files": files}))  # not a list: no entries
+        assert await acts.read_fetch(ROUND, U937, str(workspace)) == FetchResult(True)
+
+
+async def test_a_stream_url_is_ready_for_fetch_status_and_stage(acts, server):
+    """One rule for a url the harness streams: the fetch records it on the row, raw_status leaves it out of the
+    files the cache must hold (and reports it), and a later stage leaves the raw state alone."""
+    from mia_buffers.drop import merge_manifest
+
+    cache = await bound_two_urls(acts)
+    member = B_ZIP + "::m.tif"
+    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, B_ZIP])
+    merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
+    files = [{"url": A_TIF, "outcome": "fetched", "bytes": 3}, {"url": member, "outcome": "stream", "reason": "r"}]
+    report = {"ok": True, "partial": False, "bytes_fetched": 3, "files": files, "errors": []}
+    (workspace / "fetch.json").write_text(json.dumps(report))
+    assert (await acts.read_fetch(ROUND, U937, str(workspace))).stream == [member]
+    row = acts.registry.asset("raw", U937)
+    assert row["state"] == "ready" and row["stream"] == [member]
+    assert await acts.raw_status(ROUND, U937) == RawStatus(True, [], stream=[member])
+    write_stage_json(staged_dir(acts, U937))
+    assert (await acts.read_stage(ROUND, U937)).ok
+    row = acts.registry.asset("raw", U937)
+    assert row["state"] == "ready" and row["stream"] == [member] and row["last_used"] > 0
+    acts.registry = Registry("http://127.0.0.1:9")  # no registry, no recorded stream urls: the zip counts as missing
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [B_ZIP])
 
 
 async def test_take_and_release_lock(acts):
@@ -749,6 +781,13 @@ async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, serve
     args = StageJobArgs(stage_workspace, ROUND, pins, U937, [], [1, 2, 4], 256, cache_writable=False)
     assert await acts.submit("k2", args) == "j42" and args.out == str(staged_dir(acts, U937))
     row = acts.registry.asset("staged", staged_dir(acts, U937).name)
-    assert row == {"state": "staging", "job": "j42", "record": U937, "levels_key": "p256-l1-2-4", "path": args.out}
+    assert row == {
+        "state": "staging",
+        "ok": False,
+        "job": "j42",
+        "record": U937,
+        "levels_key": "p256-l1-2-4",
+        "path": args.out,
+    }
     acts.registry = Registry("http://127.0.0.1:9")  # the rows are best effort: the job id still comes back
     assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, [], 1)) == "j42"

@@ -38,11 +38,21 @@ def file_entries(manifest: dict) -> dict:
     return {text(url, 500): _file_entry(entry) for url, entry in manifest.items() if isinstance(entry, dict)}
 
 
-def raw_asset(cache_dir: Path, urls: Iterable[str]) -> dict:
-    """The raw-cache asset row: path, bytes, files.json entries, and `ready` when every url of `urls` is cached."""
+def cache_missing(manifest: dict, urls: Iterable[str], stream: Iterable[str] = ()) -> tuple[bool, list[str]]:
+    """(ready, missing): the whole-file urls of `urls` that files.json lacks, leaving out the `stream` urls (the
+    harness reads those in place, they are never cached). Ready when none is missing; with no urls at all, when
+    files.json lists anything."""
+    urls, streamed = list(urls), set(stream)
+    wanted = dict.fromkeys(whole_file_url(url) for url in urls if url not in streamed)
+    missing = [url for url in wanted if url not in manifest]
+    return (not missing if urls else bool(manifest)), missing
+
+
+def raw_asset(cache_dir: Path, urls: Iterable[str], stream: Iterable[str] = ()) -> dict:
+    """The raw-cache asset row: path, bytes, files.json entries, and `ready` when every url of `urls` but the
+    `stream` ones is cached."""
     manifest = read_files_json(cache_dir)
-    wanted = {whole_file_url(url) for url in urls}
-    ready = wanted <= manifest.keys() if wanted else bool(manifest)
+    ready, _ = cache_missing(manifest, urls, stream)
     return {
         "path": str(cache_dir),
         "bytes": dir_bytes(cache_dir),

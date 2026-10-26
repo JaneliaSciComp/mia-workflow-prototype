@@ -29,7 +29,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
-from mia_core.assets import raw_asset, read_files_json, whole_file_url
+from mia_core.assets import cache_missing, raw_asset, read_files_json
 from mia_core.fs import dir_bytes
 from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
@@ -549,6 +549,7 @@ class Activities:
         job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: stage_job(self.cfg, args, snap))
         fields = {
             "state": "staging",
+            "ok": False,  # until read_stage says otherwise: an earlier round's `ok` must not make this one reusable
             "job": job_id,
             "record": args.record,
             "levels_key": self._levels_key(args.round_id),
@@ -638,7 +639,9 @@ class Activities:
             "last_used": now,
             "job": None,
         }
-        raw = {**await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record)), "last_used": now}
+        raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
+        del raw["state"]  # the fetch phase owns the raw state (it knows the stream urls); a stage updates the rest
+        raw["last_used"] = now
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
 
@@ -659,11 +662,19 @@ class Activities:
     @activity.defn(name="raw_status")
     @mia_permanent_errors
     async def raw_status(self, round_id: str, record: str) -> RawStatus:
-        """Whether files.json of the record's raw cache lists every whole file of the round's binding."""
+        """Whether files.json of the record's raw cache lists every whole file of the round's binding but the
+        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known)."""
+        try:
+            row = await asyncio.to_thread(self.registry.asset, "raw", record)
+        except RegistryError as error:
+            log.warning("%s: registry unavailable, no stream urls known: %s", record, error)
+            row = None
+        recorded = row.get("stream") if isinstance(row, dict) else None
+        urls = self._binding_urls(round_id, record)
+        stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
         manifest = await asyncio.to_thread(read_files_json, self._cache_dir(record))
-        wanted = dict.fromkeys(whole_file_url(url) for url in self._binding_urls(round_id, record))
-        missing = [url for url in wanted if url not in manifest]
-        return RawStatus(not missing and bool(manifest), missing)  # raw_asset's `ready` rule, without the du
+        ready, missing = cache_missing(manifest, urls, stream)  # raw_asset's `ready` rule, without the du
+        return RawStatus(ready, missing, texts(stream))
 
     @activity.defn(name="check_quota")
     @mia_permanent_errors
@@ -710,13 +721,17 @@ class Activities:
         """The fetch job's fetch.json, reduced; none (a job killed at its walltime) is partial, since the next
         attempt resumes from the cache. The raw asset row is then put from the cache as it is (best effort)."""
         report = loads(read_untrusted(Path(workspace), "fetch.json", FETCH_JSON_LIMIT))
+        stream: list[str] | None = None  # no report: the row keeps the stream urls it has
         if not isinstance(report, dict):
             result = FetchResult(True, partial=True, errors=[FETCH_JSON_MISSING])
         else:
-            files = [entry for entry in report.get("files") or [] if isinstance(entry, dict)]
+            reported = report.get("files")
+            entries = reported if isinstance(reported, list) else []
+            files = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("url"), str)]
+            files = [entry for entry in files if entry["url"]]
 
             def urls(outcome: str) -> list[str]:
-                return texts([entry.get("url") for entry in files if entry.get("outcome") == outcome])
+                return texts([entry["url"] for entry in files if entry.get("outcome") == outcome])
 
             fetched, blocked, failed = report.get("bytes_fetched"), report.get("host_not_allowed"), urls("failed")
             result = FetchResult(
@@ -728,9 +743,14 @@ class Activities:
                 texts(report.get("errors")),
                 text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
             )
+            # the binding's own urls the harness streams, kept on the row so raw_status leaves them out
+            streamed = {entry["url"] for entry in files if entry.get("outcome") == "stream"}
+            stream = [url for url in self._binding_urls(round_id, record) if url in streamed]
         row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
-        state = "ready" if result.ok and not result.partial else "partial"
-        await self.mark_asset("raw", record, {**row, "state": state, "job": None, "last_used": time.time()})
+        row.update(state="ready" if result.ok and not result.partial else "partial", job=None, last_used=time.time())
+        if stream is not None:
+            row["stream"] = stream
+        await self.mark_asset("raw", record, row)
         return result
 
     @activity.defn(name="mark_asset")
