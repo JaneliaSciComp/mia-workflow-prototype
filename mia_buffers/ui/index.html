@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIA Buffers</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* The buffer page: a top bar, then one of four views (datasets, buffers, cache, preparation) chosen by the hash. */
+:root{
+  --bg:#f9f9f7; --surface:#fcfcfb; --fg:#0b0b0b; --fg2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --accent:#2a78d6; --accent-soft:#cde2fb; --warn:#ec835a;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0d0d0d; --surface:#1a1a19; --fg:#f0efec; --fg2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --accent:#3987e5; --accent-soft:#184f95; --warn:#ec835a;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0d0d0d; --surface:#1a1a19; --fg:#f0efec; --fg2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --accent:#3987e5; --accent-soft:#184f95; --warn:#ec835a;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; color-scheme:dark }
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14.5px;line-height:1.5;margin:0;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 64px}
+main{max-width:1500px;margin:0 auto}
+h1{font-size:20px;font-weight:600;margin:0;line-height:1.15}
+h2{font-size:17px;font-weight:600;margin:0 0 4px;text-wrap:balance}
+h3{font-size:14px;font-weight:600;margin:14px 0 4px}
+p{margin:0 0 8px;max-width:72ch}
+a{color:var(--accent)}
+code{font-family:var(--mono);font-size:.92em}
+button,select,input{font:inherit;color:inherit}
+.small{font-size:12.5px;color:var(--muted)}
+.mono{font-family:var(--mono);font-size:12.5px}
+
+/* top bar: title, the four tabs, the catalog ref, the theme toggle */
+.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid)}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
+.tabs a:hover{color:var(--fg)}
+.tabs a[aria-current="page"]{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.catref{font-family:var(--mono);font-size:12.5px;color:var(--fg2);margin-left:auto}
+.btn{display:inline-block;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px;text-decoration:none;color:var(--fg)}
+.btn:hover:not(:disabled){background:var(--accent-soft)}
+.btn:disabled{color:var(--muted);cursor:not-allowed}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* errors: one dismissable line per failed fetch */
+.banner{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.banner div{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--warn);border-radius:8px;padding:6px 10px;background:var(--surface);font-size:13px}
+.banner span{flex:1;overflow-wrap:anywhere}
+.banner button{border:0;background:transparent;cursor:pointer;color:var(--fg2);font-size:16px;line-height:1}
+.notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
+pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
+.empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
+
+/* filters: one row above everything, wraps on narrow screens */
+.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.filters fieldset{border:0;padding:0;margin:0;min-width:0}
+.filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--axis);border-radius:999px;padding:2px 9px;font-size:12.5px;cursor:pointer;user-select:none;background:transparent}
+.chip input{margin:0;accent-color:var(--accent)}
+.chip:has(input:checked){background:var(--accent-soft);border-color:var(--accent)}
+.chip:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:1px}
+.filters select,.filters input[type=text]{border:1px solid var(--axis);border-radius:6px;padding:3px 6px;background:var(--surface)}
+.filters label.inline{display:inline-flex;gap:6px;align-items:center;font-size:13px}
+.footprint{font-family:var(--mono);font-size:13px;color:var(--fg2)}
+input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
+.actions{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:16px}
+.actions > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+
+/* KPI row */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}
+@media (min-width:1280px){.kpis{grid-template-columns:repeat(8,minmax(0,1fr))}}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:10px 12px}
+.tile .label{font-size:12px;color:var(--fg2)}
+.tile .value{font-size:24px;font-weight:600;line-height:1.1;margin-top:2px;overflow-wrap:anywhere}
+.tile.hero .value{font-size:44px}
+.tile.text .value{font-size:15px;font-weight:500;line-height:1.35}
+.tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
+
+/* chart cards */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
+.grid2 .card{margin-bottom:0}
+.card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
+.card svg{display:block;width:100%;height:auto;font-family:var(--sans)}
+.card svg text{fill:var(--fg2);font-size:12px}
+.card svg .lbl{fill:var(--fg)}
+.card svg .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.card svg .grid{stroke:var(--grid);stroke-width:1}
+.card svg .base{stroke:var(--axis);stroke-width:1}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--fg2);margin:0 0 6px}
+.legend span i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:5px}
+.toplist{list-style:none;padding:0;margin:6px 0 0;font-size:13px}
+.toplist li{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--grid)}
+.toplist li b{font-variant-numeric:tabular-nums;font-weight:500}
+.toplist li span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2)}
+dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;font-size:13px;margin:0}
+dl.kv dt{color:var(--fg2)}
+dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
+.meter{height:12px;background:var(--grid);border-radius:999px;overflow:hidden;margin:6px 0 4px}
+.meter i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.meter.over i{background:var(--warn)}
+.health{font-size:13px;font-weight:500}
+.health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
+.links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
+
+/* table */
+.tablebar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+.tablebar input[type=search]{border:1px solid var(--axis);border-radius:6px;padding:4px 8px;background:var(--surface);min-width:220px}
+.tablebar label.inline{display:inline-flex;gap:6px;align-items:center;font-size:13px}
+.tablewrap{overflow-x:auto;border:1px solid var(--ring);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--grid);white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface);cursor:pointer;color:var(--fg2);font-weight:500;user-select:none}
+th:hover{color:var(--fg)}
+table.plain th{cursor:default}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td.id{max-width:300px;overflow:hidden;text-overflow:ellipsis}
+td.wrap{white-space:normal;min-width:200px;max-width:520px;overflow-wrap:anywhere}
+tr.out td{color:var(--muted)}
+tr.click{cursor:pointer}
+tr.click:hover td{background:var(--accent-soft)}
+.pill{display:inline-block;border-radius:999px;padding:0 7px;font-size:11.5px;border:1px solid var(--axis)}
+.pill.pool{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.pill.warn{border-color:var(--warn);color:var(--warn)}
+.more{margin:10px 0 0;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer}
+
+/* tooltip */
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--fg);border:1px solid var(--ring);box-shadow:0 2px 10px rgba(0,0,0,.12);border-radius:6px;padding:6px 9px;font-size:12.5px;z-index:20;max-width:300px}
+.tip b{font-weight:600}
+.tip .k{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+@media (prefers-reduced-motion:no-preference){ .chip,.btn{transition:background .12s} }
+</style>
+</head>
+<body>
+<main>
+<header class="topbar">
+  <h1>MIA Buffers</h1>
+  <nav class="tabs" aria-label="Views">
+    <a href="#datasets" data-tab="datasets">Datasets</a>
+    <a href="#buffers" data-tab="buffers">Buffers</a>
+    <a href="#cache" data-tab="cache">Cache</a>
+    <a href="#preparation" data-tab="preparation">Preparation</a>
+  </nav>
+  <span class="catref" id="catref">no catalog synced</span>
+  <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme">theme</button>
+</header>
+<div class="banner" id="banner" role="alert"></div>
+<noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
+
+<section data-view="datasets" hidden>
+  <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
+  <div id="dsBody">
+  <section class="filters" aria-label="Spec filters">
+    <fieldset><legend>Spec name</legend><input type="text" id="specName" size="22" aria-label="spec name"></fieldset>
+    <fieldset><legend>Paths (glob)</legend><input type="text" id="paths" size="18" aria-label="paths glob"></fieldset>
+    <fieldset><legend>Dimensionality</legend><div class="chips" id="dims"></div></fieldset>
+    <fieldset><legend>Licence allowlist</legend><div class="chips" id="lic"></div>
+      <label class="inline" style="margin-top:4px"><input type="checkbox" id="allowUnknown"> allow unknown</label></fieldset>
+    <fieldset><legend>Annotation source (labelled sets)</legend><div class="chips" id="src"></div>
+      <label class="inline" style="margin-top:4px"><input type="checkbox" id="annRequired"> annotations required</label></fieldset>
+    <fieldset><legend>Smallest array (voxels)</legend>
+      <select id="minVox"><option value="0">no minimum</option><option value="100000">100 K</option><option value="1000000">1 M</option><option value="10000000">10 M</option></select></fieldset>
+    <fieldset><legend>Crop geometry</legend>
+      <label class="inline">patch <select id="patch"><option>64</option><option>128</option><option>256</option><option>512</option></select></label>
+      <label class="inline">coarsest level <select id="level"><option>1</option><option>2</option><option>4</option><option>8</option><option>16</option><option>32</option></select></label>
+      <label class="inline">z patch <select id="patchZ"><option>8</option><option>16</option><option>32</option><option>64</option></select></label>
+      <div class="footprint" id="footprint"></div></fieldset>
+    <fieldset><legend>Dedup</legend>
+      <label class="inline"><input type="checkbox" id="dedup"> one record per DOI</label></fieldset>
+    <fieldset><legend>Weighting temperature <span id="tVal" class="footprint"></span></legend>
+      <input type="range" id="temp" min="0" max="1" step="0.05" aria-label="temperature"><div class="small">0 = uniform over modalities, then over datasets · 1 = proportional to capacity</div></fieldset>
+    <fieldset><legend>Registry (filters the view, not the spec)</legend>
+      <label class="inline"><input type="checkbox" id="preparedOnly"> prepared only</label><br>
+      <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label><br>
+      <label class="inline"><input type="checkbox" id="stagedGeom"> staged for this geometry <span class="mono" id="levelsKey"></span></label></fieldset>
+  </section>
+  <div id="planMsgs" aria-live="polite"></div>
+  <div class="actions">
+    <button type="button" class="btn" id="download">Download spec YAML</button>
+    <div id="bufferIssue"></div>
+    <div id="prepIssue"></div>
+    <span class="small" id="planStatus"></span>
+  </div>
+
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+  <section class="grid2">
+    <div class="card"><h2>Where records leave</h2><div class="sub">Rules in the planner's order; a record is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out until mia-data has prepared it.</div><div id="funnel"></div></div>
+    <div class="card"><h2>Fitting datasets by modality</h2><div class="sub">Datasets that fit the spec, prepared or not, by modality group.</div><div id="bymod"></div></div>
+  </section>
+  <section class="grid2">
+    <div class="card"><h2>Weight share by modality</h2><div class="sub">Share of crops over the prepared pool, as the plan weighs it: modality → dataset, measure = coarsest-crop positions.</div><div id="byweight"></div></div>
+    <div class="card"><h2>Heaviest datasets</h2><div class="sub">The prepared datasets that would supply the most crops.</div><ol class="toplist" id="top"></ol></div>
+  </section>
+  <section>
+    <div class="tablebar">
+      <h2 style="margin:0">Records</h2>
+      <input type="search" id="search" placeholder="search id, title, modality, licence" aria-label="search records">
+      <label class="inline"><input type="checkbox" id="fitOnly"> fitting only</label>
+      <span class="small" id="tableCount"></span>
+    </div>
+    <div class="tablewrap"><table id="table"><thead></thead><tbody></tbody></table></div>
+    <button type="button" class="more" id="more" hidden>Show more</button>
+  </section>
+  </div>
+</section>
+
+<section data-view="buffers" hidden><div id="buffersBody"></div></section>
+<section data-view="cache" hidden><div id="cacheBody"></div></section>
+<section data-view="preparation" hidden><div id="prepBody"></div></section>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+<script>
+(function(){
+"use strict";
+// Everything here is a GET (plus POST /plan, which writes nothing); the page holds no token. Actions that need an
+// identity are GitHub new-issue links. All hosts and repos come from GET /meta.
+const DIMS = ["2D","2D+t","3D","3D+t"];
+const LIC = ["CC0-1.0","CC-BY-4.0","CC-BY-3.0","MIT","BSD-3-Clause","Apache-2.0","CC-BY-SA-4.0","CC-BY-NC-4.0","CC-BY-NC-SA-4.0","CC-BY-NC-ND-4.0","GPL-3.0-or-later"];
+const SRC = ["manual","proofread","automatic","mixed","unknown"];
+const LEVELS = [1,2,4,8,16,32];
+const NOT_PREPARED = "not prepared";  // mia_buffers.plan.NOT_PREPARED
+const MAX_URL = 8000;                 // GitHub refuses new-issue links much longer than this
+const PLAN_DEBOUNCE_MS = 300;
+const $ = id => document.getElementById(id);
+const fmt = n => n >= 1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n >= 1e3 ? (n/1e3).toFixed(n>=1e4?0:1)+"K" : String(n);
+const num = n => n == null || n === "" ? "" : Number(n).toLocaleString();
+const fmtBytes = b => { b = Number(b) || 0; for (const [s, u] of [[1e12,"TB"],[1e9,"GB"],[1e6,"MB"],[1e3,"KB"]]) if (b >= s) return (b/s).toFixed(1)+" "+u; return b+" B"; };
+const short = (s, n) => s ? String(s).slice(0, n || 8) : "";
+const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
+const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for (const [k,v] of Object.entries(attrs||{})) { if (v == null || v === false) continue; if (k==="class") n.className=v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? "" : v); } for (const k of kids) if (k != null && k !== false) n.append(k); return n; };
+const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k,v] of Object.entries(attrs||{})) n.setAttribute(k,v); return n; };
+const link = (href, text) => href ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
+const pill = (text, kind) => el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
+const GOOD = new Set(["prepared","ready","servable","pool"]);
+const BAD = new Set(["failed","needs-human","missing","blocked","evicted","ineligible","stale"]);
+const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
+
+// ---- times: the ledger stores epoch seconds; keep ISO strings working too
+function toEpoch(t) { if (t == null || t === "") return null; if (typeof t === "number") return t; const ms = Date.parse(t); return isNaN(ms) ? null : ms / 1000; }
+function ago(t) {
+  const s = toEpoch(t); if (s == null) return "";
+  const d = Date.now() / 1000 - s, a = Math.abs(d);
+  if (a < 10) return "just now";
+  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "min"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
+  return d >= 0 ? `${Math.round(v)} ${u} ago` : `in ${Math.round(v)} ${u}`;
+}
+const when = t => { const s = toEpoch(t); return s == null ? "" : el("span", { title: new Date(s * 1000).toISOString() }, ago(t)); };
+
+// ---- fetch: errors go to the banner, the caller gets null
+class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+async function api(path, options) {
+  let res;
+  try { res = await fetch(path, options); } catch (e) { throw new HttpError(0, e.message); }
+  const text = await res.text(); let data = null;
+  if (text) { try { data = JSON.parse(text); } catch { data = { error: text.slice(0, 300) }; } }
+  if (!res.ok) throw new HttpError(res.status, (data && data.error) || res.statusText);
+  return data;
+}
+function banner(message) {
+  const line = el("div", {}, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
+  $("banner").append(line);
+}
+async function load(path) {
+  try { return await api(path); }
+  catch (e) { banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`); return null; }
+}
+
+// ---- tooltip (the explorer's)
+const tip = $("tip");
+function showTip(evt, lines) { tip.replaceChildren(); for (const l of lines) { const d = el("div"); if (l.k) d.append(Object.assign(el("span",{class:"k"}), {style:`background:${l.k}`})); if (l.b) d.append(el("b",{}, l.b), " "); d.append(l.t); tip.append(d); } tip.hidden = false; moveTip(evt); }
+function moveTip(evt) { const x = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8); tip.style.left = x + "px"; tip.style.top = (evt.clientY + 14) + "px"; }
+function hideTip() { tip.hidden = true; }
+function hoverable(node, lines) { node.addEventListener("pointerenter", e => showTip(e, lines)); node.addEventListener("pointermove", moveTip); node.addEventListener("pointerleave", hideTip); node.setAttribute("tabindex","0"); node.addEventListener("focus", () => { const b = node.getBoundingClientRect(); showTip({clientX:b.left+b.width/2, clientY:b.top}, lines); }); node.addEventListener("blur", hideTip); }
+
+// ---- horizontal bars (the explorer's: single series, sequential hue)
+function barPath(x, y, w, h, r) { if (w <= r) return `M${x} ${y}h${w}v${h}h${-w}z`; return `M${x} ${y}h${w-r}a${r} ${r} 0 0 1 ${r} ${r}v${h-2*r}a${r} ${r} 0 0 1 ${-r} ${r}h${-(w-r)}z`; }
+function hbars(container, items, opts) {
+  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "nothing to show")); return; }
+  const W = 560, labelW = opts.labelW || 170, rowH = 26, barH = 16, pad = 8;
+  const H = items.length * rowH + pad * 2;
+  const max = Math.max(1e-12, ...items.map(i => i.value));
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.aria || "" });
+  const plotW = W - labelW - 70;
+  items.forEach((it, i) => {
+    const y = pad + i * rowH;
+    const g = svgEl("g");
+    const lbl = svgEl("text", { x: labelW - 8, y: y + barH - 3, "text-anchor": "end", class: "lbl" }); lbl.textContent = it.label.length > 26 ? it.label.slice(0, 25) + "…" : it.label; g.append(lbl);
+    const w = Math.max(0, it.value / max * plotW);
+    g.append(svgEl("path", { d: barPath(labelW, y, w, barH, 4), fill: it.color || "var(--accent)" }));
+    const v = svgEl("text", { x: labelW + w + 6, y: y + barH - 3, class: "tick" }); v.textContent = it.text || num(it.value); g.append(v);
+    const hit = svgEl("rect", { x: 0, y: y - 4, width: W, height: rowH, fill: "transparent" }); g.append(hit);
+    hoverable(hit, [{ b: it.text || num(it.value), t: " " + it.label }, ...(it.sub ? [{ t: it.sub }] : [])]);
+    svg.append(g);
+  });
+  svg.append(svgEl("line", { x1: labelW, x2: labelW, y1: pad - 4, y2: H - pad + 4, class: "base" }));
+  container.replaceChildren(svg);
+}
+
+// ---- small helpers for the plain tables, tiles and cards
+function table(cols, rows, empty, rowAttrs) {
+  if (!rows.length) return el("div", { class: "empty" }, empty);
+  const head = el("tr", {}, ...cols.map(c => el("th", { class: c.num ? "num" : "" }, c.label)));
+  const body = rows.map(r => el("tr", rowAttrs ? rowAttrs(r) : {}, ...cols.map(c => { const v = c.cell(r); return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v); })));
+  return el("div", { class: "tablewrap" }, el("table", { class: "plain" }, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+const tile = (label, value, sub, kind) => el("div", { class: "tile" + (kind ? " " + kind : "") }, el("div", { class: "label" }, label), el("div", { class: "value" }, value), sub ? el("div", { class: "sub" }, sub) : null);
+const card = (title, sub, ...kids) => el("div", { class: "card" }, el("h2", {}, title), sub ? el("div", { class: "sub" }, sub) : null, ...kids);
+const kv = pairs => el("dl", { class: "kv" }, ...pairs.filter(p => p).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v == null || v === "" ? "—" : v)]));
+const ghIssue = (repo, n) => repo && n ? link(`https://github.com/${repo}/issues/${n}`, `#${n}`) : (n ? `#${n}` : "");
+const code = (v, n) => v ? el("code", { title: String(v) }, n ? short(v, n) : String(v)) : null;
+const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) }, id);
+
+// ---- shared state: the service's meta, the newest catalog, and the registry rows the views join
+const S = { meta: {}, catalogs: [], ref: null, records: new Map(), recordsRef: null, datasets: new Map(),
+  rawAssets: [], raw: new Map(), rawBytes: 0, stagedAssets: [], stagedByRecord: new Map(), stagedBytes: 0, plan: null, planError: null };
+
+async function loadRegistry() {
+  const [ds, raw, staged] = await Promise.all([load("/datasets"), load("/assets/raw"), load("/assets/staged")]);
+  S.datasets = new Map((ds?.datasets || []).map(d => [d.id, d]));
+  S.rawAssets = raw?.assets || []; S.rawBytes = raw?.bytes || 0;
+  S.raw = new Map(S.rawAssets.map(a => [a.key, a]));
+  S.stagedAssets = staged?.assets || []; S.stagedBytes = staged?.bytes || 0;
+  S.stagedByRecord = new Map();
+  for (const a of S.stagedAssets) { const r = a.data?.record; if (!r) continue; if (!S.stagedByRecord.has(r)) S.stagedByRecord.set(r, []); S.stagedByRecord.get(r).push(a); }
+}
+async function loadRecords() {
+  if (!S.ref || S.recordsRef === S.ref) return;
+  const out = await load("/records?ref=" + encodeURIComponent(S.ref));
+  if (!out) return;
+  S.records = new Map((out.records || []).map(r => [String(r.record?.id ?? r.path), r]));
+  S.recordsRef = S.ref;
+}
+
+// ---- the spec the controls describe
+const C = { name: "microscopy-2d-gray", paths: "datasets/**", dims: new Set(["2D"]), lic: new Set(["CC0-1.0","CC-BY-3.0","CC-BY-4.0","MIT","BSD-3-Clause"]),
+  allowUnknown: false, annRequired: false, sources: new Set(SRC), minVox: 1e6, patch: 256, level: 4, patchZ: 32, dedup: true, T: 0.5,
+  preparedOnly: false, rawCached: false, stagedGeom: false };
+const levelsOf = coarsest => LEVELS.filter(l => l <= coarsest);
+const levelsKey = c => `p${c.patch}-l${levelsOf(c.level).join("-")}`;  // mia_buffers.jobspec.levels_key
+
+// A YAML scalar: plain when YAML reads it back as the same string, double-quoted (JSON is valid YAML) otherwise.
+function yq(value) {
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const s = String(value ?? "");
+  const risky = s === "" || /[:#,\[\]{}&!|>'"%@`\u0000-\u001f\u007f]/.test(s) || /^[\s*?-]/.test(s) || /\s$/.test(s)
+    || /^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s)
+    || /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) || /^0[xob]/i.test(s) || /^[-+]?\.(inf|nan)$/i.test(s);
+  return risky ? JSON.stringify(s) : s;
+}
+const flow = xs => `[${xs.map(yq).join(", ")}]`;
+function toSpecYaml(c, ref, repo) {
+  const p = c.patch, z = c.patchZ, sources = SRC.filter(s => c.sources.has(s));
+  return [
+    "schema_version: 1",
+    `name: ${yq(c.name.trim() || "buffer")}`,
+    "",
+    "catalog:",
+    `  repo: ${yq(repo || "")}`,
+    `  ref: ${yq(ref || "")}`,
+    "",
+    "select:",
+    `  paths: ${flow(c.paths.split(/[\s,]+/).filter(Boolean))}`,
+    "  where:",
+    `    dims: {in: ${flow(DIMS.filter(d => c.dims.has(d)))}}`,
+    "    license:",
+    `      in: ${flow(LIC.filter(l => c.lic.has(l)))}`,
+    `      allow_unknown: ${c.allowUnknown}`,
+    "    annotations:",
+    `      required: ${c.annRequired}`,
+    `      source: ${sources.length === SRC.length ? "any" : `{in: ${flow(sources)}}`}`,
+    `    min_size_voxels: ${c.minVox}`,
+    "  dedup:",
+    `    by: ${flow(c.dedup ? ["doi"] : [])}`,
+    "",
+    "sampling:",
+    "  patch:",
+    `    2D: {y: ${p}, x: ${p}}`,
+    ...(c.dims.has("2D+t") ? [`    2D+t: {y: ${p}, x: ${p}}`] : []),
+    ...(c.dims.has("3D") ? [`    3D: {z: ${z}, y: ${p}, x: ${p}}`] : []),
+    ...(c.dims.has("3D+t") ? [`    3D+t: {z: ${z}, y: ${p}, x: ${p}}`] : []),
+    "    c: 1",
+    `  levels: ${flow(levelsOf(c.level))}`,
+    "  weighting:",
+    "    scheme: temperature",
+    "    over: [modality, dataset]",
+    `    temperature: ${c.T}`,
+    "",
+    "splits:",
+    "  fractions: {train: 0.8, val: 0.1, test: 0.1}",
+    "",
+    "plan:",
+    "  auto_approve: true",
+    "",
+  ].join("\n");
+}
+function toPrepYaml(records, ref, repo) {
+  return ["schema_version: 1", "kind: preparation", `catalog: {repo: ${yq(repo || "")}, ref: ${yq(ref || "")}}`, "records:", ...records.map(r => `  - ${yq(r)}`), ""].join("\n");
+}
+
+// ---- GitHub links: a prefilled new-issue page, or "copy YAML" when the link would be too long
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    const area = el("textarea", { style: "position:fixed;opacity:0" }); area.value = text; document.body.append(area); area.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch { ok = false; } area.remove(); return ok;
+  }
+}
+function issueAction(container, label, repo, title, intro, yaml, disabledReason) {
+  if (disabledReason) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: disabledReason }, label)); return; }
+  if (!repo) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: "GET /meta names no repo" }, label)); return; }
+  const body = `${intro}\n\n\`\`\`yaml\n${yaml}\`\`\`\n`;
+  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}`;
+  const url = `${base}&body=${encodeURIComponent(body)}`;
+  if (url.length <= MAX_URL) { container.replaceChildren(el("a", { class: "btn", href: url, target: "_blank", rel: "noopener" }, label)); return; }
+  const status = el("span", { class: "small" });
+  container.replaceChildren(
+    el("a", { class: "btn", href: `${base}&body=${encodeURIComponent(intro + "\n\n(paste the copied YAML here)")}`, target: "_blank", rel: "noopener" }, label),
+    el("button", { type: "button", class: "btn", onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
+    status,
+    el("div", { class: "notice" }, `The prefilled link would be ${num(url.length)} characters, over GitHub's ~8 KB limit. Copy the YAML, open the issue, paste it into the body.`));
+}
+
+// ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
+const RULE_GROUPS = [
+  [/^path not in/, "path not selected"], [/^excluded by path/, "excluded by path"], [/^excluded by id/, "excluded by id"],
+  [/^dims /, "dims not selected"], [/^modality /, "modality"], [/^organism /, "organism"],
+  [/^license .*unknown/, "licence unknown"], [/^license /, "licence not allowed"],
+  [/^annotations required/, "annotations required"], [/^annotation types/, "annotation types"], [/^annotation source/, "annotation source"],
+  [/^largest raw array under/, "array below minimum"], [/^no dataset folder/, "no mia-data folder"], [/^dedup/, "duplicate DOI"],
+  [/^record unreadable/, "record unreadable"], [/^no patch for dims/, "no patch for dims"], [/^no array shape/, "no array shape"],
+  [/^footprint/, "footprint too large"], [/^patch z/, "too few z slices"], [/^voxel size unknown/, "voxel size unknown"],
+  [new RegExp("^" + NOT_PREPARED + "$"), NOT_PREPARED],
+];
+const ruleGroup = rule => (RULE_GROUPS.find(([re]) => re.test(rule || "")) || [null, rule || "unknown"])[1];
+const ruleRank = group => { const i = RULE_GROUPS.findIndex(([, g]) => g === group); return i < 0 ? RULE_GROUPS.length : i; };
+function decisionOf(r) {
+  if (r.admitted && r.fit && r.fit.ok) return { group: "pool", reason: r.fit.reason };
+  if (r.rule === NOT_PREPARED) return { group: NOT_PREPARED, reason: `fits; dataset is ${r.prepared || "unprepared"}` };
+  if (r.admitted && r.fit) return { group: ruleGroup(r.fit.reason), reason: r.fit.reason };
+  return { group: ruleGroup(r.rule), reason: r.rule };
+}
+function joinRow(r) {
+  const rec = S.records.get(r.id)?.record || {};
+  const ds = S.datasets.get(r.id) || null;
+  return { ...r, title: rec.title || "", lic: rec.license?.spdx || "", url: rec.landing_url || null,
+    bytes: r.bytes ?? rec.data?.size_bytes ?? null, ds, raw: S.raw.get(r.id) || null, staged: S.stagedByRecord.get(r.id) || [],
+    fits: !!(r.fit && r.fit.ok), inPool: !!(r.admitted && r.fit && r.fit.ok), decision: decisionOf(r) };
+}
+const stagedUsable = a => !["evicted","missing"].includes(a.data?.state);
+
+// ---- the records table (the explorer's, with the registry columns)
+let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
+const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
+const COLS = [
+  { key: "id", label: "record", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
+  { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", { title: x.decision.reason }, pill(x.decision.group, x.inPool ? "pool" : "")) },
+  { key: "dims", label: "dims", get: x => x.dims || "" },
+  { key: "mod", label: "modality", get: x => x.modality_group || "" },
+  { key: "lic", label: "licence", get: x => x.lic },
+  { key: "prep", label: "preparation", get: x => x.prepared || "", cell: x => el("td", {}, statePill(x.prepared), x.ds?.issue ? " " : null, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : null) },
+  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data ? statePill(x.raw.data.state) : "", x.raw?.data?.bytes ? " " + fmtBytes(x.raw.data.bytes) : "") },
+  { key: "staged", label: "staged", get: x => x.staged.map(a => a.data?.levels_key || "").join(" "), cell: x => el("td", { class: "mono" }, x.staged.filter(stagedUsable).map(a => a.data?.levels_key || "?").join(" ")) },
+  { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
+  { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
+  { key: "w", label: "weight", num: true, get: x => x.weight || 0, cell: x => el("td", { class: "num" }, x.weight ? pct(x.weight) : "") },
+  { key: "split", label: "split", get: splitText },
+];
+function renderTableHead() {
+  const tr = el("tr");
+  for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
+  $("table").tHead.replaceChildren(tr);
+}
+function renderTable() {
+  renderTableHead();
+  const q = $("search").value.trim().toLowerCase(), fitOnly = $("fitOnly").checked;
+  const rows = currentRows.filter(x => (!fitOnly || x.fits) && (!q || [x.id, x.title, x.modality_group, x.lic, x.decision.group, x.prepared].join(" ").toLowerCase().includes(q)));
+  const col = COLS.find(c => c.key === sortKey);
+  rows.sort((a, b) => { const va = col.get(a), vb = col.get(b); return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir || (a.path < b.path ? -1 : 1); });
+  $("tableCount").textContent = `${num(rows.length)} rows` + (rows.length > shown ? `, showing ${num(shown)}` : "");
+  const tb = $("table").tBodies[0];
+  tb.replaceChildren(...rows.slice(0, shown).map(x => el("tr", { class: x.inPool ? "" : "out" }, ...COLS.map(c => c.cell ? c.cell(x) : el("td", { class: c.num ? "num" : "" }, String(c.get(x)))))));
+  if (!rows.length) tb.append(el("tr", {}, el("td", { colspan: COLS.length, class: "empty" }, currentRows.length ? "no row matches the search or the registry toggles" : "the spec admits no record")));
+  $("more").hidden = rows.length <= shown;
+}
+
+// ---- datasets: controls → YAML → POST /plan (debounced) → KPIs, funnel, charts, table, actions
+function chips(container, values, set, onchange) {
+  container.replaceChildren(...values.map(v => { const input = el("input", { type: "checkbox" }); input.checked = set.has(v); input.addEventListener("change", () => { if (input.checked) set.add(v); else set.delete(v); onchange(); }); return el("label", { class: "chip" }, input, v); }));
+}
+let planTimer = 0, planSeq = 0;
+function schedulePlan(ms) { clearTimeout(planTimer); planTimer = setTimeout(runPlan, ms ?? PLAN_DEBOUNCE_MS); renderActions(); }
+async function runPlan() {
+  if (!S.ref) return;
+  const seq = ++planSeq;
+  $("planStatus").textContent = "planning…";
+  try {
+    const plan = await api("/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: toSpecYaml(C, S.ref, S.meta.catalog_repo) }) });
+    if (seq !== planSeq) return;
+    S.plan = plan; S.planError = null;
+  } catch (e) {
+    if (seq !== planSeq) return;
+    S.plan = null; S.planError = e;
+    if (e.status !== 422 && e.status !== 409) banner(`POST /plan → ${e.status || "network error"}: ${e.message}`);
+  }
+  $("planStatus").textContent = "";
+  renderDatasets();
+}
+function bindControls() {
+  const replan = () => schedulePlan();
+  chips($("dims"), DIMS, C.dims, replan); chips($("lic"), LIC, C.lic, replan); chips($("src"), SRC, C.sources, replan);
+  const bind = (id, key, parse, after) => { const n = $(id); if (n.type === "checkbox") n.checked = C[key]; else n.value = String(C[key]);
+    n.addEventListener(n.type === "range" || n.type === "text" ? "input" : "change", () => { C[key] = n.type === "checkbox" ? n.checked : parse(n.value); after(); }); };
+  const text = v => v, int = v => +v;
+  bind("specName", "name", text, renderActions); bind("paths", "paths", text, replan);
+  bind("allowUnknown", "allowUnknown", null, replan); bind("annRequired", "annRequired", null, replan);
+  bind("minVox", "minVox", int, replan); bind("patch", "patch", int, replan); bind("level", "level", int, replan); bind("patchZ", "patchZ", int, replan);
+  bind("dedup", "dedup", null, replan); bind("temp", "T", int, replan);
+  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, renderDatasets);  // registry state: no new plan
+  $("download").addEventListener("click", () => {
+    const blob = new Blob([toSpecYaml(C, S.ref, S.meta.catalog_repo)], { type: "application/yaml" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: `${C.name.trim() || "buffer"}.yaml` }); document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  $("search").addEventListener("input", () => { shown = 150; renderTable(); });
+  $("fitOnly").addEventListener("change", () => { shown = 150; renderTable(); });
+  $("more").addEventListener("click", () => { shown += 300; renderTable(); });
+}
+function viewRows() {
+  if (!S.plan) return [];
+  const key = levelsKey(C);
+  return (S.plan.rows || []).map(joinRow).filter(x => (!C.preparedOnly || x.prepared === "prepared")
+    && (!C.rawCached || x.raw?.data?.state === "ready")
+    && (!C.stagedGeom || x.staged.some(a => a.data?.levels_key === key && stagedUsable(a))));
+}
+function renderActions() {
+  const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
+  issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
+    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Add the \`buffer:go\` label to plan it.`, yaml, S.ref ? null : "no catalog synced");
+  const todo = viewRows().filter(x => x.fits && x.prepared !== "prepared").map(x => x.id);
+  issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
+    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Add the \`prep:go\` label to hand them to mia-data.`,
+    toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : "every fitting record is prepared");
+}
+function renderPlanMessages() {
+  const box = $("planMsgs"); box.replaceChildren();
+  const e = S.planError;
+  if (e) box.append(el("div", { class: "notice" }, e.status === 422 ? "The service refused the spec (422):" : e.status === 409 ? "The catalog is not synced (409):" : `The plan failed (${e.status || "network error"}):`, el("pre", { class: "err" }, e.message)));
+  for (const msg of S.plan?.errors || []) box.append(el("div", { class: "notice" }, "plan error: " + msg));
+  for (const msg of S.plan?.warnings || []) box.append(el("div", { class: "notice" }, "warning: " + msg));
+}
+function renderDatasets() {
+  const F = C.patch * C.level;
+  $("footprint").textContent = `footprint ${num(F)} px = ${C.patch} × ${C.level} · levels ${levelsOf(C.level).join(", ")}`;
+  $("tVal").textContent = C.T.toFixed(2);
+  $("levelsKey").textContent = levelsKey(C);
+  renderPlanMessages(); renderActions();
+  const plan = S.plan, rows = viewRows(); currentRows = rows;
+  const fitting = rows.filter(x => x.fits), pool = rows.filter(x => x.inPool);
+  const count = state => fitting.filter(x => x.prepared === state).length;
+  const prepared = count("prepared"), inProgress = count("in-progress"), unprepared = fitting.length - prepared - inProgress;
+  const bytes = fitting.reduce((a, x) => a + (x.bytes || 0), 0);
+  const toFetch = fitting.filter(x => x.raw?.data?.state !== "ready").reduce((a, x) => a + (x.bytes || 0), 0);
+  const dimsIn = [...new Set(fitting.map(x => x.dims))].sort();
+  const top = pool.reduce((m, x) => Math.max(m, x.weight || 0), 0);
+  $("kpis").replaceChildren(
+    tile("Datasets that fit", plan ? num(fitting.length) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
+    tile("Prepared", num(prepared), "the buffer's pool today"),
+    tile("In progress", num(inProgress), "mia-data is preparing them"),
+    tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human · ${num(count("ineligible"))} ineligible`),
+    tile("Raw bytes to download", fmtBytes(toFetch), `of ${fmtBytes(bytes)} for every fitting dataset; the rest is cached`),
+    tile("Dimensionalities", dimsIn.length ? dimsIn.join(" · ") : "none", dimsIn.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
+    tile("Capacity", fmt(fitting.reduce((a, x) => a + (x.positions || 0), 0)), "non-overlapping coarsest crops in the fitting datasets"),
+    tile("Top dataset share", pool.length ? pct(top) : "—", "of the crops drawn from the prepared pool"));
+  // funnel: the plan's own counts, so it ignores the registry toggles
+  const groups = new Map();
+  const add = (g, n) => groups.set(g, (groups.get(g) || 0) + n);
+  for (const [rule, n] of Object.entries(plan?.excluded || {})) add(ruleGroup(rule), n);
+  for (const r of plan?.rows || []) { const d = decisionOf(r); if (d.group !== "pool") add(d.group, 1); }
+  let remaining = plan?.n_seen || 0;
+  const funnel = [...groups].sort((a, b) => ruleRank(a[0]) - ruleRank(b[0])).map(([label, value]) => { remaining -= value; return { label, value, sub: `${num(remaining)} remain after this rule`, color: label === NOT_PREPARED ? "var(--s4)" : "var(--accent)" }; });
+  if (plan) funnel.push({ label: "in the pool", value: (plan.rows || []).filter(r => r.admitted && r.fit && r.fit.ok).length, color: "var(--s3)" });
+  hbars($("funnel"), funnel, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
+  const byMod = new Map(); fitting.forEach(x => byMod.set(x.modality_group || "none", (byMod.get(x.modality_group || "none") || 0) + 1));
+  hbars($("bymod"), [...byMod].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value })), { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
+  const share = new Map(); pool.forEach(x => share.set(x.modality_group || "none", (share.get(x.modality_group || "none") || 0) + (x.weight || 0)));
+  hbars($("byweight"), [...share].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value, text: pct(value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
+  const heavy = pool.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 8);
+  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
+  shown = 150; renderTable();
+}
+async function viewDatasets() {
+  $("dsEmpty").hidden = !!S.ref; $("dsBody").hidden = !S.ref;
+  if (!S.ref) return;
+  await Promise.all([loadRegistry(), loadRecords()]);
+  renderDatasets();
+  schedulePlan(0);
+}
+
+// ---- buffers
+function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
+const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
+async function viewBuffers(id) {
+  const root = $("buffersBody");
+  if (id) return viewBuffer(root, id);
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const out = await load("/buffers");
+  const buffers = out?.buffers || [];
+  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer; open one for its events, status board, volumes, consumers and usage."),
+    table([
+      { label: "buffer", cell: b => bufferLink(b.id) },
+      { label: "spec", cell: b => b.config?.spec_name || "" },
+      { label: "latest event", cell: b => b.latest_event ? el("span", {}, statePill(b.latest_event.kind), " ", when(b.latest_event.at)) : "" },
+      { label: "volumes", num: true, cell: b => num(b.volumes) },
+      { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn") : "0" },
+      { label: "servable", cell: b => servableText(b.servable) },
+      { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
+      { label: "draws today", num: true, cell: b => num(b.draws_today) },
+    ], buffers, out ? "No buffers yet: open a buffer issue from the Datasets view." : "The buffer list did not load.",
+    b => ({ class: "click", onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
+}
+function sparkline(days) {
+  if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");
+  const W = 560, H = 130, left = 40, right = 8, top = 10, bottom = 22, plotW = W - left - right, plotH = H - top - bottom;
+  const max = Math.max(1, ...days.map(d => Math.max(d.draws || 0, d.empty || 0)));
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Draws per day, and empty answers per day" });
+  svg.append(svgEl("line", { x1: left, x2: W - right, y1: top + plotH, y2: top + plotH, class: "base" }));
+  const t = svgEl("text", { x: left - 6, y: top + 8, "text-anchor": "end", class: "tick" }); t.textContent = fmt(max); svg.append(t);
+  const slot = plotW / days.length, bw = Math.max(2, Math.min(18, slot * 0.7));
+  days.forEach((d, i) => {
+    const x = left + slot * i + (slot - bw) / 2, h = (d.draws || 0) / max * plotH, he = (d.empty || 0) / max * plotH;
+    svg.append(svgEl("rect", { x, y: top + plotH - h, width: bw, height: h, fill: "var(--accent)", rx: 2 }));
+    if (d.empty) svg.append(svgEl("rect", { x: x + bw / 2 - 1, y: top + plotH - he, width: 2, height: he, fill: "var(--warn)" }));
+    const hit = svgEl("rect", { x: left + slot * i, y: top, width: slot, height: plotH + bottom, fill: "transparent" }); svg.append(hit);
+    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " draws" }, { k: "var(--warn)", b: num(d.empty || 0), t: " empty answers" }, { t: `${num(d.consumers || 0)} consumers` }]);
+  });
+  for (const [i, anchor] of [[0, "start"], [days.length - 1, "end"]]) { const l = svgEl("text", { x: i ? W - right : left, y: H - 6, "text-anchor": anchor, class: "tick" }); l.textContent = days[i].day; svg.append(l); }
+  return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "draws"), el("span", {}, el("i", { style: "background:var(--warn)" }), "empty answers (204)")), svg);
+}
+function healthLine(usage) {
+  if (!usage) return el("div", { class: "small" }, "usage did not load");
+  const h = usage.last_hour || {}, total = (h.draws || 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
+  if (!total) return el("div", { class: "health" }, `no requests in the last hour (degraded above ${pct(limit)} empty)`);
+  const frac = (h.empty || 0) / total, bad = frac > limit;
+  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${num(total)} requests were empty (limit ${pct(limit)})`);
+}
+async function viewBuffer(root, id) {
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const e = encodeURIComponent(id);
+  const [status, board, events, usage] = await Promise.all([load(`/buffers/${e}/status`), load(`/buffers/${e}/datasets`), load(`/buffers/${e}/events`), load(`/usage/${e}`)]);
+  const meta = S.meta, cfg = status?.config || {}, evs = (events?.events || []).slice().sort((a, b) => b.seq - a.seq);
+  const retired = evs.find(x => x.kind === "retired");
+  const archive = retired && (/archive (\S+)/.exec(retired.detail || "") || [])[1];
+  const n = issueOf(id), roots = meta.roots || {};
+  const draws = status?.draws || {}, missing = new Set(status?.missing || []);
+  const volumes = [...new Set([...Object.keys(draws), ...missing])].sort().map(v => ({ id: v, draws: draws[v] || 0, missing: missing.has(v) }));
+  const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
+  root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
+    el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
+    el("h2", {}, id, " ", evs[0] ? statePill(evs[0].kind) : null),
+    el("div", { class: "links" },
+      n && meta.buffers_repo ? link(`https://github.com/${meta.buffers_repo}/issues/${n}`, `issue #${n}`) : null,
+      ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
+    retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
+    el("section", { class: "grid2" },
+      card("Usage", "Draws per day, and the requests answered empty.", healthLine(usage), sparkline(days.slice(-60)),
+        retired ? table([{ label: "day", cell: d => d.day }, { label: "draws", num: true, cell: d => num(d.draws) }, { label: "consumers", num: true, cell: d => num(d.consumers) }, { label: "empty", num: true, cell: d => num(d.empty) }], days, "no usage rows") : null),
+      card("Config", null, status ? kv([
+        ["spec", cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog", code(cfg.catalog_ref, 12)],
+        ["levels", (cfg.levels || []).join(", ")], ["patch", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
+        ["recipe", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} @ ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
+        ["plan hash", code(cfg.plan_hash, 12)], ["splits", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
+        ["servable", servableText(status.servable)], ["volumes", num(status.volumes)], ["max empty", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
+      ]) : el("div", { class: "empty" }, "the buffer's status did not load"))),
+    card("Events", null, table([
+      { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },
+      { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
+    ], evs, "no events yet")),
+    card("Status board", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", table([
+      { label: "record", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
+      { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
+    ], board?.datasets || [], "no dataset on the board yet")),
+    el("section", { class: "grid2" },
+      card("Volumes", `${num(status?.volumes || 0)} registered; listed here are the ones drawn from or flagged missing.`, table([
+        { label: "volume", cell: v => el("code", {}, v.id) }, { label: "draws", num: true, cell: v => num(v.draws) }, { label: "", cell: v => v.missing ? pill("missing", "warn") : "" },
+      ], volumes, "no draws and nothing missing")),
+      card("Consumers", null, table([
+        { label: "name", cell: c => c.name }, { label: "host", cell: c => c.host }, { label: "pid", num: true, cell: c => String(c.pid ?? "") },
+        { label: "rank", num: true, cell: c => c.rank == null ? "" : String(c.rank) }, { label: "split", cell: c => c.split },
+        { label: "last seen", cell: c => when(c.last_seen) }, { label: "", cell: c => c.stale ? pill("stale", "warn") : "" },
+      ], status?.consumers || [], "no consumer has registered"))),
+  ].filter(Boolean));
+}
+
+// ---- cache
+function meter(label, used, quota) {
+  const over = quota > 0 && used > quota;
+  return el("div", {}, el("div", { class: "label small" }, label),
+    el("div", { class: "meter" + (over ? " over" : ""), role: "meter", "aria-valuemin": "0", "aria-valuemax": String(quota || 0), "aria-valuenow": String(used || 0), "aria-label": label },
+      el("i", { style: `width:${quota > 0 ? Math.min(100, used / quota * 100) : 0}%` })),
+    el("div", { class: "small" }, quota > 0 ? `${fmtBytes(used)} of ${fmtBytes(quota)} (${pct(used / quota)})` : `${fmtBytes(used)} · unlimited`));
+}
+const list = xs => xs && xs.length ? el("div", {}, ...xs.map(x => el("div", { class: "mono" }, x))) : "none";
+async function viewCache() {
+  const root = $("cacheBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const [, locks, keeper] = await Promise.all([loadRegistry(), load("/locks"), load("/keeper")]);
+  const quota = S.meta.quota || {};
+  const k = keeper;
+  root.replaceChildren(
+    el("section", { class: "grid2" },
+      card("Totals against the quotas", quota.hold_hours ? `A free asset is held ${num(quota.hold_hours)} h before the keeper may evict it.` : null,
+        meter("raw cache", S.rawBytes, quota.raw_bytes), meter("staged pyramids", S.stagedBytes, quota.staged_bytes),
+        quota.headroom_bytes ? el("div", { class: "small" }, `headroom kept free: ${fmtBytes(quota.headroom_bytes)}`) : null),
+      card("The keeper's last pass", S.meta.keeper?.minutes ? `Runs every ${num(S.meta.keeper.minutes)} min; syncs the catalog every ${num(S.meta.keeper.catalog_sync_hours)} h.` : null,
+        k ? kv([
+          ["at", el("span", {}, when(k.at), k.dry_run ? " (dry run)" : "")], ["scanned / missing / new", `${num(k.scanned)} / ${num(k.missing)} / ${num(k.new)}`],
+          ["evicted", list(k.evicted)], ["reset stale", list(k.stale)], ["removed building", list(k.removed_building)], ["spared (locked)", list(k.locked)],
+          ["over quota", Object.keys(k.over_quota || {}).length ? Object.entries(k.over_quota).map(([kind, b]) => `${kind} ${fmtBytes(b)}`).join(" · ") : "none"],
+          ["signalled", list(k.signalled)], ["catalog", k.catalog || "not due"], ["errors", list(k.errors)],
+        ]) : el("div", { class: "empty" }, "The keeper has not reported a pass yet."))),
+    card("Raw cache", "One row per record's download.", table([
+      { label: "record", cell: a => a.key }, { label: "state", cell: a => statePill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
+      { label: "last used", cell: a => when(a.data?.last_used) }, { label: "buffers", num: true, cell: a => num((a.refs || []).length) },
+      { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" }, { label: "streams", num: true, cell: a => Array.isArray(a.data?.stream) ? num(a.data.stream.length) : "" },
+    ], S.rawAssets, "Nothing in the raw cache yet.")),
+    card("Staged pyramids", "One row per staged artifact.", table([
+      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "record", cell: a => a.data?.record || "" },
+      { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
+      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => statePill(a.data?.state) },
+      { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },
+      { label: "buffers", cell: a => { const s = el("span"); (a.refs || []).forEach((b, i) => s.append(i ? " " : "", bufferLink(b))); return s; } },
+      { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" },
+    ], S.stagedAssets, "Nothing staged yet.")),
+    card("Lock holders", "The workers' lock files, read-only.", table([
+      { label: "kind", cell: l => l.kind }, { label: "key", cell: l => el("code", {}, l.key) }, { label: "owner", cell: l => el("code", {}, l.owner) },
+      { label: "taken", cell: l => when(l.taken_at) }, { label: "heartbeat", cell: l => when(l.heartbeat_at) }, { label: "", cell: l => l.stale ? pill("stale", "warn") : "" },
+    ], locks?.locks || [], "No locks held.")));
+}
+
+// ---- preparation
+async function viewPreparation() {
+  const root = $("prepBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  await loadRegistry();
+  const meta = S.meta, rows = [...S.datasets.values()];
+  const by = state => rows.filter(d => d.state === state).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  const issue = d => d.issue ? ghIssue(meta.datasets_repo, d.issue) : "";
+  const q = label => `https://github.com/${meta.buffers_repo}/issues?q=${encodeURIComponent(`is:issue is:open label:${label}`)}`;
+  root.replaceChildren(
+    el("div", { class: "links" }, meta.buffers_repo ? link(q("prep:requested"), "open preparation requests") : el("span", { class: "small" }, "GET /meta names no buffers repo"),
+      meta.buffers_repo ? link(q("prep:needs-human"), "requests that need a human") : null),
+    card("In progress", "Datasets mia-data is preparing, with the stage it reached.", table([
+      { label: "record", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+    ], by("in-progress"), "Nothing in progress.")),
+    card("Needs a human", "Stopped datasets; the dataset issue says why.", table([
+      { label: "record", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+    ], by("needs-human"), "Nothing needs a human.")));
+}
+
+// ---- shell: top bar, theme, hash routing
+const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation };
+function route() {
+  const [name, ...rest] = location.hash.slice(1).split("/");
+  const view = VIEWS[name] ? name : "datasets";
+  document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
+  document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  hideTip();
+  VIEWS[view](rest.length ? decodeURIComponent(rest.join("/")) : "");
+}
+function renderTopbar() {
+  const c = S.catalogs[0];
+  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} records · synced `, when(c.synced_at)) : "no catalog synced");
+}
+function setupTheme() {
+  const root = document.documentElement;
+  try { const saved = localStorage.getItem("mia-theme"); if (saved) root.dataset.theme = saved; } catch { /* storage blocked: follow the system */ }
+  $("theme").addEventListener("click", () => {
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("mia-theme", root.dataset.theme); } catch { /* not remembered */ }
+  });
+}
+async function boot() {
+  setupTheme(); bindControls();
+  const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
+  S.meta = meta || {};
+  S.catalogs = (catalogs?.catalogs || []).slice().sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
+  S.ref = S.catalogs[0]?.ref || null;
+  renderTopbar();
+  window.addEventListener("hashchange", route);
+  route();
+}
+boot();
+})();
+</script>
+</body>
+</html>
