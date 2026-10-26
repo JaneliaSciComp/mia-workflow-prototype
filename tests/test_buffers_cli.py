@@ -249,6 +249,22 @@ def test_datasets_sync_reports_counts_and_409(tmp_path, monkeypatch, capsys):
     assert "try again" in capsys.readouterr().err
 
 
+def test_retire_prints_the_result_and_fails_on_a_registry_error(tmp_path, monkeypatch, capsys):
+    from mia_core.registry import RegistryError
+
+    registry = _sync_cfg(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(registry, "retire", lambda self, buffer: calls.append(buffer) or {"refs": 2, "draws": 5})
+    assert cli.main(["retire", "i7-e11"]) == 0 and calls == ["i7-e11"]
+    assert '"refs": 2' in capsys.readouterr().out
+
+    def unknown(self, buffer):
+        raise RegistryError(404, "unknown buffer zz")
+
+    monkeypatch.setattr(registry, "retire", unknown)
+    assert cli.main(["retire", "zz"]) == 1 and "unknown buffer zz" in capsys.readouterr().err
+
+
 def test_schedule_applies_the_poll_and_the_keeper(tmp_path, monkeypatch, capsys):
     _sync_cfg(tmp_path, monkeypatch)
     applied = []

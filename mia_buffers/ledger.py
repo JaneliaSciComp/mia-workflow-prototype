@@ -79,7 +79,9 @@ class Ledger:
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._lock = threading.Lock()
+        self._retiring = threading.Lock()  # one retire at a time: two would write the same archive's temp file
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
@@ -206,37 +208,49 @@ class Ledger:
         return out
 
     def retire(self, buffer: str, archive_dir: Path | None) -> dict:
-        """Drop the buffer's references and, archived first to `<archive_dir>/<buffer>.draws.jsonl.gz`, its draws,
-        in one transaction; with no `archive_dir` the draws are kept. Volumes and the config stay for the page.
-        A later retire appends to the archive (copied into the new file), never overwrites it; seq restarts at 1
+        """Drop the buffer's references and, archived first to `<archive_dir>/<buffer>.draws.jsonl.gz`, its draws;
+        with no `archive_dir` the draws are kept. Volumes and the config stay for the page. The archive is written
+        from a read-only connection, outside the service's lock (a large draws table stalls no other request); then
+        one short transaction deletes the refs and the archived draws (`seq` up to the max seen at the start). A
+        later retire appends to the archive (copied into the new file), never overwrites it; seq restarts at 1
         after a retire, so it is not unique within an archive."""
         archive = archive_dir / f"{buffer}.draws.jsonl.gz" if archive_dir is not None else None
-        # ponytail: the archive is written under the service-wide lock inside BEGIN IMMEDIATE, so every request for
-        # every buffer stalls for as long as this buffer's draws take to gzip; upgrade: archive from a separate read
-        # connection, then delete `seq <= archived max` in a short transaction
-        with self._transaction() as db:
-            drawn = 0
-            if archive is not None:
-                (any_draws,) = db.execute("SELECT EXISTS (SELECT 1 FROM draws WHERE buffer = ?)", (buffer,)).fetchone()
-                if any_draws:
-                    archive.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = archive.with_name(archive.name + ".tmp")
-                    with gzip.open(tmp, "wt") as out:
-                        if archive.exists():
-                            with gzip.open(archive, "rt") as earlier:
-                                shutil.copyfileobj(earlier, out)
-                        rows = db.execute(
-                            "SELECT seq, consumer, ts, descriptor FROM draws WHERE buffer = ? ORDER BY seq", (buffer,)
-                        )
-                        for seq, consumer, ts, descriptor in rows:  # streamed: never the whole table in memory
-                            line = {"seq": seq, "consumer": consumer, "ts": ts, "descriptor": json.loads(descriptor)}
-                            out.write(json.dumps(line) + "\n")
-                    # ponytail: a failure between this replace and COMMIT keeps the draws, so a retry appends their
-                    # lines again; dedupe by whole line (seq restarts at 1 after a retire, so it is not unique)
-                    os.replace(tmp, archive)
-                drawn = db.execute("DELETE FROM draws WHERE buffer = ?", (buffer,)).rowcount
-            refs = db.execute("DELETE FROM refs WHERE buffer = ?", (buffer,)).rowcount
+        with self._retiring:
+            last = self.max_seq(buffer)
+            if archive is not None and last:
+                self._archive_draws(buffer, archive, last)
+            # ponytail: draws recorded while the archive was written (seq > last) stay in the table; the next
+            # retire archives them. A retired buffer answers 410 to next/split, so only a race leaves any.
+            with self._transaction() as db:
+                drawn = 0
+                if archive is not None:
+                    drawn = db.execute("DELETE FROM draws WHERE buffer = ? AND seq <= ?", (buffer, last)).rowcount
+                refs = db.execute("DELETE FROM refs WHERE buffer = ?", (buffer,)).rowcount
         return {"refs": refs, "draws": drawn, "archive": str(archive) if archive and archive.exists() else None}
+
+    def _archive_draws(self, buffer: str, archive: Path, last: int) -> None:
+        """Append the buffer's draws with `seq <= last` to the gzipped archive, streamed from a read-only
+        connection of its own (never the whole table in memory, never under the service's lock)."""
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        tmp = archive.with_name(archive.name + ".tmp")
+        reader = sqlite3.connect(f"{self._path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            with gzip.open(tmp, "wt") as out:
+                if archive.exists():
+                    with gzip.open(archive, "rt") as earlier:
+                        shutil.copyfileobj(earlier, out)
+                rows = reader.execute(
+                    "SELECT seq, consumer, ts, descriptor FROM draws WHERE buffer = ? AND seq <= ? ORDER BY seq",
+                    (buffer, last),
+                )
+                for seq, consumer, ts, descriptor in rows:
+                    line = {"seq": seq, "consumer": consumer, "ts": ts, "descriptor": json.loads(descriptor)}
+                    out.write(json.dumps(line) + "\n")
+        finally:
+            reader.close()
+        # ponytail: a failure between this replace and the delete keeps the draws, so a retry appends their lines
+        # again; dedupe by whole line (seq restarts at 1 after a retire, so it is not unique)
+        os.replace(tmp, archive)
 
     def backup(self, dest: Path) -> None:
         """Write a consistent copy of the ledger to `dest`, atomically (temp file, then rename)."""

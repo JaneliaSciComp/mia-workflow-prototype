@@ -552,6 +552,19 @@ def test_retire_route_archives_and_frees_refs(tmp_path):
     assert worker(s, "DELETE", "/buffers/zz/refs")[0] == 404
 
 
+def test_a_retired_buffer_serves_no_consumer(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"))
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    call(s, "POST", "/buffers/b/events", payload={"kind": "retired"})
+    gone = (410, {"error": "buffer retired"})
+    assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[:2] == gone
+    assert call(s, "GET", "/buffers/b/split/val", {"consumer": cid})[:2] == gone
+    assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[:2] == gone
+    assert call(s, "GET", "/buffers/b/status")[0] == 200  # the page still reads it
+
+
 def test_status_stats_pyramids_and_next_skips_missing(tmp_path, monkeypatch):
     staged = tmp_path / "staged"
     s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
@@ -563,8 +576,8 @@ def test_status_stats_pyramids_and_next_skips_missing(tmp_path, monkeypatch):
     assert out["missing"] == [] and out["servable"] == {"train": 2, "val": 2}
     shutil.rmtree(staged / "c")
     seen = []
-    real_isdir = __import__("os").path.isdir
-    monkeypatch.setattr("mia_buffers.api.os.path.isdir", lambda path: seen.append(path) or real_isdir(path))
+    real_exists = __import__("os").path.exists
+    monkeypatch.setattr("mia_buffers.api.os.path.exists", lambda path: seen.append(path) or real_exists(path))
     out = call(s, "GET", "/buffers/b/status")[1]
     assert out["missing"] == ["c"] and out["servable"] == {"train": 1, "val": 1} and out["volumes"] == 2
     assert len(seen) == 2  # each volume's path once per call
@@ -584,7 +597,7 @@ def test_status_without_a_staged_root_does_not_stat(tmp_path, monkeypatch):
     def boom(path):
         raise AssertionError(f"stat {path}")
 
-    monkeypatch.setattr("mia_buffers.api.os.path.isdir", boom)
+    monkeypatch.setattr("mia_buffers.api.os.path.exists", boom)
     out = call(s, "GET", "/buffers/b/status")[1]
     assert out["missing"] == [] and out["servable"] == {"train": 1, "val": 1}
 
@@ -598,8 +611,8 @@ def test_buffers_list_does_not_stat(tmp_path, monkeypatch):
     def boom(path):
         raise AssertionError(f"stat {path}")
 
-    monkeypatch.setattr("mia_buffers.api.os.path.isdir", boom)
-    monkeypatch.setattr("os.path.isdir", boom)
+    monkeypatch.setattr("mia_buffers.api.os.path.exists", boom)
+    monkeypatch.setattr("os.path.exists", boom)
     status, out, _ = call(s, "GET", "/buffers")
     assert status == 200 and [row["id"] for row in out["buffers"]] == ["b"]
     assert out["buffers"][0]["missing"] == 1 and out["buffers"][0]["servable"] == {"train": 0, "val": 0}

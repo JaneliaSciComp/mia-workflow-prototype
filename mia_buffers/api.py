@@ -244,6 +244,13 @@ class BufferService:
             raise HttpError(404, f"unknown buffer {buffer}")
         return BufferConfig.model_validate(config)
 
+    def _serving(self, buffer: str) -> BufferConfig:
+        """The config of a buffer consumers may still use: 410 once its latest event is `retired`."""
+        config = self._config(buffer)
+        if (self.ledger.latest_event(buffer) or {}).get("kind") == "retired":
+            raise HttpError(410, "buffer retired")
+        return config
+
     def _consumer(self, buffer: str, query: dict[str, str]) -> str:
         consumer_id = query.get("consumer", "")
         if not self.ledger.touch(buffer, consumer_id):
@@ -437,7 +444,7 @@ class BufferService:
         return 200, self.ledger.retire(buffer, self.archive_dir), {}
 
     def _add_consumer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        self._config(buffer)
+        self._serving(buffer)
         info = _parse(ConsumerBody, body)
         return 201, {"consumer_id": self.ledger.add_consumer(buffer, info.model_dump())}, {}
 
@@ -448,7 +455,7 @@ class BufferService:
         return str(consumer["split"])
 
     def _next(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        config = self._config(buffer)
+        config = self._serving(buffer)
         consumer_id = self._consumer(buffer, query)
         n = _int(query, "n", 1, low=1, high=MAX_N)
         split = self._split_of(buffer, consumer_id)
@@ -467,7 +474,7 @@ class BufferService:
         return 200, {"descriptors": self.ledger.record_draws(buffer, consumer_id, descriptors)}, {}
 
     def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
-        config = self._config(buffer)
+        config = self._serving(buffer)
         self._consumer(buffer, query)
         start, n = _int(query, "from", 0, low=0, high=10**9), _int(query, "n", 1, low=1, high=MAX_N)
         size = config.split_sizes.get(split, DEFAULT_SPLIT_SIZE)
@@ -496,7 +503,7 @@ class BufferService:
         volumes = self.ledger.volumes(buffer)
         if self.staged_root is not None:  # a service without one (tests, a dev service) has no view of the disk
             for index, volume in enumerate(volumes):
-                missing = not os.path.isdir(volume.path)
+                missing = not os.path.exists(volume.path)
                 if missing != volume.missing:
                     self.ledger.set_volume_missing(buffer, volume.id, missing, volume.path)
                     volumes[index] = replace(volume, missing=missing)

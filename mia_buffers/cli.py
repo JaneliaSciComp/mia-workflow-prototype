@@ -357,6 +357,19 @@ async def cmd_datasets_sync(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_retire(cfg: Config, args: argparse.Namespace) -> int:
+    """Release a buffer's references and archive its draws by hand (what a `buffer:retire` does, without the
+    workflow: the issue's stage and the buffer's events stay as they are)."""
+    try:
+        with Registry.from_config(cfg.service) as registry:
+            retired = registry.retire(args.buffer)
+    except RegistryError as error:
+        print(error.message, file=sys.stderr)
+        return 1
+    print(json.dumps(retired))
+    return 0
+
+
 def _deployment(args: argparse.Namespace) -> int:
     """Run a command that needs mia_buffers.yaml and Temporal."""
     cfg = load_config(args.config)
@@ -369,6 +382,7 @@ def _deployment(args: argparse.Namespace) -> int:
         "catalog": cmd_catalog_sync,
         "datasets": cmd_datasets_sync,
         "assets": cmd_assets_sync,
+        "retire": cmd_retire,
     }[args.command]
     return asyncio.run(command(cfg, args))
 
@@ -430,6 +444,10 @@ def main(argv: list[str] | None = None) -> int:
         if name == "assets":
             sync.add_argument("--dry-run", action="store_true", help="report what would be removed; remove nothing")
         sync.set_defaults(func=_deployment)
+    retire = sub.add_parser("retire", help="release a buffer's references and archive its draws (buffer-api)")
+    retire.add_argument("buffer", help="buffer id (the round id, i<issue>-e<event>)")
+    retire.add_argument("--config", help="path to mia.yaml (default: $MIA_CONFIG or ./mia.yaml)")
+    retire.set_defaults(func=_deployment)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

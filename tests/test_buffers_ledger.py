@@ -287,3 +287,22 @@ def test_buffers_summary_and_missing_flag(tmp_path):
     }
     ledger.set_volume_missing("b1", "c", False, "/staged/c")
     assert ledger.buffers()[0]["servable"] == {"train": 2}
+
+
+def test_retire_keeps_a_draw_recorded_while_the_archive_is_written(tmp_path, monkeypatch):
+    """The archive is read outside the lock: a draw recorded meanwhile has a newer seq and stays in the table."""
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_buffer("b1", {})
+    cid = ledger.add_consumer("b1", INFO)
+    ledger.record_draws("b1", cid, [{"volume": "a"}, {"volume": "a"}])
+    archive_draws = ledger._archive_draws
+
+    def draw_meanwhile(buffer, archive, last):
+        archive_draws(buffer, archive, last)
+        ledger.record_draws("b1", cid, [{"volume": "late"}])  # would deadlock if the archive held the lock
+
+    monkeypatch.setattr(ledger, "_archive_draws", draw_meanwhile)
+    out = ledger.retire("b1", tmp_path / "archive")
+    assert out["draws"] == 2 and ledger.max_seq("b1") == 3
+    with gzip.open(tmp_path / "archive" / "b1.draws.jsonl.gz", "rt") as fh:
+        assert [json.loads(line)["seq"] for line in fh] == [1, 2]

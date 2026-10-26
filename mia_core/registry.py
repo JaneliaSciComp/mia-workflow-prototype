@@ -162,8 +162,9 @@ class Registry:
         return self.request("GET", "/buffers")["buffers"]
 
     def retire(self, buffer: str) -> dict:
-        """Drop the buffer's references and archive its draws: {refs, draws, archive}."""
-        return self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/refs")
+        """Drop the buffer's references and archive its draws: {refs, draws, archive}. The archive gzips every
+        draw of the buffer: minutes on a large one, so the sync timeout."""
+        return self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/refs", timeout=SYNC_TIMEOUT_S)
 
     def status(self, buffer: str) -> dict:
         """The buffer's status (stats its pyramids, flags the missing); a consumer route, the token is harmless."""
