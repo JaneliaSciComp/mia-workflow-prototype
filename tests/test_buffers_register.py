@@ -38,6 +38,7 @@ def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3)
     return staged
 
 
+PINNED = {"recipe": {"tensorizer": "muvit-2d"}, "plan_hash": "ph"}  # buffer_config requires both
 ROW = {
     "id": "u937",
     "weight": 0.5,
@@ -76,7 +77,7 @@ def test_volume_bodies_carry_the_artifact(tmp_path, spec_2d):  # noqa: F811
 
 def test_buffer_config_from_plan(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "abc", "catalog_ref": "r", "rows": []}
-    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 8, "test": 8})
+    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 8, "test": 8}, **PINNED)
     assert cfg["levels"] == [1, 2, 4] and cfg["patch"] == 256 and cfg["channels"] == "all" and cfg["seed"] == 0
     assert cfg["splits"] == {"train": 0.8, "val": 0.1, "test": 0.1} and cfg["split_sizes"] == {"val": 8, "test": 8}
     assert cfg["tensorizer_params"] == {"normalize": "percentile", "range": [1, 99], "clip": True, "scope": "patch"}
@@ -238,14 +239,11 @@ def test_malformed_sample_is_refused(tmp_path, spec_2d, sample):  # noqa: F811
 
 def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "h", "catalog_ref": None}
-    params = buffer_config(plan, scoped(spec_2d, "dataset"), tensorizer="muvit-2d", split_sizes={"val": 1, "test": 1})
+    sizes = {"val": 1, "test": 1}
+    params = buffer_config(plan, scoped(spec_2d, "dataset"), tensorizer="muvit-2d", split_sizes=sizes, **PINNED)
     assert params["tensorizer_params"]["scope"] == "dataset"
-    assert (
-        buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 1, "test": 1})["tensorizer_params"][
-            "scope"
-        ]
-        == "patch"
-    )
+    patch_params = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes=sizes, **PINNED)
+    assert patch_params["tensorizer_params"]["scope"] == "patch"
 
 
 def test_dataset_scope_refuses_volumes_with_other_channel_counts(tmp_path, spec_2d):  # noqa: F811
@@ -284,10 +282,18 @@ def test_split_seed_comes_from_the_row_not_the_spec(tmp_path, spec_2d):  # noqa:
     assert planes(ROW, spec_2d) == planes(ROW, spec_with(spec_2d, **{"sampling.seed": 99}))
 
 
-def test_volume_bodies_refuse_a_row_without_a_split(tmp_path, spec_2d):  # noqa: F811
+def test_a_row_planned_before_d_falls_back_to_the_spec_fractions(tmp_path, spec_2d, caplog):  # noqa: F811
+    """A plan.json written before milestone D has no `split` on its rows: registration uses the spec's fractions
+    and seed, and says so once, rather than failing a live round."""
     staged = write_stage_json(tmp_path / "u937")
-    with pytest.raises(ValueError, match="no split policy; plan again"):
-        volume_bodies({**ROW, "split": None}, staged, spec_2d)
+    fallback = {"policy": "fractions", "fractions": dict(spec_2d.splits.fractions), "seed": spec_2d.splits.seed}
+    with caplog.at_level("WARNING", logger="mia_buffers.register"):
+        [(_, old)] = volume_bodies({**ROW, "split": None}, staged, spec_2d)
+    [(_, new)] = volume_bodies({**ROW, "split": fallback}, staged, spec_2d)
+    assert old["split_planes"] == new["split_planes"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "u937: plan row has no split policy (planned before D): using the spec's fractions"
+    ]
 
 
 def test_buffer_config_carries_recipe_plan_hash_and_lifecycle(spec_2d):  # noqa: F811

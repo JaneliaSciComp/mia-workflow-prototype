@@ -420,7 +420,7 @@ class BufferService:
         return 200, {"buffer": buffer, "datasets": self.ledger.buffer_datasets(buffer)}, {}
 
     def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        self._config(buffer)
+        # no config check: `created` and `planned` precede the buffer's config (create_buffer runs at sourcing)
         event = _parse(EventBody, body)
         if event.kind not in EVENT_KINDS:
             raise HttpError(422, f"kind must be one of {list(EVENT_KINDS)}, got {event.kind!r}")
@@ -430,7 +430,6 @@ class BufferService:
         return 200, added, {}
 
     def _events(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        self._config(buffer)
         return 200, {"buffer": buffer, "events": self.ledger.events(buffer)}, {}
 
     def _retire(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:

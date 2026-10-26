@@ -530,6 +530,9 @@ def test_status_board_routes(tmp_path):
     events = call(s, "GET", "/buffers/b/events")[1]["events"]
     assert [(event["seq"], event["kind"]) for event in events] == [(1, "created"), (2, "needs-human")]
     assert call(s, "GET", "/buffers")[1]["buffers"][0]["latest_event"]["kind"] == "needs-human"
+    # a round's `created` and `planned` come before its buffer config: the events routes need none
+    assert worker(s, "POST", "/buffers/early/events", {"kind": "created"})[0] == 200
+    assert [event["kind"] for event in call(s, "GET", "/buffers/early/events")[1]["events"]] == ["created"]
 
 
 def test_retire_route_archives_and_frees_refs(tmp_path):

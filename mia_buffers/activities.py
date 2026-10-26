@@ -54,6 +54,7 @@ from .models import (
     BufferState,
     DatasetIssue,
     DatasetPlan,
+    DegradedSignal,
     DropResult,
     FetchJobArgs,
     FetchResult,
@@ -65,10 +66,11 @@ from .models import (
     SourcingLimits,
     StageJobArgs,
     StageResult,
+    job_key,
 )
-from .plan import MANUAL_DROP_NOTE, Row, _group_key, build_plan, load_records
+from .plan import MANUAL_DROP_NOTE, Row, _group_key, build_plan, plan_hash
 from .poll import run_poll
-from .register import buffer_config, volume_bodies
+from .register import buffer_config, recipe_for, volume_bodies
 from .spec import SpecError, load_spec
 from .status import render_drop_comment, render_plan_comment
 
@@ -93,6 +95,15 @@ DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
+STAGE_EVENTS = {  # a stage label's lifecycle event on the buffer's page (the buffer id is the round id)
+    "planning": "created",
+    "plan-review": "planned",
+    "sourcing": "approved",
+    "ready": "ready",
+    "idle": "idle",
+    "retired": "retired",
+    "needs-human": "needs-human",
+}
 OVER_QUOTA = (
     "The {kind} root is over quota by {over_by} bytes and nothing is evictable (every asset is referenced, held or "
     "building). Raise `quota.{kind}_bytes`, retire a buffer, or wait for `quota.hold_hours`."
@@ -179,6 +190,9 @@ class Activities:
             self.verify_drop,
             self.create_buffer,
             self.register_dataset,
+            self.mark_dataset,
+            self.retire_buffer,
+            self.raw_ready,
             self.comment_drop,
             self.nudge_dataset,
             self.poll,
@@ -260,6 +274,12 @@ class Activities:
         """<staged_root>/<levels key>/<record>/<artifact id>: one immutable directory per distinct pyramid."""
         return self.cfg.paths.staged_root / self._levels_key(round_id) / record / self._artifact(round_id, record)
 
+    def _building_dir(self, round_id: str, record: str) -> Path:
+        """Where the round's stage job writes the pyramid, next to its final directory; read_stage renames it there
+        once the job says ok (`.building-<artifact>-<stage job key>`, so two rounds never share one)."""
+        staged = self._staged_dir(round_id, record)
+        return staged.parent / f".building-{staged.name}-{job_key(_issue_of(round_id), round_id, record)}"
+
     def _cache_dir(self, record: str) -> Path:
         if not ID_RE.fullmatch(record):
             raise ValueError(f"bad record id {record!r}")
@@ -312,13 +332,17 @@ class Activities:
     @activity.defn(name="plan")
     @mia_permanent_errors
     async def plan(self, issue: int, round_id: str, pins: BufferPins) -> PlanResult:
-        """Build the plan over the catalog snapshot; plan.json and plan.md go to the round dir and to the round's
-        browsable workspace. Returns the summary the workflow needs."""
-        spec = self._spec(round_id)
-        snapshot_dir = self.cfg.paths.work_root / "_catalog" / pins.catalog_ref
-        plan = await asyncio.to_thread(
-            build_plan, spec, pins.spec_hash, pins.catalog_ref, await asyncio.to_thread(load_records, snapshot_dir)
-        )
+        """Build the plan over buffer-api's records at the round's catalog ref (synced into it first when it has
+        never seen the ref) and its prepared datasets; plan.json and plan.md go to the round dir and to the round's
+        browsable workspace. Returns the summary the workflow needs. A registry outage raises: the activity retries."""
+        from .cli import catalog_sync  # the `catalog sync` command's body; imported here, not with the activities
+
+        spec, ref, registry = self._spec(round_id), pins.catalog_ref, self.registry
+        if ref not in {catalog["ref"] for catalog in await asyncio.to_thread(registry.catalogs)}:
+            await catalog_sync(self.cfg, self.gh_catalog, registry, ref)
+        records = await asyncio.to_thread(registry.records, ref)
+        prepared = {row["id"] for row in await asyncio.to_thread(registry.datasets, "prepared")}
+        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared)
         tensorizer = self.cfg.sourcing.tensorizer
         if not (self.cfg.harness.dir / "tensorizers" / tensorizer / "tensorizer.yaml").is_file():
             plan.errors.append(f"no tensorizer {tensorizer} in the harness checkout")
@@ -344,6 +368,8 @@ class Activities:
             spec.sourcing.dataset_timeout_days,
             list(spec.sampling.levels),
             int(patch),
+            auto_approve=spec.plan.auto_approve,
+            plan_hash=plan_hash(plan_json),
         )
 
     @activity.defn(name="limits")
@@ -378,6 +404,14 @@ class Activities:
             await gh.add_labels(issue, [want])
         if not (state and state.round_id):
             return
+        if (kind := STAGE_EVENTS.get(stage)) is not None:
+            buffer, registry = state.buffer_id or state.round_id, self.registry
+            await asyncio.to_thread(
+                best_effort,
+                lambda: registry.event(buffer, kind, issue=issue, event_id=None, detail=detail[:200]),
+                f"{kind} event of {buffer}",
+                log,
+            )
         paths = self.cfg.paths
         links = {"Workspace": paths.link(self._round_workspace(issue, state.round_id))}
         if state.levels and state.patch:
@@ -542,24 +576,24 @@ class Activities:
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
     async def prepare_stage(self, issue: int, round_id: str, record: str) -> str:
-        """The stage job's workspace with record.yaml and binding.yaml; the raw cache and staged directories
-        exist afterwards (a mount must). Returns the workspace path."""
+        """The stage job's workspace with record.yaml and binding.yaml; the raw cache and the round's building
+        directory exist afterwards (a mount must). Returns the workspace path."""
         workspace = self._round_workspace(issue, round_id) / f"stage-{record}"
         workspace.mkdir(parents=True, exist_ok=True)
         write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
         shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
         self._cache_dir(record).mkdir(parents=True, exist_ok=True)
-        self._staged_dir(round_id, record).mkdir(parents=True, exist_ok=True)
+        self._building_dir(round_id, record).mkdir(parents=True, exist_ok=True)
         return str(workspace)
 
     @activity.defn(name="submit")
     @mia_permanent_errors
     async def submit(self, key: str, args: StageJobArgs) -> str:
-        """Build the stage job (snippets at the binding's commit, the staged directory as `out`), refuse hosts a
-        fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged asset
-        row says `staging` under it (best effort)."""
+        """Build the stage job (snippets at the binding's commit, the round's building directory as `out`), refuse
+        hosts a fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged
+        asset row says `staging` under it (best effort), at the final path read_stage publishes to."""
         staged = self._staged_dir(args.round_id, args.record)
-        args.out = str(staged)
+        args.out = str(self._building_dir(args.round_id, args.record))
         job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: stage_job(self.cfg, args, snap))
         fields = {
             "state": "staging",
@@ -609,8 +643,14 @@ class Activities:
     @activity.defn(name="read_stage")
     @mia_permanent_errors
     async def read_stage(self, round_id: str, record: str) -> StageResult:
-        """The stage job's stage.json, reduced; tolerant of any shape."""
-        report = _stage_json(self._staged_dir(round_id, record))
+        """The stage job's stage.json, reduced; tolerant of any shape. An ok build is published: the artifact block
+        written into its stage.json, then the building directory renamed to the final one (when that exists already,
+        an identical pyramid won: the build is removed and the final one reused). A failed build stays where it is,
+        for the keeper's `.building-*` rule. Idempotent on retry."""
+        final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record)
+        report = _stage_json(building if building.exists() else final)
+        if isinstance(report, dict) and report.get("ok") is True and building.exists():
+            report = await asyncio.to_thread(self._publish, round_id, record, report, building, final)
         if not isinstance(report, dict):
             return StageResult(False, errors=["stage.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
@@ -626,23 +666,52 @@ class Activities:
         await self._record_assets(round_id, record, result)
         return result
 
+    def _artifact_block(self, round_id: str, record: str) -> dict:
+        """Every input the staged artifact id hashes, as stage.json's `artifact` and the staged asset row keep them."""
+        pins = self._pins(round_id)
+        return {
+            "id": self._artifact(round_id, record),
+            "binding_hash": hashlib.sha256(self._binding_path(round_id, record).read_bytes()).hexdigest(),
+            "levels_key": self._levels_key(round_id),
+            "voxel_size_nm": self._row(round_id, record).get("voxel_size_nm"),
+            "harness_commit": pins.harness_commit,
+            "env_digest": pins.env_digest,
+        }
+
+    def _publish(self, round_id: str, record: str, report: dict, building: Path, final: Path) -> Any:
+        """Write the artifact block into the build's stage.json and rename the build to its final directory. Returns
+        the published report: the build's, or the final directory's when that was there first."""
+        report["artifact"] = self._artifact_block(round_id, record)
+        write_atomic(building / "stage.json", json.dumps(report, indent=2))
+        try:
+            os.rename(building, final)
+        except OSError:
+            published = _stage_json(final)
+            if isinstance(published, dict) and published.get("ok") is True:
+                log.info("%s: %s was published already; reusing it, removing %s", record, final, building.name)
+                shutil.rmtree(building)
+                return published
+            # a failed build left in place before builds had their own directory: aside, for the `.building-*` sweep
+            os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
+            os.rename(building, final)
+        return report
+
     async def _record_assets(self, round_id: str, record: str, result: StageResult) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
         input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
         record's raw cache as files.json lists it, both just used."""
-        artifact, pins = self._artifact(round_id, record), self._pins(round_id)
-        binding_path, cache = self._binding_path(round_id, record), self._cache_dir(record)
-        binding = yaml.safe_load(binding_path.read_text())
-        staged_dir, now = self._staged_dir(round_id, record), time.time()
+        block, cache = self._artifact_block(round_id, record), self._cache_dir(record)
+        binding = yaml.safe_load(self._binding_path(round_id, record).read_text())
+        staged_dir, now, artifact = self._staged_dir(round_id, record), time.time(), block["id"]
         staged = {
             "record": record,
-            "levels_key": self._levels_key(round_id),
+            "levels_key": block["levels_key"],
             "path": str(staged_dir),
             "artifact": artifact,
-            "binding_hash": hashlib.sha256(binding_path.read_bytes()).hexdigest(),
-            "harness_commit": pins.harness_commit,
-            "env_digest": pins.env_digest,
-            "voxel_size_nm": self._row(round_id, record).get("voxel_size_nm"),
+            "binding_hash": block["binding_hash"],
+            "harness_commit": block["harness_commit"],
+            "env_digest": block["env_digest"],
+            "voxel_size_nm": block["voxel_size_nm"],
             "round": round_id,
             "ok": result.ok,
             "volumes": result.volumes,
@@ -692,6 +761,12 @@ class Activities:
         manifest = await asyncio.to_thread(read_files_json, self._cache_dir(record))
         ready, missing = cache_missing(manifest, urls, stream)  # raw_asset's `ready` rule, without the du
         return RawStatus(ready, missing, texts(stream))
+
+    @activity.defn(name="raw_ready")
+    @mia_permanent_errors
+    async def raw_ready(self, round_id: str, record: str) -> bool:
+        """Whether the record's raw cache still holds its binding's files: a missing pyramid can be staged again."""
+        return (await self.raw_status(round_id, record)).ready
 
     @activity.defn(name="check_quota")
     @mia_permanent_errors
@@ -823,13 +898,22 @@ class Activities:
     @activity.defn(name="create_buffer")
     @mia_permanent_errors
     async def create_buffer(self, round_id: str, buffer_id: str) -> None:
-        """`PUT buffers/<id>` from the round's plan and spec."""
-        cfg = self.cfg
+        """`PUT buffers/<id>` from the round's plan and spec, pinned to the round's harness and plan.json; no event
+        (set_stage("sourcing") writes `approved`)."""
+        cfg, spec, pins = self.cfg, self._spec(round_id), self._pins(round_id)
+        plan_text = (self._round_dir(round_id) / "plan.json").read_text()
         body = buffer_config(
-            self._plan(round_id),
-            self._spec(round_id),
+            json.loads(plan_text),
+            spec,
             tensorizer=cfg.sourcing.tensorizer,
             split_sizes={"val": cfg.sourcing.val_size, "test": cfg.sourcing.test_size},
+            recipe=recipe_for(
+                spec,
+                tensorizer=cfg.sourcing.tensorizer,
+                harness_commit=pins.harness_commit,
+                env_digest=pins.env_digest,
+            ),
+            plan_hash=plan_hash(plan_text),
         )
         await asyncio.to_thread(self.registry.request, "PUT", f"/buffers/{quote(buffer_id, safe='')}", json=body)
 
@@ -862,12 +946,34 @@ class Activities:
                 result.registered.append(volume_id)
         return result
 
+    @activity.defn(name="mark_dataset")
+    @mia_permanent_errors
+    async def mark_dataset(
+        self, buffer: str, record: str, status: str, reason: str = "", job: str | None = None
+    ) -> None:
+        """Put the dataset's row on the buffer's status board, best effort: an outage is logged, never raised."""
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.put_buffer_dataset(buffer, record, status, reason, job),
+            f"board {buffer} {record}",
+            log,
+        )
+
+    @activity.defn(name="retire_buffer")
+    @mia_permanent_errors
+    async def retire_buffer(self, round_id: str, buffer_id: str) -> dict:
+        """Release the buffer's references and archive its draws ({refs, draws, archive}); a failure raises, so
+        the workflow retries."""
+        return await asyncio.to_thread(self.registry.retire, buffer_id)
+
     # --- the cache keeper ----------------------------------------------------------------------
 
     @activity.defn(name="keep")
     async def keep(self, dry_run: bool = False) -> KeeperReport:
         """One pass of the cache keeper (rules in keeper.py), each step best effort, a failure an `errors` entry:
-        sync datasets and assets; the catalog when `keeper.catalog_sync_hours` have passed; rows building under an
+        sync datasets and assets; signal the workflows of ready and idle buffers (degraded, idle, retire); the catalog
+        when `keeper.catalog_sync_hours` have passed; rows building under an
         ended job reset; `.building-*` directories older than `quota.hold_hours` removed; free assets evicted per
         kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
         the resets, removals and evictions are only reported. The catalog sync runs last, so a slow one never
@@ -899,6 +1005,7 @@ class Activities:
             report.scanned, report.missing, report.new = (
                 int(synced.get(name) or 0) for name in ("scanned", "missing", "new")
             )
+            await step("buffers", self._keeper_buffers(report, now, dry_run))
             await step("stale builds", self._keeper_stale(report, dry_run))
             for path in synced.get("building") or []:
                 await step("building", self._keeper_building(report, Path(path), roots, hold_s, now, dry_run))
@@ -923,6 +1030,44 @@ class Activities:
         ref, count = await catalog_sync(self.cfg, self.gh_catalog, self.registry)
         write_atomic(mark, str(int(now)))
         report.catalog = f"{ref} ({count} records)"
+
+    async def _keeper_buffers(self, report: KeeperReport, now: float, dry_run: bool) -> None:
+        """Watch the ready and idle buffers of a workflow (id `i<issue>-e<event>`): a pyramid gone from disk signals
+        `degraded` with its records, a ready buffer no consumer has seen for `idle_hours` signals `idle`, an idle one
+        older than `retire_after_days` signals `retire`. Dry run, or no Temporal client (the CLI): only reported."""
+        from temporalio.service import RPCError, RPCStatusCode
+
+        registry = self.registry
+        for buffer in await asyncio.to_thread(registry.buffers):
+            buffer_id, latest, config = buffer["id"], buffer.get("latest_event") or {}, buffer["config"]
+            kind = latest.get("kind")
+            if not (ROUND_RE.fullmatch(buffer_id) and kind in ("ready", "idle")):
+                continue
+            signals: list[tuple[str, Any, str]] = []
+            missing = (await asyncio.to_thread(registry.status, buffer_id))["missing"]  # stats the pyramids
+            if missing:
+                records = sorted({volume.split("/", 1)[0] for volume in missing})
+                reason = "pyramid missing: " + ", ".join(missing)
+                signals.append(("degraded", DegradedSignal(records, text(reason, 500)), ",".join(records)))
+            idle_s, age = float(config["idle_hours"]) * 3600, now - float(latest["at"])
+            seen = buffer.get("consumers_seen")
+            if kind == "ready" and age > idle_s and (seen is None or now - float(seen) > idle_s):
+                signals.append(("idle", None, ""))
+            if kind == "idle" and age > float(config["retire_after_days"]) * 86400:
+                signals.append(("retire", None, ""))
+            workflow_id = self.cfg.workflow_id(_issue_of(buffer_id))
+            for name, arg, detail in signals:
+                line = f"{name} {buffer_id} {detail}".rstrip()
+                if not dry_run and self.client is not None:
+                    try:
+                        await self.client.get_workflow_handle(workflow_id).signal(name, arg)
+                    except RPCError as error:
+                        if error.status != RPCStatusCode.NOT_FOUND:
+                            raise
+                        log.info("keeper: no workflow %s for %s, %s not signalled", workflow_id, buffer_id, name)
+                        continue
+                    log.info("keeper: signalled %s", line)
+                report.signalled.append(line)
 
     def _job_finished(self, job_id: str) -> bool:
         """Whether csub says the job ended (or no longer knows it); a csub error counts as still running."""
@@ -1055,6 +1200,13 @@ class Activities:
         marker = self.cfg.marker(f"keeper over-quota {kind}")
         newest = max(issues, key=lambda issue: issue["number"])
         await self._comment_once(self.gh_issues, newest["number"], f"{message}\n\n{marker}", marker)
+
+
+def _issue_of(round_id: str) -> int:
+    """The issue number of a round (buffer) id `i<issue>-e<event>`."""
+    if not ROUND_RE.fullmatch(round_id):
+        raise ValueError(f"bad round id {round_id!r}")
+    return int(round_id[1:].split("-", 1)[0])
 
 
 def _keeper_beat(detail: str) -> None:

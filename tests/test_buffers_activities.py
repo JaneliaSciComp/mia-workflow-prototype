@@ -20,7 +20,17 @@ from mia_buffers import activities as acts_module
 from mia_buffers.activities import Activities
 from mia_buffers.drop import cache_key, read_manifest
 from mia_buffers.jobspec import artifact_id
-from mia_buffers.models import BufferPins, BufferState, FetchResult, QuotaCheck, RawStatus
+from mia_buffers.models import (
+    BufferPins,
+    BufferState,
+    DegradedSignal,
+    FetchResult,
+    KeeperReport,
+    QuotaCheck,
+    RawStatus,
+    job_key,
+)
+from mia_buffers.plan import load_records, plan_hash
 from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment
 from mia_core.registry import Registry, RegistryError
@@ -57,7 +67,11 @@ def record_of(record_id: str) -> dict:
 
 
 @pytest.fixture
-def acts(tmp_path, monkeypatch):
+def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
+    """The activities over the fixture catalog, with a live buffer-api (worker token `t`) that knows every catalog
+    record as prepared; the plan syncs the round's ref into it on first use."""
+    from mia_buffers import cli
+
     cfg = make_cfg(tmp_path)
     for directory in (cfg.paths.state_dir, cfg.paths.work_root, cfg.paths.storage_root, cfg.paths.raw_root):
         directory.mkdir(parents=True, exist_ok=True)
@@ -71,6 +85,7 @@ def acts(tmp_path, monkeypatch):
         return dest
 
     monkeypatch.setattr(acts_module, "catalog_snapshot", fake_catalog_snapshot)
+    monkeypatch.setattr(cli, "catalog_snapshot", fake_catalog_snapshot)  # the plan's on-demand `catalog sync`
     monkeypatch.setattr(acts_module, "harness_pin", lambda cfg_: ("h" * 40, "d" * 64))
     monkeypatch.setattr(acts_module, "harness_snapshot", lambda cfg_, commit: tmp_path / "hsnap")
     gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": issue_body(), "labels": [{"name": "buffer:planning"}]}})
@@ -84,15 +99,17 @@ def acts(tmp_path, monkeypatch):
         probe=lambda: ["zenodo.org", "*.zenodo.org"],
     )
     activities.gh = gh
-    return activities
+    registry = activities.registry = Registry(token_server, "t")
+    for _, record in load_records(CATALOG):
+        registry.put_dataset(record["id"], state="prepared")
+    yield activities
+    registry.close()
 
 
 @pytest.fixture
 def server(acts, token_server):  # noqa: F811
-    """A buffer-api that wants the worker token `t`, and the activities' registry client holding it."""
-    acts.registry = Registry(token_server, "t")
-    yield token_server
-    acts.registry.close()
+    """The buffer-api the activities' registry client talks to (the `acts` fixture starts it)."""
+    return token_server
 
 
 async def admitted(acts) -> BufferPins:
@@ -162,6 +179,35 @@ async def test_plan_without_tensorizer_is_invalid(acts):
     shutil.rmtree(acts.cfg.harness.dir / "tensorizers")
     result = await acts.plan(7, ROUND, await admitted(acts))
     assert not result.valid and result.errors == ["no tensorizer muvit-2d in the harness checkout"]
+
+
+async def test_plan_reads_the_registry_and_syncs_the_ref_on_demand(acts, server, monkeypatch):
+    from mia_buffers import cli
+
+    synced, real_sync = [], cli.catalog_sync
+
+    async def counting_sync(cfg_, gh, registry, ref=None):
+        synced.append(ref)
+        return await real_sync(cfg_, gh, registry, ref)
+
+    monkeypatch.setattr(cli, "catalog_sync", counting_sync)
+    acts.registry.put_dataset(U937, state="in-progress")  # mia-data is still working on it: not prepared
+    pins = await admitted(acts)
+    spec_path = acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml"
+    spec_path.write_text(spec_path.read_text().replace("auto_approve: false", "auto_approve: true"))
+    assert acts.registry.catalogs() == []
+    result = await acts.plan(7, ROUND, pins)
+    assert synced == [REF] and [catalog["ref"] for catalog in acts.registry.catalogs()] == [REF]
+    assert [dataset.record for dataset in result.pool] == [BCSS]
+    plan_text = (acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json").read_text()
+    row = next(row for row in json.loads(plan_text)["rows"] if row["id"] == U937)
+    assert row["rule"] == "not prepared" and not row["admitted"]
+    assert result.plan_hash == plan_hash(plan_text) and result.auto_approve is True
+    await acts.plan(7, ROUND, pins)
+    assert synced == [REF]  # synced once: the ref is in the registry now
+    acts.registry = Registry("http://127.0.0.1:9")
+    with pytest.raises(RegistryError):  # buffer-api down: the activity retries, it never plans without it
+        await acts.plan(7, ROUND, pins)
 
 
 async def test_comment_plan_posts_once(acts):
@@ -405,7 +451,8 @@ async def test_prepare_stage_makes_workspace_and_dirs(acts):
     assert workspace == acts.cfg.paths.work_root / "issue-7" / ROUND / f"stage-{U937}"
     assert yaml.safe_load((workspace / "record.yaml").read_text())["id"] == U937
     assert yaml.safe_load((workspace / "binding.yaml").read_text())["record"] == U937
-    assert (acts.cfg.paths.raw_root / U937).is_dir() and staged_dir(acts, U937).is_dir()
+    assert (acts.cfg.paths.raw_root / U937).is_dir() and acts._building_dir(ROUND, U937).is_dir()
+    assert not staged_dir(acts, U937).exists()  # the final directory appears only when read_stage publishes it
 
 
 async def test_read_stage_reduces_report(acts, server):  # read_stage registers what it read
@@ -806,7 +853,7 @@ async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, serve
     assert acts.registry.asset("raw", U937) == {"state": "fetching", "job": "j42"}
     stage_workspace = await acts.prepare_stage(7, ROUND, U937)
     args = StageJobArgs(stage_workspace, ROUND, pins, U937, [], [1, 2, 4], 256, cache_writable=False)
-    assert await acts.submit("k2", args) == "j42" and args.out == str(staged_dir(acts, U937))
+    assert await acts.submit("k2", args) == "j42" and args.out == str(acts._building_dir(ROUND, U937))
     row = acts.registry.asset("staged", staged_dir(acts, U937).name)
     assert row == {
         "state": "staging",
@@ -814,7 +861,7 @@ async def test_submit_fetch_and_submit_check_hosts_and_mark_the_rows(acts, serve
         "job": "j42",
         "record": U937,
         "levels_key": "p256-l1-2-4",
-        "path": args.out,
+        "path": str(staged_dir(acts, U937)),  # where read_stage publishes it
     }
     acts.registry = Registry("http://127.0.0.1:9")  # the rows are best effort: the job id still comes back
     assert await acts.submit_fetch("k1", FetchJobArgs(workspace, ROUND, pins, U937, [], 1)) == "j42"
@@ -965,9 +1012,17 @@ async def test_keep_reports_failed_steps_without_raising(acts):
     env, beats = ActivityEnvironment(), []
     env.on_heartbeat = lambda *details: beats.append(details[0])
     report = await env.run(acts.keep)
-    assert beats == ["sync datasets", "sync assets", "stale builds", "evict staged", "evict raw", "catalog sync"]
+    assert beats == [
+        "sync datasets",
+        "sync assets",
+        "buffers",
+        "stale builds",
+        "evict staged",
+        "evict raw",
+        "catalog sync",
+    ]
     steps = [error.split(":")[0] for error in report.errors]
-    assert steps == ["sync datasets", "sync assets", "stale builds", "evict staged", "catalog sync"]  # catalog last
+    assert steps == ["sync datasets", "sync assets", "buffers", "stale builds", "evict staged", "catalog sync"]
     assert report.scanned == 0 and report.evicted == []
 
 
@@ -1030,3 +1085,165 @@ async def test_keep_marks_a_half_removed_artifact_missing(acts, keeper_server, m
     assert not artifact.exists() and registry.asset("staged", "art")["state"] == "missing"
     monkeypatch.undo()
     assert (await acts.keep()).errors == [] and registry.asset("staged", "art")["state"] == "missing"  # not reused
+
+
+# -- milestone D: publish by rename, the status board, events, retire, the keeper's lifecycle signals
+
+
+def staged_into(directory: Path, **report) -> Path:
+    """write_stage_json into a directory that may exist already (prepare_stage made it)."""
+    if directory.exists():
+        directory.rmdir()
+    staged = write_stage_json(directory)
+    if report:
+        (staged / "stage.json").write_text(json.dumps({**json.loads((staged / "stage.json").read_text()), **report}))
+    return staged
+
+
+async def test_read_stage_publishes_by_rename_and_reuses_an_existing_artifact(acts, server):
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    final, building = staged_dir(acts, U937), acts._building_dir(ROUND, U937)
+    assert building == final.parent / f".building-{final.name}-{job_key(7, ROUND, U937)}"
+    staged_into(building)
+    assert (await acts.read_stage(ROUND, U937)).ok
+    assert not building.exists() and (final / "stage.json").is_file()
+    report = json.loads((final / "stage.json").read_text())
+    binding = acts.cfg.paths.state_dir / "rounds" / ROUND / "bindings" / f"{U937}.yaml"
+    assert report["artifact"] == {
+        "id": final.name,
+        "binding_hash": hashlib.sha256(binding.read_bytes()).hexdigest(),
+        "levels_key": "p256-l1-2-4",
+        "voxel_size_nm": {"y": 45.0718, "x": 45.0718},
+        "harness_commit": "h" * 40,
+        "env_digest": "d" * 64,
+    }
+    assert acts.registry.asset("staged", final.name)["path"] == str(final)
+    assert (await acts.read_stage(ROUND, U937)).ok  # a retry after the rename reads the published directory
+    await acts.prepare_stage(7, ROUND, U937)  # staged again (a race, a lost registry row): the first copy wins
+    staged_into(building, volumes=[])
+    result = await acts.read_stage(ROUND, U937)
+    assert result.ok and result.volumes == 1 and not building.exists()
+    assert json.loads((final / "stage.json").read_text())["artifact"]["id"] == final.name
+
+
+async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    building = acts._building_dir(ROUND, U937)
+    staged_into(building, ok=False, errors=["boom"])
+    result = await acts.read_stage(ROUND, U937)
+    assert not result.ok and result.errors == ["boom"]
+    assert (building / "stage.json").is_file() and not staged_dir(acts, U937).exists()
+    assert acts.registry.asset("staged", staged_dir(acts, U937).name)["state"] == "partial"
+    staged_into(staged_dir(acts, U937), ok=False)  # a failed build where milestone C staged in place
+    (building / "stage.json").unlink()
+    staged_into(building)
+    assert (await acts.read_stage(ROUND, U937)).ok  # the good build replaces it; the failed one is set aside
+    assert json.loads((staged_dir(acts, U937) / "stage.json").read_text())["ok"] is True
+    [aside] = staged_dir(acts, U937).parent.glob(".building-stale-*")
+    assert json.loads((aside / "stage.json").read_text())["ok"] is False
+
+
+async def test_set_stage_writes_the_event(acts, server):
+    import httpx
+
+    state = BufferState(7, round_id=ROUND)
+    for stage in ("planning", "plan-review", "sourcing", "new", "ready"):  # `new` has no event
+        await acts.set_stage(7, stage, state, "x" * 300)
+    events = httpx.get(f"{server}/buffers/{ROUND}/events").json()["events"]
+    assert [event["kind"] for event in events] == ["created", "planned", "approved", "ready"]
+    assert {(event["issue"], event["detail"]) for event in events} == {(7, "x" * 200)}
+    acts.registry = Registry("http://127.0.0.1:9")
+    await acts.set_stage(7, "idle", state)  # buffer-api down: the label still moves
+    assert [label["name"] for label in acts.gh.issues[7]["labels"]] == ["buffer:idle"]
+
+
+async def test_mark_dataset_and_retire(acts, server):
+    await planned_and_bound(acts)
+    pins = await admitted(acts)
+    await acts.create_buffer(ROUND, ROUND)
+    [buffer] = acts.registry.buffers()
+    plan_text = (acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json").read_text()
+    assert buffer["config"]["plan_hash"] == plan_hash(plan_text)
+    assert buffer["config"]["recipe"]["harness_commit"] == pins.harness_commit
+    assert acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"] == []  # create_buffer writes none
+    await acts.mark_dataset(ROUND, U937, "fetching", job="j1")
+    await acts.mark_dataset(ROUND, U937, "exploded")  # refused by the service: logged, not raised
+    assert [(row["record"], row["status"], row["job"]) for row in acts.registry.buffer_datasets(ROUND)] == [
+        (U937, "fetching", "j1")
+    ]
+    assert await acts.raw_ready(ROUND, U937) is False  # nothing fetched
+    assert set(await acts.retire_buffer(ROUND, ROUND)) >= {"refs", "draws"}
+    acts.registry = Registry("http://127.0.0.1:9")
+    await acts.mark_dataset(ROUND, U937, "staging")
+    with pytest.raises(RegistryError):  # the workflow retries a retire
+        await acts.retire_buffer(ROUND, ROUND)
+
+
+class FakeTemporal:
+    """get_workflow_handle(id).signal(name, arg) recorded as (id, name, arg); `gone` ids raise not found."""
+
+    def __init__(self, gone=()):
+        self.sent, self.gone = [], set(gone)
+
+    def get_workflow_handle(self, workflow_id):
+        from temporalio.service import RPCError, RPCStatusCode
+
+        temporal = self
+
+        class Handle:
+            async def signal(self, name, arg=None):
+                if workflow_id in temporal.gone:
+                    raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
+                temporal.sent.append((workflow_id, name, arg))
+
+        return Handle()
+
+
+async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monkeypatch):
+    from test_buffers_api import CFG, body
+
+    registry, staged_root = keeper_server, acts.cfg.paths.staged_root
+
+    def buffer(buffer_id, kinds, volumes=(), **config):
+        registry.request("PUT", f"/buffers/{buffer_id}", json={**CFG, **config})
+        for volume_id, present in volumes:
+            path = staged_root / buffer_id / volume_id
+            if present:
+                path.mkdir(parents=True)
+            volume = {**body(), "path": str(path), "record": volume_id.split("/")[0]}
+            registry.request("PUT", f"/buffers/{buffer_id}/volumes/{volume_id.replace('/', '%2F')}", json=volume)
+        for kind in kinds:
+            registry.event(buffer_id, kind)
+
+    buffer("i2-e3", ["created", "ready"], [("rec-a/v0.zarr", False), ("rec-b/v0.zarr", False), ("rec-c/v0", True)])
+    buffer("i4-e5", ["ready"], [("rec-d/v0", True)], idle_hours=1)  # no consumer for over an hour
+    buffer("i6-e7", ["ready", "idle"], retire_after_days=0.01)  # idle for over 864 s
+    buffer("i8-e9", ["ready", "idle"], retire_after_days=0.01)  # its workflow is gone
+    buffer("i10-e11", ["approved"], [("rec-e/v0", False)])  # still sourcing: not the keeper's to judge
+    buffer("hand", ["ready", "idle"], retire_after_days=0.01)  # registered by hand: no workflow
+    report = KeeperReport()
+    now = time.time() + 2 * 3600
+    acts.client = FakeTemporal(gone={acts.cfg.workflow_id(8)})
+
+    await acts._keeper_buffers(report, now, dry_run=True)
+    expected = ["degraded i2-e3 rec-a,rec-b", "idle i4-e5", "retire i6-e7", "retire i8-e9"]
+    assert report.signalled == expected and acts.client.sent == [] and report.errors == []
+
+    report = KeeperReport()
+    await acts._keeper_buffers(report, now, dry_run=False)
+    assert report.signalled == expected[:3] and report.errors == []  # the gone workflow is logged, not reported
+    assert acts.client.sent == [
+        (
+            acts.cfg.workflow_id(2),
+            "degraded",
+            DegradedSignal(["rec-a", "rec-b"], "pyramid missing: rec-a/v0.zarr, rec-b/v0.zarr"),
+        ),
+        (acts.cfg.workflow_id(4), "idle", None),
+        (acts.cfg.workflow_id(6), "retire", None),
+    ]
+    acts.client = None  # the CLI's `assets sync` builds no Temporal client: it reports what it would signal
+    report = KeeperReport()
+    await acts._keeper_buffers(report, now, dry_run=False)
+    assert report.signalled == expected

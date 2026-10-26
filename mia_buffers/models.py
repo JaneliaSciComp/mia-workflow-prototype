@@ -44,6 +44,24 @@ class PlanResult:
     timeout_days: float = 14  # spec sourcing.dataset_timeout_days
     levels: list[int] = field(default_factory=list)
     patch: int = 0
+    auto_approve: bool = False  # spec plan.auto_approve: sourcing starts without a review
+    plan_hash: str = ""  # sha256 of the round's plan.json text, as the buffer config records it
+
+
+@dataclass
+class DegradedSignal:
+    """The keeper's `degraded` signal: the records whose staged pyramids went missing from disk, and why."""
+
+    records: list[str]
+    reason: str
+
+
+@dataclass
+class LifecycleEvent:
+    """A lifecycle signal the ready-state loop handles: idle, keep, retire or degraded, with its detail."""
+
+    kind: str
+    detail: str = ""
 
 
 @dataclass
@@ -140,6 +158,7 @@ class KeeperReport:
     catalog: str = ""
     errors: list[str] = field(default_factory=list)
     locked: list[str] = field(default_factory=list)  # "<kind> <key> (<lock owner>)": free, but a job holds its raw lock
+    signalled: list[str] = field(default_factory=list)  # "<signal> <buffer>[ <records>]" sent to a buffer's workflow
 
 
 @dataclass

@@ -45,7 +45,7 @@ def test_labels_ids_and_markers(tmp_path):
     )
     assert cfg.temporal.namespace == "mia-buffers"
     assert set(STAGES) == {"new", "planning", "plan-review", "sourcing", "ready", "idle", "retired", "needs-human"}
-    assert set(HUMAN_LABELS) == {"go", "approve"}
+    assert set(HUMAN_LABELS) == {"go", "approve", "keep", "retire"}
 
 
 def test_roots_accept_path_and_url_form(tmp_path):

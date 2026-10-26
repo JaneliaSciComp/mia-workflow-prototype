@@ -29,9 +29,11 @@ STAGES = {
     "retired": ("cccccc", "mia-buffers: staged data released"),
     "needs-human": ("d93f0b", "mia-buffers: stopped, needs a human"),
 }
-HUMAN_LABELS = {  # set by humans; `keep` and `retire` arrive with milestone 5
+HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow signal of the same name
     "go": ("0e8a16", "Plan this buffer (or plan it again after editing the spec)"),
     "approve": ("0e8a16", "Approve the plan; start sourcing"),
+    "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
+    "retire": ("b60205", "Retire this buffer: release its staged data"),
 }
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),

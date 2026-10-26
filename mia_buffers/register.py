@@ -6,6 +6,7 @@ The hand-registration path: the worker of milestone 3 will call the same functio
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import re
@@ -16,6 +17,8 @@ import httpx
 
 from .plan import split_counts
 from .spec import Spec
+
+log = logging.getLogger(__name__)
 
 
 def _tensorizer_params(spec: Spec) -> dict:
@@ -44,8 +47,8 @@ def buffer_config(
     *,
     tensorizer: str,
     split_sizes: dict[str, int],
-    recipe: dict | None = None,
-    plan_hash: str | None = None,
+    recipe: dict,
+    plan_hash: str,
 ) -> dict:
     """The `PUT buffers/<id>` body from a plan and its spec."""
     patch = spec.patch_for("2D") or {}
@@ -153,8 +156,10 @@ def volume_bodies(
     or dataset, each body carries `normalize` bounds from the stage job's `intensity_sample` (a volume without a
     usable sample is refused: it must be staged again with a harness that records one). Each body names the staged
     `artifact` its volume lives in (default: the staged directory's name, the hand-registration layout)."""
-    if row.get("split") is None:
-        raise ValueError(f"{row['id']}: plan row has no split policy; plan again")
+    split = row.get("split")
+    if split is None:  # a plan.json written before milestone D: the spec's fractions, as the plan would decide
+        log.warning("%s: plan row has no split policy (planned before D): using the spec's fractions", row["id"])
+        split = {"policy": "fractions", "fractions": dict(spec.splits.fractions), "seed": spec.splits.seed}
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
     scope = spec.sampling.normalize.scope
@@ -208,7 +213,7 @@ def volume_bodies(
                         {key: level[key] for key in ("factor", "shape", "scale_nm", "translation_nm")}
                         for level in volume["levels"]
                     ],
-                    "split_planes": _split_planes(volume_id, planes, row["split"]),
+                    "split_planes": _split_planes(volume_id, planes, split),
                     "labels": dict(volume.get("labels") or {}),
                     "weight": float(row["weight"]) * planes / total_planes,
                     "channels_stored": _channels(volume),
