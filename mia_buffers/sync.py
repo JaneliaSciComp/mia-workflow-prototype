@@ -89,7 +89,8 @@ def scan_assets(
     raw_root: Path | None, staged_root: Path | None, known: dict[AssetKey, dict]
 ) -> tuple[dict[AssetKey, dict], list[Path], list[str]]:
     """(kind, key) → row for every raw cache `raw_root/<record>` and staged artifact
-    `staged_root/<levels key>/<record>/<artifact>/stage.json`; the `.building-*` directories found (staged builds
+    `staged_root/<levels key>/<record>/<artifact>/stage.json` (a pre-artifact `<record>/stage.json` is logged and skipped,
+    its sibling artifacts still scanned); the `.building-*` directories found (staged builds
     and the evictions' asides in both roots); and the kinds
     whose root is unset, missing or empty, so a sync never marks a whole unmounted root missing."""
     now = time.time()
@@ -110,9 +111,8 @@ def scan_assets(
         skipped.append("staged")
     for levels_dir in levels_dirs or []:
         for record_dir in _children(levels_dir) or []:  # a stray file has no children
-            if (record_dir / "stage.json").is_file():
-                log.info("skipping %s: a pre-artifact stage.json directly under the record", record_dir)
-                continue
+            if (record_dir / "stage.json").is_file():  # the record's artifacts beside it are still scanned
+                log.info("skipping %s/stage.json: a pre-artifact stage, not an asset", record_dir)
             building += sorted(path for path in record_dir.glob(".building-*") if path.is_dir())
             for artifact_dir in _children(record_dir) or []:
                 if not (artifact_dir / "stage.json").is_file():

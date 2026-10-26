@@ -59,6 +59,9 @@ def test_scan_assets_finds_raw_and_artifact_dirs_and_reuses_sizes(tmp_path, capl
     (staged / "p256-l1-2" / "rec" / ".building-0123456789abcdef-job").mkdir()
     (staged / "p256-l1-2" / "old").mkdir()
     (staged / "p256-l1-2" / "old" / "stage.json").write_text("{}")  # pre-artifact layout
+    (staged / "p256-l1-2" / "old" / "v0.zarr").mkdir()
+    # a record that was staged before artifact ids and again after: the old stage is skipped, the artifact found
+    (staged / "p256-l1-2" / "rec" / "stage.json").write_text("{}")
     with caplog.at_level(logging.INFO):
         found, building, skipped = scan_assets(raw, staged, known={})
     assert "pre-artifact" in caplog.text
