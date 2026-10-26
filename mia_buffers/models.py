@@ -127,7 +127,8 @@ class RawStatus:
 class KeeperReport:
     """One pass of the cache keeper: the asset sync's counts, what it evicted, reset (`stale`, "<kind> <key>
     <state>") and removed (`.building-*` paths), the bytes each kind is still over quota by, the catalog it synced
-    ("<ref> (<n> records)", "" when not due) and the steps that failed."""
+    ("<ref> (<n> records)", "" when not due), the steps that failed, and the free assets spared because a fetch
+    or stage holds their record's raw lock."""
 
     scanned: int = 0
     missing: int = 0
@@ -138,6 +139,7 @@ class KeeperReport:
     over_quota: dict[str, int] = field(default_factory=dict)
     catalog: str = ""
     errors: list[str] = field(default_factory=list)
+    locked: list[str] = field(default_factory=list)  # "<kind> <key> (<lock owner>)": free, but a job holds its raw lock
 
 
 @dataclass

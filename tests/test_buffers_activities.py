@@ -942,3 +942,51 @@ async def test_keep_reports_failed_steps_without_raising(acts):
     steps = [error.split(":")[0] for error in report.errors]
     assert steps == ["sync datasets", "sync assets", "catalog sync", "stale builds", "evict staged"]
     assert report.scanned == 0 and report.evicted == []
+
+
+async def test_keep_spares_a_raw_cache_whose_lock_a_job_holds(acts, keeper_server):
+    import time
+
+    from mia_core.fs import dir_bytes
+    from mia_data.jobspec import lock_dir
+
+    registry = keeper_server
+    catalog_not_due(acts)
+    cache = acts.cfg.paths.raw_root / "rec"
+    cache.mkdir()
+    (cache / "a.tif").write_bytes(b"x" * 100)
+    registry.put_asset("raw", "rec", {"last_used": time.time() - 49 * 3600})
+    acts.cfg.quota.raw_bytes, acts.cfg.quota.headroom_bytes = 1, 0
+    locks = lock_dir(acts.cfg)
+    assert locks.take("raw", "rec", "buffer-7-stage", 900)  # a buffer staging from this cache
+
+    for dry_run in (True, False):
+        report = await acts.keep(dry_run=dry_run)
+        assert report.evicted == [] and report.locked == ["raw rec (buffer-7-stage)"] and cache.is_dir()
+    assert report.errors == [] and report.over_quota == {"raw": dir_bytes(cache) - 1}
+    locks.release("raw", "rec", "buffer-7-stage")
+    report = await acts.keep()
+    assert report.evicted == ["raw rec"] and report.locked == [] and not cache.exists()
+    assert registry.asset("raw", "rec")["state"] == "evicted" and locks.holder("raw", "rec") is None
+
+
+async def test_keep_marks_a_half_removed_artifact_missing(acts, keeper_server, monkeypatch):
+    import time
+
+    from mia_buffers import keeper
+
+    registry = keeper_server
+    catalog_not_due(acts)
+    artifact = staged_artifact(acts, "art", 100)
+    registry.put_asset("staged", "art", {"last_used": time.time() - 49 * 3600, "ok": True})
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = 1, 0
+
+    def broken(path):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(keeper.shutil, "rmtree", broken)
+    report = await acts.keep()
+    assert report.evicted == [] and len(report.errors) == 1 and "removing art" in report.errors[0]
+    assert not artifact.exists() and registry.asset("staged", "art")["state"] == "missing"
+    monkeypatch.undo()
+    assert (await acts.keep()).errors == [] and registry.asset("staged", "art")["state"] == "missing"  # not reused

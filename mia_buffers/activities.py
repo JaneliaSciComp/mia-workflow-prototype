@@ -47,7 +47,7 @@ from mia_data.status import render_links, render_stage
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
-from .keeper import evict_path, live_bytes, plan_evictions, stale_builds
+from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     BindingInfo,
     BufferPins,
@@ -90,6 +90,8 @@ FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 DATA_GO = DATA_LABEL.format("go")
 DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
+KEEPER = "keeper"  # the cache keeper's lock owner
+KEEPER_LOCK_TTL_S = 900
 OVER_QUOTA = (
     "The {kind} root is over quota by {over_by} bytes and nothing is evictable (every asset is referenced, held or "
     "building). Raise `quota.{kind}_bytes`, retire a buffer, or wait for `quota.hold_hours`."
@@ -945,42 +947,72 @@ class Activities:
         in_progress: set[str] = set()
         if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
             in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
+        rules: dict[str, Any] = {"hold_s": hold_s, "now": now, "in_progress": in_progress, "kind": kind}
+        locks = lock_dir(self.cfg)
+
+        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record
+            return row["key"] if kind == "raw" else str((row.get("data") or {}).get("record") or row["key"])
+
+        def spare(row: dict, owner: str) -> dict:  # a lock holder counts as a reference: plan around the row
+            report.locked.append(f"{kind} {row['key']} ({owner})")
+            return {**row, "refs": [*(row.get("refs") or []), f"lock {owner}"]}
+
+        free = {row["key"] for row in free_assets(rows, **rules)}
+        planned = []
+        for row in rows:
+            holder = locks.holder("raw", lock_key(row)) if row["key"] in free else None
+            planned.append(spare(row, holder.owner) if holder and not holder.stale else row)
         picked = plan_evictions(
-            rows,
+            planned,
             quota_bytes=limit,
             headroom_bytes=self.cfg.quota.headroom_bytes,
-            hold_s=hold_s,
-            now=now,
-            in_progress=in_progress,
-            kind=kind,
+            **rules,
         )
         evicted: list[dict] = []
         for row in picked:
-            data = row["data"]
             if not dry_run:
                 # ponytail: one heartbeat per removal; a single rmtree longer than the 5 min heartbeat timeout fails
                 # the pass (the next one resumes). Heartbeat from a background task if caches get that large.
                 _keeper_beat(f"evict {kind} {row['key']}")
-                path = data.get("path")
-                if not isinstance(path, str) or not await asyncio.to_thread(evict_path, Path(path), roots):
-                    report.errors.append(text(f"evict {kind}: could not remove {row['key']} at {path}", 500))
+                taken, owner = await asyncio.to_thread(
+                    take_or_holder, locks, "raw", lock_key(row), KEEPER, KEEPER_LOCK_TTL_S
+                )
+                if not taken:  # a job took it since the plan
+                    spare(row, owner)
                     continue
-                await asyncio.to_thread(
-                    registry.put_asset, kind, row["key"], {"state": "evicted", "evicted_at": now, "bytes": 0}
-                )
-                log.info(
-                    "keeper: evicted %s %s (%s bytes, last used %s)",
-                    kind,
-                    row["key"],
-                    data.get("bytes"),
-                    data.get("last_used"),
-                )
+                try:
+                    removed = await self._keeper_remove(report, kind, row, roots, now)
+                finally:
+                    await asyncio.to_thread(release_or_log, locks, "raw", lock_key(row), KEEPER)
+                if not removed:
+                    continue
             evicted.append(row)
             report.evicted.append(f"{kind} {row['key']}")
         over_by = int(live_bytes(rows) - live_bytes(evicted) - limit)
         if over_by > 0 and not dry_run:
             report.over_quota[kind] = over_by
             await self._over_quota_comment(kind, over_by)
+
+    async def _keeper_remove(
+        self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
+    ) -> bool:
+        """Remove one asset's directory and mark its row `evicted`. A refusal leaves the row; a removal that failed
+        half way marks it damaged (`partial` raw, a fetch resumes it; `missing` staged, it is staged again)."""
+        data, key, registry = row["data"], row["key"], self.registry
+        path = data.get("path")
+        try:
+            removed = isinstance(path, str) and await asyncio.to_thread(evict_path, Path(path), roots)
+        except OSError as error:
+            damaged = "partial" if kind == "raw" else "missing"
+            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now {damaged}: {error}", 500))
+            await asyncio.to_thread(registry.put_asset, kind, key, {"state": damaged, "job": None})
+            return False
+        if not removed:
+            report.errors.append(text(f"evict {kind}: refused to remove {key} at {path}", 500))
+            return False
+        await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
+        log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
+        return True
 
     async def _over_quota_comment(self, kind: str, over_by: int) -> None:
         """Comment once on the newest open issue labelled `buffer:*`; with none open, only log."""

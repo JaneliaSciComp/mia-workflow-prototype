@@ -154,6 +154,9 @@ def test_sync_assets_marks_missing_but_keeps_building_rows(tmp_path):
     assert by_key["gone"]["state"] == "missing" and by_key["building"]["state"] == "staging"
     assert by_key["back"]["state"] == "ready" and by_key["new"]["state"] == "ready" and by_key["new"]["record"] == "rec"
     assert counts == {"scanned": 2, "new": 1, "missing": 1}
+    assert by_key["new"]["last_used"] == 9.0 and "last_used" not in by_key["back"]  # first seen: used then
+    ledger.sync_assets({("staged", "new"): {"bytes": 4, "scanned_at": 99.0}}, older_than=time.time() + 1, kinds=())
+    assert ledger.asset("staged", "new")["last_used"] == 9.0  # a later scan is not a use
     assert ledger.asset("raw", "rec")["state"] == "ready"  # a kind not scanned is never demoted
     # a row written after the scan started is left alone
     ledger.put_asset("staged", "late", {"state": "ready"})

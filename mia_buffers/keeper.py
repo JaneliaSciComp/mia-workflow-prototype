@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -18,7 +19,7 @@ def _bytes(data: dict) -> float:
 
 
 def _last_used(data: dict) -> float:
-    return data.get("last_used") or data.get("scanned_at") or 0
+    return data.get("last_used") or 0  # the registry sets it at a row's first scan; none at all is never used
 
 
 def live_bytes(assets: list[dict]) -> float:
@@ -66,8 +67,15 @@ def plan_evictions(
 
 
 def evict_path(path: Path, roots: tuple[Path, ...]) -> bool:
-    """Remove the directory `path` when it resolves strictly under one of `roots`; False (logged) when it does
-    not, is gone, or cannot be removed."""
+    """Remove the directory `path` when it resolves strictly under one of `roots`. False (logged, nothing touched)
+    when it is a symlink (it would delete another asset's content), not under a root, or gone.
+
+    The directory is first renamed to a `.building-evicted-*` sibling, so a removal that fails half way leaves
+    nothing at `path` for a scan to find and reuse (a staged one is then swept by the `.building-*` cleanup);
+    that failure raises OSError, and the caller must treat the asset as damaged."""
+    if path.is_symlink():
+        log.warning("refusing to remove %s: a symlink", path)
+        return False
     resolved = path.resolve()
     if not any(resolved != root.resolve() and resolved.is_relative_to(root.resolve()) for root in roots):
         log.warning("refusing to remove %s: not under %s", path, ", ".join(map(str, roots)))
@@ -75,11 +83,9 @@ def evict_path(path: Path, roots: tuple[Path, ...]) -> bool:
     if not resolved.is_dir():
         log.warning("not removing %s: no such directory", path)
         return False
-    try:
-        shutil.rmtree(resolved)
-    except OSError as error:
-        log.warning("could not remove %s: %s", path, error)
-        return False
+    aside = resolved.with_name(f".building-evicted-{resolved.name}-{time.time_ns()}")
+    resolved.rename(aside)
+    shutil.rmtree(aside)
     return True
 
 
