@@ -122,4 +122,4 @@ def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsy
     monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
     assert cli.main(["init-token"]) == 0
     assert oct((tmp_path / "token").stat().st_mode & 0o777) == "0o600" and len((tmp_path / "token").read_text()) == 64
-    assert cli.main(["init-token"]) == 0 and "exists" in capsys.readouterr().out
+    assert cli.main(["init-token"]) == 0 and "exists" in capsys.readouterr().err

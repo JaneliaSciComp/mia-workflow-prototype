@@ -58,6 +58,13 @@ To keep in-flight workflows, stop the old tmux sessions (`tmux kill-session -t <
 `temporal.state_dir` before the first `mia up`, or point `temporal.state_dir` at the old `-host` directory. A fresh
 database is fine on a dev host: the poll schedule is re-applied and open issues are picked up on the next poll.
 
+Moving a service off a legacy per-app file (`services.<name>.config`, deprecated): copying its sections into the
+service block is not enough, because three things change with it. Name the service after the old file's `deployment`
+(labels, task queue and workflow ids come from it). Set `paths.state_dir` in the service block to the old state
+directory, or move that directory to `<state_root>/<name>` while no round is running (in-flight rounds look for their
+`rounds/<id>/pins.json` and csub job-id files there). Keep `temporal.namespace` in the block when the old file set
+one. Then `mia restart <service>`.
+
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
 round summary count, so a short prefix approved earlier cannot approve a later head.

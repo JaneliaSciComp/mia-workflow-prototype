@@ -151,6 +151,8 @@ class Config(BaseModel):
         """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
+        if "namespace" not in self.temporal.model_fields_set:  # mia.yaml's shared temporal section has no namespace
+            self.temporal.namespace = type(self).model_fields["temporal"].default.namespace
         self._check_github()
         self._resolve_paths()
         self._check_limits()

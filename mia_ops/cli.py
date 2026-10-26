@@ -98,7 +98,7 @@ def cmd_init_token(stack: Stack, args: argparse.Namespace) -> int:
     for path in sorted({svc.token_file for svc in stack.services.values() if svc.token_file}):
         if path.exists():
             mode = stat.S_IMODE(path.stat().st_mode)
-            print(f"{path} exists" + ("" if mode == 0o600 else f" (mode {mode:o}; chmod 600 it)"))
+            print(f"{path} exists" + ("" if mode == 0o600 else f" (mode {mode:o}; chmod 600 it)"), file=sys.stderr)
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as token:

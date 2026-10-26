@@ -450,7 +450,7 @@ def test_legacy_config_files_still_load_with_a_deprecation_line(tmp_path, fake, 
     s = make_stack(tmp_path)
     assert s.services["mia-data"].legacy
     assert s.services["mia-data"].env() == {"MIA_DATA_CONFIG": f"{tmp_path}/mia_data.yaml"}
-    assert "services.mia-data.config is deprecated" in capsys.readouterr().out
+    assert "services.mia-data.config is deprecated" in capsys.readouterr().err
 
 
 def test_up_passes_the_service_name_and_mounts_locks_and_token(tmp_path, fake):

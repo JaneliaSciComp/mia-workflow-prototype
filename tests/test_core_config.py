@@ -50,6 +50,18 @@ def test_missing_service_or_app(services, message):
         service_config({**SHARED, "services": services}, "x")
 
 
+@pytest.mark.parametrize(
+    "override, message",
+    [
+        ({"github": "foo"}, "github: the shared section must be a mapping"),
+        ({"paths": {**SHARED["paths"], "state_root": None}}, "paths.state_root must be a path string"),
+    ],
+)
+def test_malformed_shared_sections_raise_value_error(override, message):
+    with pytest.raises(ValueError, match=message):
+        service_config({**SHARED, **override}, "mia-data")
+
+
 def test_the_input_is_not_mutated():
     before = copy.deepcopy(SHARED)
     service_config(SHARED, "mia-data")

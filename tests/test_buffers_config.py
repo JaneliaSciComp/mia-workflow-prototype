@@ -121,3 +121,18 @@ def test_load_config_by_service_name(tmp_path, monkeypatch):
     cfg = load_config(tmp_path / "mia.yaml")
     assert cfg.github.buffers_repo == "o/b" and cfg.deployment == "mia-buffers"
     assert cfg.paths.raw_root == tmp_path / "w/_cache" and cfg.service.token_file == tmp_path / "tok"
+
+
+@pytest.mark.parametrize("block, namespace", [("", "mia-buffers"), (", temporal: {namespace: ns}", "ns")])
+def test_namespace_defaults_to_the_app_under_a_shared_temporal_section(tmp_path, monkeypatch, block, namespace):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "mia.yaml").write_text(
+        "github: {auth: token, catalog_repo: o/c, snippets_repo: o/s}\ntemporal: {address: t:7233}\n"
+        f"paths: {{state_root: {tmp_path}/state, work_root: {tmp_path}/w, storage_root: {tmp_path}/s,"
+        f" staged_root: {tmp_path}/staged}}\n"
+        f"harness: {{dir: {tmp_path}/harness}}\nservice: {{url: http://svc:1}}\n"
+        f"services:\n  mia-buffers: {{app: mia-buffers, github: {{buffers_repo: o/b, datasets_repo: o/d}}{block}}}\n"
+    )
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    cfg = load_config(tmp_path / "mia.yaml", service="mia-buffers")
+    assert cfg.temporal.namespace == namespace and cfg.temporal.address == "t:7233"

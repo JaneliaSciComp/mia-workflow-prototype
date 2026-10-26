@@ -22,8 +22,9 @@ github:                                   # shared: who the services act as, and
   # trusted_bots is not shared: it would let the bot trigger autodev too (see services.mia-data).
 paths:
   state_root: ~/.local/state/mia          # <state_root>/<service> is each service's state_dir: trusted, never mounted
-                                          # into jobs (a shared fs is fine)
-  local_root: /scratch/mia                # host-local disk: service/ (the SQLite file), locks/; refused on a network fs
+                                          # into jobs; a shared fs is fine (buffer-api's SQLite ledger lives here for now)
+  local_root: /scratch/mia                # host-local disk: locks/, and service/ (reserved for buffer-api's state from
+                                          # milestone B); refused on a network fs
   # a root is a path, or {path, url} with the Fileglancer (or other browser) URL of that folder:
   # issue comments then link the round's workspace and the dataset's crops folder
   work_root:                              # job workspaces and snapshots; inside the csub policy's allowed_roots

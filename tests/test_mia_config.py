@@ -79,6 +79,20 @@ def test_load_config_by_service_name(tmp_path, monkeypatch):
     assert cfg.paths.local_root == tmp_path / "local" and cfg.service.token_file == tmp_path / "tok"
 
 
+@pytest.mark.parametrize("block, namespace", [("", "mia-data"), (", temporal: {namespace: ns}", "ns")])
+def test_namespace_defaults_to_the_app_under_a_shared_temporal_section(tmp_path, monkeypatch, block, namespace):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "mia.yaml").write_text(
+        "github: {auth: token, catalog_repo: o/c, snippets_repo: o/s}\ntemporal: {address: t:7233}\n"
+        f"paths: {{state_root: {tmp_path}/state, work_root: {tmp_path}/w, storage_root: {tmp_path}/s}}\n"
+        f"harness: {{dir: {tmp_path}/harness}}\n"
+        f"services:\n  mia-data: {{app: mia-data, github: {{data_repo: o/d}}{block}}}\n"
+    )
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    cfg = load_config(tmp_path / "mia.yaml", service="mia-data")
+    assert cfg.temporal.namespace == namespace and cfg.temporal.address == "t:7233"
+
+
 def test_local_root_and_service_are_optional(tmp_path):
     cfg = make_cfg(tmp_path)
     assert cfg.paths.local_root is None and cfg.service is None

@@ -11,6 +11,8 @@ MOUNTS = (
     "auto /netfs autofs rw 0 0\n"
     "host:/vol /netfs/lab nfs rw 0 0\n"
     "/dev/sdb /mnt/my\\040disk ext4 rw 0 0\n"
+    "systemd-1 /scratch autofs rw 0 0\n"
+    "/dev/sdb /scratch xfs rw 0 0\n"
 )
 
 
@@ -18,6 +20,7 @@ MOUNTS = (
     "path, fstype",
     [
         ("/scratch/mia", "xfs"),
+        ("/scratch", "xfs"),  # autofs then xfs at /scratch: the later entry is the visible one
         ("/netfs/lab/mia", "nfs"),
         ("/netfs/other", "autofs"),
         ("/groups/x/y", "autofs"),

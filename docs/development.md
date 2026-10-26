@@ -14,9 +14,12 @@ checks below; they are only needed to run a deployment ([`docs/autodev-local-set
 One file configures every deployment: `mia.yaml` (copy `mia.yaml.example`; `MIA_CONFIG` names another file). Its top-level
 sections are shared; each block under `services` overlays them for one service, and the service name is its
 `deployment`. Run an application by hand with `MIA_SERVICE=<name> <app> check`; through `mia`, `mia exec <service> check`
-sets `MIA_SERVICE` for you (a per-app YAML file still loads when `MIA_SERVICE` is unset, deprecated). `paths.local_root`
-must be host-local disk, not NFS: `mia up` refuses otherwise and keeps the SQLite file and `locks/` there. `service.token_file`
-(mode 600; `mia init-token` creates it) holds the buffer-api worker token and is mounted read-only into the workers.
+sets `MIA_SERVICE` for you (a per-app YAML file still loads when `MIA_SERVICE` is unset, deprecated). The mia-data and
+mia-buffers services need `paths.local_root`, and mia-buffers also `service.token_file`; `mia up` refuses to start them
+without. `paths.local_root` must be host-local disk, not NFS (`mia up` refuses otherwise): it holds `locks/`, and
+`<local_root>/service/` is reserved for buffer-api's state from milestone B; until then buffer-api's SQLite ledger stays
+in the service's `state_dir` (`<state_root>/<name>/buffers.sqlite`). `service.token_file` (mode 600; `mia init-token`
+creates it) holds the buffer-api worker token and is mounted read-only into the workers.
 
 ## The four checks
 
@@ -26,7 +29,7 @@ Run all of these before pushing. CI runs the last three in this order on every p
 |---|---|
 | `pixi run fmt` | formats with ruff and applies its safe autofixes |
 | `pixi run lint` | `ruff check` plus a formatting check; fails on drift |
-| `pixi run typecheck` | mypy over `autodev/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
+| `pixi run typecheck` | mypy over `autodev/`, `mia_core/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
 Configuration for all four is in `pyproject.toml`. Keep them clean rather than suppressing: there are no

@@ -27,7 +27,8 @@ def mount_type(path: Path, mounts: str | None = None) -> str:
             continue
         mount_point = fields[1].replace("\\040", " ")
         matches = resolved == Path(mount_point) or resolved.is_relative_to(mount_point)
-        if matches and len(mount_point) > len(best_point):
+        # >=: when two entries share a point (autofs, then the real mount), the later one is the visible one
+        if matches and len(mount_point) >= len(best_point):
             best_point, best_type = mount_point, fields[2]
     return best_type
 

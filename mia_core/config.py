@@ -79,11 +79,16 @@ def service_config(manifest: dict, name: str) -> dict:
             continue
         if not isinstance(value, dict):
             raise ValueError(f"services.{name}.{key}: a service block holds sections; {key!r} is not a mapping")
-        result[key] = {**(result.get(key) or {}), **copy.deepcopy(value)}
+        shared = result.get(key) or {}
+        if not isinstance(shared, dict):
+            raise ValueError(f"{key}: the shared section must be a mapping")
+        result[key] = {**shared, **copy.deepcopy(value)}
     result["deployment"] = name
     paths = result.get("paths")
     if isinstance(paths, dict) and "state_root" in paths:
         state_root = paths.pop("state_root")
+        if not isinstance(state_root, str):
+            raise ValueError("paths.state_root must be a path string")
         paths.setdefault("state_dir", str(Path(state_root) / name))
     return result
 

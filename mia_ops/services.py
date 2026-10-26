@@ -181,7 +181,7 @@ class Stack:
         for name, block in manifest.services.items():
             app = APPS[block.app]
             if block.config:
-                print(f"{name}: services.{name}.config is deprecated; move its sections into mia.yaml")
+                print(f"{name}: services.{name}.config is deprecated; move its sections into mia.yaml", file=sys.stderr)
                 self.services[name] = Service(name, app, block.config, app.load_config(block.config), legacy=True)
             elif manifest.path is None:
                 sys.exit(f"mia: service {name!r} has no config: file and the manifest was not loaded from a file")
