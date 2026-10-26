@@ -10,17 +10,35 @@ Spec v0.5 §5 and §9.5: the ledger is the record of a run; replaying a run mean
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from .sampler import Level, Volume
+from .sampler import Level, Volume, servable
+
+# a dataset's row on a buffer's status board (DatasetStatus.status); the worker package imports these
+BOARD_STATUSES = (
+    "pending",
+    "waiting-dataset",
+    "waiting-lock",
+    "waiting-drop",
+    "fetching",
+    "blocked",
+    "staging",
+    "servable",
+    "failed",
+    "dropped",
+)
+EVENT_KINDS = ("created", "planned", "approved", "ready", "idle", "retired", "needs-human")  # a buffer's lifecycle
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS buffers (id TEXT PRIMARY KEY, config TEXT NOT NULL);
@@ -36,7 +54,14 @@ CREATE TABLE IF NOT EXISTS catalogs (ref TEXT PRIMARY KEY, synced_at REAL, count
 CREATE TABLE IF NOT EXISTS records (ref TEXT, id TEXT, path TEXT NOT NULL, data TEXT NOT NULL,
                                     PRIMARY KEY (ref, path));
 CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at REAL);
+CREATE TABLE IF NOT EXISTS buffer_datasets (buffer TEXT, record TEXT, status TEXT, reason TEXT, job TEXT,
+                                            updated_at REAL, PRIMARY KEY (buffer, record));
+CREATE TABLE IF NOT EXISTS buffer_events (buffer TEXT, seq INTEGER, kind TEXT, at REAL, issue INTEGER, event_id TEXT,
+                                          detail TEXT, PRIMARY KEY (buffer, seq));
 """
+
+BOARD_COLUMNS = ("record", "status", "reason", "job", "updated_at")
+EVENT_COLUMNS = ("seq", "kind", "at", "issue", "event_id", "detail")
 
 
 def _volume_from(data: dict) -> Volume:
@@ -97,6 +122,111 @@ class Ledger:
         with self._lock:
             rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
         return [_volume_from(json.loads(row[0])) for row in rows]
+
+    def set_volume_missing(self, buffer: str, volume_id: str, missing: bool) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE volumes SET data = json_set(data, '$.missing', json(?)) WHERE buffer = ? AND id = ?",
+                (json.dumps(missing), buffer, volume_id),
+            )
+
+    # --- a buffer's status board, lifecycle events and summary: what the page shows -------------
+
+    def put_buffer_dataset(
+        self, buffer: str, record: str, status: str, reason: str = "", job: str | None = None
+    ) -> dict:
+        """Replace the record's row on the buffer's board; returns it."""
+        row = (record, status, reason, job, time.time())
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO buffer_datasets VALUES (?, ?, ?, ?, ?, ?)", (buffer, *row))
+        return dict(zip(BOARD_COLUMNS, row, strict=True))
+
+    def buffer_datasets(self, buffer: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {', '.join(BOARD_COLUMNS)} FROM buffer_datasets WHERE buffer = ? ORDER BY record", (buffer,)
+            ).fetchall()
+        return [dict(zip(BOARD_COLUMNS, row, strict=True)) for row in rows]
+
+    def add_event(self, buffer: str, kind: str, *, issue: int | None, event_id: str | None, detail: str) -> dict:
+        """Append one event with the buffer's next seq, at now; returns it."""
+        with self._transaction() as db:
+            (last,) = db.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM buffer_events WHERE buffer = ?", (buffer,)
+            ).fetchone()
+            row = (last + 1, kind, time.time(), issue, event_id, detail)
+            db.execute("INSERT INTO buffer_events VALUES (?, ?, ?, ?, ?, ?, ?)", (buffer, *row))
+        return dict(zip(EVENT_COLUMNS, row, strict=True))
+
+    def events(self, buffer: str, limit: int = -1) -> list[dict]:
+        """The buffer's events, newest last; with `limit`, only the newest that many."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM (SELECT {', '.join(EVENT_COLUMNS)} FROM buffer_events WHERE buffer = ? "
+                "ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                (buffer, limit),
+            ).fetchall()
+        return [dict(zip(EVENT_COLUMNS, row, strict=True)) for row in rows]
+
+    def latest_event(self, buffer: str) -> dict | None:
+        newest = self.events(buffer, limit=1)
+        return newest[0] if newest else None
+
+    def buffers(self) -> list[dict]:
+        """One summary per buffer, from stored rows only (never a stat): servable excludes volumes flagged missing."""
+        midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        with self._lock:
+            configs = self._db.execute("SELECT id, config FROM buffers ORDER BY id").fetchall()
+        out = []
+        for buffer, config in configs:
+            volumes = self.volumes(buffer)
+            with self._lock:
+                (seen,) = self._db.execute(
+                    "SELECT MAX(last_seen) FROM consumers WHERE buffer = ?", (buffer,)
+                ).fetchone()
+                (today,) = self._db.execute(
+                    "SELECT COUNT(*) FROM draws WHERE buffer = ? AND ts >= ?", (buffer, midnight)
+                ).fetchone()
+            splits = sorted({split for volume in volumes for split in volume.split_planes})
+            out.append(
+                {
+                    "id": buffer,
+                    "config": json.loads(config),
+                    "latest_event": self.latest_event(buffer),
+                    "volumes": len(volumes),
+                    "missing": sum(volume.missing for volume in volumes),
+                    "servable": {split: len(servable(volumes, split)) for split in splits},
+                    "consumers_seen": seen,
+                    "draws_today": today,
+                }
+            )
+        return out
+
+    def retire(self, buffer: str, archive_dir: Path | None) -> dict:
+        """Drop the buffer's references and, archived first to `<archive_dir>/<buffer>.draws.jsonl.gz`, its draws,
+        in one transaction; with no `archive_dir` the draws are kept. Volumes and the config stay for the page.
+        A later retire appends to the archive (copied into the new file), never overwrites it."""
+        archive = archive_dir / f"{buffer}.draws.jsonl.gz" if archive_dir is not None else None
+        with self._transaction() as db:
+            drawn = 0
+            if archive is not None:
+                rows = db.execute(
+                    "SELECT seq, consumer, ts, descriptor FROM draws WHERE buffer = ? ORDER BY seq", (buffer,)
+                ).fetchall()
+                if rows:
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = archive.with_name(archive.name + ".tmp")
+                    with gzip.open(tmp, "wt") as out:
+                        if archive.exists():
+                            with gzip.open(archive, "rt") as earlier:
+                                shutil.copyfileobj(earlier, out)
+                        for seq, consumer, ts, descriptor in rows:
+                            line = {"seq": seq, "consumer": consumer, "ts": ts, "descriptor": json.loads(descriptor)}
+                            out.write(json.dumps(line) + "\n")
+                    os.replace(tmp, archive)
+                drawn = db.execute("DELETE FROM draws WHERE buffer = ?", (buffer,)).rowcount
+            refs = db.execute("DELETE FROM refs WHERE buffer = ?", (buffer,)).rowcount
+        return {"refs": refs, "draws": drawn, "archive": str(archive) if archive and archive.exists() else None}
 
     def backup(self, dest: Path) -> None:
         """Write a consistent copy of the ledger to `dest`, atomically (temp file, then rename)."""

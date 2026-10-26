@@ -1,7 +1,9 @@
 """buffer-api: spec v0.5 §5 routes over the ledger, through handle() and once over a real socket."""
 
+import gzip
 import json
 import re
+import shutil
 import threading
 
 import httpx
@@ -483,3 +485,130 @@ def test_sync_assets_is_exclusive(tmp_path):
     with s._sync_lock:
         status, out, _ = call(s, "POST", "/sync/assets")
     assert status == 409 and out == {"error": "a sync is running"}
+
+
+AUTH = {"Authorization": "Bearer t"}
+
+
+def worker(s, method, path, payload=None):
+    return s.handle(method, path, {}, json.dumps(payload).encode() if payload is not None else b"", AUTH)
+
+
+def test_records_route_defaults_to_the_newest_ref(tmp_path):
+    s = svc(tmp_path)
+    assert call(s, "GET", "/records")[:2] == (404, {"error": "no catalog synced"})
+    old, new = "a" * 40, "b" * 40
+    call(s, "PUT", f"/records/{old}", payload={"records": [{"path": "x.yaml", "record": {"id": "x"}}]})
+    call(s, "PUT", f"/records/{new}", payload={"records": [{"path": "y.yaml", "record": {"id": "y"}}]})
+    status, out, _ = call(s, "GET", "/records")
+    assert status == 200 and out == {"ref": new, "records": [{"path": "y.yaml", "record": {"id": "y"}}]}
+    assert call(s, "GET", "/records", {"ref": old})[1]["records"][0]["path"] == "x.yaml"
+    assert call(s, "GET", "/records", {"ref": "c" * 40})[0] == 404
+
+
+def test_status_board_routes(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    worker(s, "PUT", "/buffers/b", CFG)
+    assert call(s, "PUT", "/buffers/b/datasets/rec", payload={"status": "fetching"})[0] == 401
+    status, out, _ = worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "fetching", "job": "j1"})
+    assert status == 200 and out["status"] == "fetching" and out["job"] == "j1"
+    status, out, _ = worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "done"})
+    assert status == 422 and "status must be one of" in out["error"]
+    assert worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "failed", "nope": 1})[0] == 422
+    assert worker(s, "PUT", "/buffers/zz/datasets/rec", {"status": "failed"})[0] == 404
+    worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "failed", "reason": "boom"})
+    rows = call(s, "GET", "/buffers/b/datasets")[1]["datasets"]
+    assert [(row["record"], row["status"], row["reason"], row["job"]) for row in rows] == [
+        ("rec", "failed", "boom", None)
+    ]
+    assert call(s, "POST", "/buffers/b/events", payload={"kind": "created"})[0] == 401
+    status, out, _ = worker(s, "POST", "/buffers/b/events", {"kind": "created", "issue": 3, "event_id": "e1"})
+    assert status == 200 and out["seq"] == 1 and out["detail"] == "" and out["issue"] == 3
+    worker(s, "POST", "/buffers/b/events", {"kind": "needs-human", "detail": "why"})
+    status, out, _ = worker(s, "POST", "/buffers/b/events", {"kind": "exploded"})
+    assert status == 422 and "kind must be one of" in out["error"]
+    events = call(s, "GET", "/buffers/b/events")[1]["events"]
+    assert [(event["seq"], event["kind"]) for event in events] == [(1, "created"), (2, "needs-human")]
+    assert call(s, "GET", "/buffers")[1]["buffers"][0]["latest_event"]["kind"] == "needs-human"
+
+
+def test_retire_route_archives_and_frees_refs(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", archive_dir=tmp_path / "archive")
+    worker(s, "PUT", "/buffers/b", CFG)
+    worker(s, "PUT", "/buffers/b/volumes/a", {**body(), "artifact": "art1"})
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    call(s, "GET", "/buffers/b/next", {"n": "3", "consumer": cid})
+    assert call(s, "DELETE", "/buffers/b/refs")[0] == 401
+    status, out, _ = worker(s, "DELETE", "/buffers/b/refs")
+    archive = tmp_path / "archive" / "b.draws.jsonl.gz"
+    assert status == 200 and out == {"refs": 2, "draws": 3, "archive": str(archive)}
+    with gzip.open(archive, "rt") as fh:
+        assert [json.loads(line)["seq"] for line in fh] == [1, 2, 3]
+    assert call(s, "GET", "/assets/staged/art1")[0] == 404  # no row and no reference left
+    assert call(s, "GET", "/buffers/b/status")[1]["volumes"] == 1  # the page still shows the retired buffer
+    assert worker(s, "DELETE", "/buffers/zz/refs")[0] == 404
+
+
+def test_status_stats_pyramids_and_next_skips_missing(tmp_path, monkeypatch):
+    staged = tmp_path / "staged"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    for vid in ("a", "c"):
+        (staged / vid / "v0.zarr").mkdir(parents=True)
+        call(s, "PUT", f"/buffers/b/volumes/{vid}", payload={**body(vid), "path": str(staged / vid / "v0.zarr")})
+    out = call(s, "GET", "/buffers/b/status")[1]
+    assert out["missing"] == [] and out["servable"] == {"train": 2, "val": 2}
+    shutil.rmtree(staged / "c")
+    seen = []
+    real_isdir = __import__("os").path.isdir
+    monkeypatch.setattr("mia_buffers.api.os.path.isdir", lambda path: seen.append(path) or real_isdir(path))
+    out = call(s, "GET", "/buffers/b/status")[1]
+    assert out["missing"] == ["c"] and out["servable"] == {"train": 1, "val": 1} and out["volumes"] == 2
+    assert len(seen) == 2  # each volume's path once per call
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    descriptors = call(s, "GET", "/buffers/b/next", {"n": "50", "consumer": cid})[1]["descriptors"]
+    assert {d["volume"] for d in descriptors} == {"a"}
+    (staged / "c" / "v0.zarr").mkdir(parents=True)  # back on disk: the next status serves it again
+    assert call(s, "GET", "/buffers/b/status")[1]["missing"] == []
+    assert call(s, "GET", "/buffers/b/status")[1]["servable"] == {"train": 2, "val": 2}
+
+
+def test_status_without_a_staged_root_does_not_stat(tmp_path, monkeypatch):
+    s = svc(tmp_path)  # a dev service has no disk view: every registered volume stays servable
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+
+    def boom(path):
+        raise AssertionError(f"stat {path}")
+
+    monkeypatch.setattr("mia_buffers.api.os.path.isdir", boom)
+    out = call(s, "GET", "/buffers/b/status")[1]
+    assert out["missing"] == [] and out["servable"] == {"train": 1, "val": 1}
+
+
+def test_buffers_list_does_not_stat(tmp_path, monkeypatch):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=tmp_path / "staged")
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())  # its path does not exist
+    call(s, "GET", "/buffers/b/status")  # marks it missing
+
+    def boom(path):
+        raise AssertionError(f"stat {path}")
+
+    monkeypatch.setattr("mia_buffers.api.os.path.isdir", boom)
+    monkeypatch.setattr("os.path.isdir", boom)
+    status, out, _ = call(s, "GET", "/buffers")
+    assert status == 200 and [row["id"] for row in out["buffers"]] == ["b"]
+    assert out["buffers"][0]["missing"] == 1 and out["buffers"][0]["servable"] == {"train": 0, "val": 0}
+
+
+def test_buffer_config_takes_the_lifecycle_fields(tmp_path):
+    s = svc(tmp_path)
+    recipe = {"tensorizer": "muvit-2d", "params": {}, "harness_commit": "c", "env_digest": "d"}
+    lifecycle = {"recipe": recipe, "plan_hash": "p", "idle_hours": 1.5, "retire_after_days": 2, "auto_approve": True}
+    assert call(s, "PUT", "/buffers/b", payload={**CFG, **lifecycle})[0] == 200
+    config = call(s, "GET", "/buffers/b/status")[1]["config"]
+    assert {key: config[key] for key in lifecycle} == {**lifecycle, "retire_after_days": 2.0}
+    assert call(s, "PUT", "/buffers/d", payload=CFG)[0] == 200
+    defaults = call(s, "GET", "/buffers/d/status")[1]["config"]
+    assert (defaults["idle_hours"], defaults["retire_after_days"], defaults["auto_approve"]) == (72, 14, False)

@@ -36,6 +36,7 @@ class Volume:
     voxel_size_nm: dict[str, float]
     normalize: dict | None = None  # per-channel lo/hi bounds the tensorizer applies (scope volume|dataset)
     artifact: str | None = None  # the staged artifact the volume lives in (its registry key); None before ids
+    missing: bool = False  # its pyramid was not on disk at the last status check; never served while set
 
     def extent(self, axis: str) -> int:
         return self.shape[self.axes.index(axis)] if axis in self.axes else 1
@@ -61,7 +62,8 @@ def fits(volume: Volume, patch: int, levels: list[int]) -> str | None:
 
 
 def servable(volumes: list[Volume], split: str) -> list[Volume]:
-    return [volume for volume in volumes if volume.split_planes.get(split)]
+    """The volumes with planes in `split` whose pyramid is not missing."""
+    return [volume for volume in volumes if volume.split_planes.get(split) and not volume.missing]
 
 
 def draw(

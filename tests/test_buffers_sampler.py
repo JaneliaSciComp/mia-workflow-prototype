@@ -1,5 +1,6 @@
 """Pure crop sampling: fit, servable volumes, weighted draws (spec v0.5 §2 serving-time rules)."""
 
+import dataclasses
 import random
 
 from mia_buffers.sampler import Level, Volume, draw, fits, footprint, servable
@@ -58,3 +59,10 @@ def test_draw_is_in_range_and_weighted():
         assert picked is not None
         counts[picked["volume"]] += 1
     assert 850 < counts["a"] < 950
+
+
+def test_servable_skips_missing_volumes():
+    volumes = [vol("a"), dataclasses.replace(vol("b"), missing=True)]
+    assert [v.id for v in servable(volumes, "train")] == ["a"]
+    picks = [draw(random.Random(i), volumes, "train", patch=256, levels=[1, 2, 4], channels=1) for i in range(50)]
+    assert {pick["volume"] for pick in picks if pick} == {"a"} and all(picks)

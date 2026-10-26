@@ -138,6 +138,37 @@ class Registry:
     def catalogs(self) -> list[dict]:
         return self.request("GET", "/catalogs")["catalogs"]
 
+    def records(self, ref: str) -> list[tuple[str, dict]]:
+        """The (path, record) pairs synced for `ref`; RegistryError 404 when the ref was never synced."""
+        rows = self.request("GET", "/records", params={"ref": ref})["records"]
+        return [(row["path"], row["record"]) for row in rows]
+
+    # --- a buffer's status board, events and lifecycle ------------------------------------------
+
+    def put_buffer_dataset(
+        self, buffer: str, record: str, status: str, reason: str = "", job: str | None = None
+    ) -> dict:
+        path = f"/buffers/{quote(buffer, safe='')}/datasets/{quote(record, safe='')}"
+        return self.request("PUT", path, json={"status": status, "reason": reason, "job": job})
+
+    def buffer_datasets(self, buffer: str) -> list[dict]:
+        return self.request("GET", f"/buffers/{quote(buffer, safe='')}/datasets")["datasets"]
+
+    def event(self, buffer: str, kind: str, **fields: Any) -> dict:
+        """Append a lifecycle event (`issue`, `event_id`, `detail` optional); returns it with its seq."""
+        return self.request("POST", f"/buffers/{quote(buffer, safe='')}/events", json={"kind": kind, **fields})
+
+    def buffers(self) -> list[dict]:
+        return self.request("GET", "/buffers")["buffers"]
+
+    def retire(self, buffer: str) -> dict:
+        """Drop the buffer's references and archive its draws: {refs, draws, archive}."""
+        return self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/refs")
+
+    def status(self, buffer: str) -> dict:
+        """The buffer's status (stats its pyramids, flags the missing); a consumer route, the token is harmless."""
+        return self.request("GET", f"/buffers/{quote(buffer, safe='')}/status")
+
 
 def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bool:
     """Run a registry write that must not fail its caller; True on success, a logged warning and False if not."""

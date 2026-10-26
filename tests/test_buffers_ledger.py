@@ -1,6 +1,8 @@
 """The SQLite ledger: buffers, volumes, consumers, draws and frozen lists."""
 
 import dataclasses
+import gzip
+import json
 import sqlite3
 import threading
 import time
@@ -210,3 +212,76 @@ def test_in_progress_records(tmp_path):
     ledger.put_dataset("busy", {"state": "in-progress"})
     ledger.put_dataset("done", {"state": "prepared"})
     assert ledger.in_progress_records() == {"busy"}
+
+
+def test_status_board_and_events(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_buffer_dataset("b1", "rec", "fetching", job="j1")
+    row = ledger.put_buffer_dataset("b1", "rec", "servable")
+    assert row["status"] == "servable" and row["job"] is None and ledger.buffer_datasets("b1")[0]["record"] == "rec"
+    assert ledger.buffer_datasets("b2") == [] and ledger.latest_event("b1") is None
+    first = ledger.add_event("b1", "created", issue=2, event_id="e1", detail="")
+    ledger.add_event("b1", "ready", issue=2, event_id=None, detail="2 of 2")
+    assert first["seq"] == 1 and ledger.latest_event("b1")["kind"] == "ready" and len(ledger.events("b1")) == 2
+    assert ledger.add_event("b2", "created", issue=None, event_id=None, detail="")["seq"] == 1  # per buffer
+
+
+def test_retire_drops_only_this_buffers_refs(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_buffer("b1", {})
+    ledger.put_buffer("b2", {})
+    ledger.put_volume("b1", vol("a"), refs=[("staged", "artA"), ("raw", "rec")])
+    ledger.put_volume("b2", vol("b"), refs=[("staged", "artB"), ("raw", "rec")])
+    cid = ledger.add_consumer("b1", INFO)
+    ledger.record_draws("b1", cid, [{"volume": "a"}, {"volume": "a"}])
+    ledger.record_draws("b2", cid, [{"volume": "b"}])
+    out = ledger.retire("b1", tmp_path / "archive")
+    assert out["refs"] == 2 and out["draws"] == 2 and (tmp_path / "archive" / "b1.draws.jsonl.gz").is_file()
+    assert ledger.refs("staged", "artA") == [] and ledger.refs("raw", "rec") == ["b2"]
+    assert ledger.max_seq("b1") == 0 and len(ledger.volumes("b1")) == 1  # volumes stay for the page
+    assert ledger.max_seq("b2") == 1 and ledger.buffer("b1") == {}
+    with gzip.open(tmp_path / "archive" / "b1.draws.jsonl.gz", "rt") as fh:
+        lines = [json.loads(line) for line in fh]
+    assert [line["seq"] for line in lines] == [1, 2] and set(lines[0]) == {"seq", "consumer", "ts", "descriptor"}
+    assert lines[0]["consumer"] == cid and lines[0]["descriptor"]["volume"] == "a"
+    again = ledger.retire("b1", tmp_path / "archive")  # a retried retire keeps the archive it wrote
+    assert again["refs"] == 0 and again["draws"] == 0
+    with gzip.open(tmp_path / "archive" / "b1.draws.jsonl.gz", "rt") as fh:
+        assert len(fh.readlines()) == 2
+    ledger.record_draws("b1", cid, [{"volume": "a"}])
+    ledger.retire("b1", tmp_path / "archive")  # a later retire appends, never overwrites
+    with gzip.open(tmp_path / "archive" / "b1.draws.jsonl.gz", "rt") as fh:
+        assert len(fh.readlines()) == 3
+    kept = ledger.retire("b2", None)  # a dev service keeps the draws
+    assert kept == {"refs": 2, "draws": 0, "archive": None} and ledger.max_seq("b2") == 1
+
+
+def test_buffers_summary_and_missing_flag(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_buffer("b1", {"spec_name": "s"})
+    ledger.put_buffer("b2", {})
+    ledger.put_volume("b1", vol("a"))
+    ledger.put_volume("b1", vol("c"))
+    ledger.set_volume_missing("b1", "c", True)
+    assert [volume.missing for volume in ledger.volumes("b1")] == [False, True]
+    ledger.add_event("b1", "ready", issue=1, event_id=None, detail="")
+    cid = ledger.add_consumer("b1", INFO)
+    ledger.record_draws("b1", cid, [{"volume": "a"}, {"volume": "a"}])
+    with ledger._lock:  # one draw from yesterday
+        ledger._db.execute("UPDATE draws SET ts = ts - 86400 WHERE seq = 1")
+    one, two = ledger.buffers()
+    assert one["id"] == "b1" and one["config"] == {"spec_name": "s"} and one["latest_event"]["kind"] == "ready"
+    assert one["volumes"] == 2 and one["missing"] == 1 and one["servable"] == {"train": 1}
+    assert one["draws_today"] == 1 and one["consumers_seen"] is not None
+    assert two == {
+        "id": "b2",
+        "config": {},
+        "latest_event": None,
+        "volumes": 0,
+        "missing": 0,
+        "servable": {},
+        "consumers_seen": None,
+        "draws_today": 0,
+    }
+    ledger.set_volume_missing("b1", "c", False)
+    assert ledger.buffers()[0]["servable"] == {"train": 2}

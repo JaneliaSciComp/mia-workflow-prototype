@@ -1,3 +1,4 @@
+import json
 import logging
 
 import httpx
@@ -120,3 +121,22 @@ def test_assets_sync_assets_and_locks():
     assert seen[4].extensions["timeout"]["read"] == 30  # every other call keeps the client's
     holder = {"kind": "raw", "key": "rec", "owner": "o"}
     assert Registry("http://svc", "t", transport=transport([], body={"locks": [holder]})).locks() == [holder]
+
+
+def test_buffer_lifecycle_calls():
+    seen = []
+    reply = {"records": [{"path": "a.yaml", "record": {"id": "a"}}], "buffers": [{"id": "b"}], "datasets": [{"r": 1}]}
+    reg = Registry("http://svc", "t", transport=transport(seen, body=reply))
+    assert reg.records("f" * 40) == [("a.yaml", {"id": "a"})]
+    assert seen[0].method == "GET" and seen[0].url.path == "/records" and seen[0].url.params["ref"] == "f" * 40
+    reg.put_buffer_dataset("b 1", "rec/x", "fetching", job="j1")
+    assert seen[1].method == "PUT" and seen[1].url.raw_path == b"/buffers/b%201/datasets/rec%2Fx"
+    assert json.loads(seen[1].read()) == {"status": "fetching", "reason": "", "job": "j1"}
+    reg.event("b", "ready", issue=2, detail="2 of 2")
+    assert seen[2].method == "POST" and seen[2].url.path == "/buffers/b/events"
+    assert json.loads(seen[2].read()) == {"kind": "ready", "issue": 2, "detail": "2 of 2"}
+    assert reg.buffers() == [{"id": "b"}] and seen[3].url.path == "/buffers"
+    assert reg.buffer_datasets("b") == [{"r": 1}] and seen[4].url.path == "/buffers/b/datasets"
+    assert reg.retire("b") == reply and seen[5].method == "DELETE" and seen[5].url.path == "/buffers/b/refs"
+    assert reg.status("b") == reply and seen[6].method == "GET" and seen[6].url.path == "/buffers/b/status"
+    assert all(request.headers["authorization"] == "Bearer t" for request in seen)

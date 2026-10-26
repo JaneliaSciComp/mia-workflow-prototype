@@ -15,7 +15,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -30,7 +30,7 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 
 from .config import Config
-from .ledger import Ledger
+from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, draw, fits, servable
 from .spec import SpecError, load_spec_text, spec_text_hash
@@ -61,6 +61,11 @@ class BufferConfig(_Strict):
     tensorizer_params: dict = {}
     splits: dict[str, float]
     split_sizes: dict[str, int] = {}  # frozen list lengths for val and test
+    recipe: dict | None = None
+    plan_hash: str | None = None
+    idle_hours: float = 72
+    retire_after_days: float = 14
+    auto_approve: bool = False
 
 
 class LevelBody(_Strict):
@@ -115,6 +120,19 @@ class PlanBody(_Strict):
     spec: str  # the spec's YAML text
 
 
+class BoardBody(_Strict):
+    status: str
+    reason: str = ""
+    job: str | None = None
+
+
+class EventBody(_Strict):
+    kind: str
+    issue: int | None = None
+    event_id: str | None = None
+    detail: str = ""
+
+
 class HttpError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -149,10 +167,17 @@ ROUTES = [
     ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status", "consumer"),
+    ("GET", re.compile(r"^/buffers$"), "list_buffers", "read"),
+    ("PUT", re.compile(r"^/buffers/([^/]+)/datasets/([^/]+)$"), "put_board", "worker"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/datasets$"), "board", "read"),
+    ("POST", re.compile(r"^/buffers/([^/]+)/events$"), "add_event", "worker"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/events$"), "events", "read"),
+    ("DELETE", re.compile(r"^/buffers/([^/]+)/refs$"), "retire", "worker"),
     ("PUT", re.compile(r"^/assets/([a-z]+)/(.+)$"), "put_asset", "worker"),
     ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset", "read"),
     ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets", "read"),
     ("PUT", re.compile(r"^/records/([^/]+)$"), "put_records", "worker"),
+    ("GET", re.compile(r"^/records$"), "records", "read"),
     ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
@@ -177,6 +202,7 @@ class BufferService:
         raw_root: Path | None = None,
         staged_root: Path | None = None,
         locks: LockDir | None = None,
+        archive_dir: Path | None = None,
     ):
         self.ledger = ledger
         self.token = token  # None disables the worker check (tests, a dev service)
@@ -184,6 +210,7 @@ class BufferService:
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
+        self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
@@ -314,6 +341,15 @@ class BufferService:
         records = [(item.path, item.record) for item in _parse(RecordsBody, body).records]
         return 200, {"ref": ref, "count": self.ledger.put_records(ref, records)}, {}
 
+    def _records(self, *, query: dict[str, str], body: bytes) -> Response:
+        ref = query.get("ref") or self.ledger.latest_catalog()
+        if ref is None:
+            raise HttpError(404, "no catalog synced")
+        if ref not in {catalog["ref"] for catalog in self.ledger.catalogs()}:
+            raise HttpError(404, f"catalog ref {ref} is not synced")
+        records = [{"path": path, "record": record} for path, record in self.ledger.records(ref)]
+        return 200, {"ref": ref, "records": records}, {}
+
     def _catalogs(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"catalogs": self.ledger.catalogs()}, {}
 
@@ -366,6 +402,40 @@ class BufferService:
             return 200, self.ledger.sync_datasets(scan_storage(root), older_than=started), {}
         finally:
             self._sync_lock.release()
+
+    # --- a buffer's status board, events, summary and retire: the page and the lifecycle -----------
+
+    def _list_buffers(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"buffers": self.ledger.buffers()}, {}
+
+    def _put_board(self, buffer: str, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        row = _parse(BoardBody, body)
+        if row.status not in BOARD_STATUSES:
+            raise HttpError(422, f"status must be one of {list(BOARD_STATUSES)}, got {row.status!r}")
+        return 200, self.ledger.put_buffer_dataset(buffer, record, row.status, row.reason, row.job), {}
+
+    def _board(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        return 200, {"buffer": buffer, "datasets": self.ledger.buffer_datasets(buffer)}, {}
+
+    def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        event = _parse(EventBody, body)
+        if event.kind not in EVENT_KINDS:
+            raise HttpError(422, f"kind must be one of {list(EVENT_KINDS)}, got {event.kind!r}")
+        added = self.ledger.add_event(
+            buffer, event.kind, issue=event.issue, event_id=event.event_id, detail=event.detail
+        )
+        return 200, added, {}
+
+    def _events(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        return 200, {"buffer": buffer, "events": self.ledger.events(buffer)}, {}
+
+    def _retire(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        return 200, self.ledger.retire(buffer, self.archive_dir), {}
 
     def _add_consumer(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
@@ -422,8 +492,15 @@ class BufferService:
         return 200, {"descriptors": frozen[start:end], "size": size}, {}
 
     def _status(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        """The buffer's summary; with a staged root, first stats each volume's pyramid once and flags the missing."""
         config = self._config(buffer)
         volumes = self.ledger.volumes(buffer)
+        if self.staged_root is not None:  # a service without one (tests, a dev service) has no view of the disk
+            for index, volume in enumerate(volumes):
+                missing = not os.path.isdir(volume.path)
+                if missing != volume.missing:
+                    self.ledger.set_volume_missing(buffer, volume.id, missing)
+                    volumes[index] = replace(volume, missing=missing)
         splits = sorted({split for volume in volumes for split in volume.split_planes})
         return (
             200,
@@ -432,6 +509,7 @@ class BufferService:
                 "config": config.model_dump(),
                 "volumes": len(volumes),
                 "servable": {split: len(servable(volumes, split)) for split in splits},
+                "missing": [volume.id for volume in volumes if volume.missing],
                 "draws": self.ledger.draws_per_volume(buffer),
                 "consumers": self.ledger.consumers(buffer, self.stale_s),
             },
@@ -534,6 +612,7 @@ def serve(cfg: Config) -> None:
             raw_root=cfg.paths.raw_root,
             staged_root=cfg.paths.staged_root,
             locks=LockDir(cfg.paths.local_root / "locks"),
+            archive_dir=cfg.paths.state_dir / "archive",
         ),
         url.hostname or "127.0.0.1",
         url.port,
