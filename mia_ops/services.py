@@ -226,6 +226,7 @@ class Temporal:
         self.state = stack.manifest.temporal.state_dir
         self.address = stack.temporal_address
         self.log = self.state / "logs/temporal.log"
+        self._reported = False
 
     @property
     def host(self) -> str:
@@ -267,7 +268,9 @@ class Temporal:
 
     def up(self) -> None:
         if self.healthy():
-            print(f"temporal: {self.status()} at {self.address}")
+            if not self._reported:  # every service_up checks Temporal; report the result once per command
+                print(f"temporal: {self.status()} at {self.address}")
+            self._reported = True
             return
         if not self.managed:
             sys.exit(f"temporal: unreachable at {self.address} (temporal.managed is false; see your cluster)")
