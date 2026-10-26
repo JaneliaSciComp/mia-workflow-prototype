@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS assets (kind TEXT, key TEXT, data TEXT NOT NULL, upda
 CREATE TABLE IF NOT EXISTS refs (buffer TEXT, kind TEXT, key TEXT, PRIMARY KEY (buffer, kind, key));
 CREATE TABLE IF NOT EXISTS catalogs (ref TEXT PRIMARY KEY, synced_at REAL, count INTEGER);
 CREATE TABLE IF NOT EXISTS records (ref TEXT, id TEXT, path TEXT NOT NULL, data TEXT NOT NULL,
-                                    PRIMARY KEY (ref, id));
+                                    PRIMARY KEY (ref, path));
 CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at REAL);
 """
 
@@ -58,6 +58,10 @@ class Ledger:
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
 
     def put_buffer(self, buffer: str, config: dict) -> None:
         with self._lock:
@@ -114,7 +118,7 @@ class Ledger:
             db.execute("DELETE FROM records WHERE ref = ?", (ref,))
             db.executemany(
                 "INSERT INTO records VALUES (?, ?, ?, ?)",
-                [(ref, record["id"], path, json.dumps(record)) for path, record in records],
+                [(ref, record.get("id"), path, json.dumps(record)) for path, record in records],
             )
             db.execute("INSERT OR REPLACE INTO catalogs VALUES (?, ?, ?)", (ref, time.time(), len(records)))
         return len(records)
@@ -164,16 +168,18 @@ class Ledger:
                 ).fetchall()
         return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
 
-    def sync_datasets(self, prepared: dict[str, dict]) -> dict:
-        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched."""
+    def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
+        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched.
+        With `older_than`, only rows last written before it are dropped: one written during the scan stays."""
         now = time.time()
         with self._transaction() as db:
             for record, fields in prepared.items():
                 self._merge_dataset(db, record, {**fields, "state": "prepared"}, now)
+            rows = db.execute("SELECT id, updated_at FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
             stale = [
-                row[0]
-                for row in db.execute("SELECT id FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
-                if row[0] not in prepared
+                record
+                for record, updated_at in rows
+                if record not in prepared and (older_than is None or updated_at < older_than)
             ]
             db.executemany("DELETE FROM datasets WHERE id = ?", [(record,) for record in stale])
         return {"prepared": len(prepared), "demoted": len(stale)}

@@ -322,6 +322,33 @@ def test_sync_datasets_route(tmp_path):
     assert worker.handle("POST", "/sync/datasets", {}, b"")[0] == 401
 
 
+def test_sync_keeps_a_row_prepared_during_the_scan(tmp_path, monkeypatch):
+    root = tmp_path / "crops"
+    write_prepared(root / "u937", U937)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), storage_root=root)
+    s.ledger.put_dataset("old", {"state": "prepared"})
+
+    def scan_while_set_stage_runs(path):
+        s.ledger.put_dataset("late", {"state": "prepared"})  # mia-data's set_stage("done"), after the scan passed
+        return {}
+
+    monkeypatch.setattr("mia_buffers.api.scan_storage", scan_while_set_stage_runs)
+    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 0, "demoted": 1}
+    assert s.ledger.dataset("late")["state"] == "prepared" and s.ledger.dataset("old") is None
+
+
+def test_records_with_a_shared_or_integer_id_all_land(tmp_path):
+    s = svc(tmp_path)
+    ref = "a" * 40
+    records = [
+        {"path": "datasets/a.yaml", "record": {"id": "same"}},
+        {"path": "datasets/b.yaml", "record": {"id": "same"}},
+        {"path": "datasets/c.yaml", "record": {"id": 2024}},
+    ]
+    assert call(s, "PUT", f"/records/{ref}", payload={"records": records}) == (200, {"ref": ref, "count": 3}, {})
+    assert [path for path, _ in s.ledger.records(ref)] == ["datasets/a.yaml", "datasets/b.yaml", "datasets/c.yaml"]
+
+
 def test_sync_refuses_a_missing_or_empty_storage_root(tmp_path):
     led = Ledger(tmp_path / "l.sqlite")
     led.put_dataset("rec", {"state": "prepared", "folder": "rec"})
@@ -349,11 +376,29 @@ def buffers_cfg(tmp_path, local_root):
 
 def test_open_ledger_moves_the_old_file_once(tmp_path, capsys):
     cfg = buffers_cfg(tmp_path, tmp_path / "local")
-    (tmp_path / "state").mkdir()
-    Ledger(cfg.paths.state_dir / "buffers.sqlite").put_buffer("b", {"x": 1})
+    old = Ledger(cfg.paths.state_dir / "buffers.sqlite")
+    old.put_buffer("b", {"x": 1})
+    old.close()  # the pre-B service is stopped before the upgrade
     assert open_ledger(cfg).buffer("b") == {"x": 1} and "moved the ledger" in capsys.readouterr().out
+    assert not (tmp_path / "state" / "buffers.sqlite").exists()
+    assert Ledger(tmp_path / "state" / "buffers.sqlite.moved").buffer("b") == {"x": 1}
     Ledger(cfg.paths.state_dir / "buffers.sqlite").put_buffer("b", {"x": 2})
     assert open_ledger(cfg).buffer("b") == {"x": 1}  # already moved: the old file is not read again
+
+
+def test_open_ledger_refuses_a_missing_ledger_when_backups_exist(tmp_path):
+    cfg = buffers_cfg(tmp_path, tmp_path / "local")
+    backups = cfg.paths.state_dir / "backups"
+    for stamp in ("20261001T000000Z", "20261024T120000Z"):
+        Ledger(backups / f"buffers-{stamp}.sqlite").put_buffer("b", {"x": 1})
+    with pytest.raises(RuntimeError, match="buffers-20261024T120000Z.sqlite") as err:
+        open_ledger(cfg)
+    assert str(ledger_path(cfg)) in str(err.value) and not ledger_path(cfg).exists()
+
+
+def test_open_ledger_first_install_starts_empty(tmp_path):
+    led = open_ledger(buffers_cfg(tmp_path, tmp_path / "local"))
+    assert led.catalogs() == [] and led.datasets() == []
 
 
 def test_prune_backups_keeps_the_newest(tmp_path):

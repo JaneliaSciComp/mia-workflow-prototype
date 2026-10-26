@@ -10,9 +10,11 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import random
 import re
 import threading
+import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -99,13 +101,7 @@ class ConsumerBody(_Strict):
 
 class RecordBody(_Strict):
     path: str
-    record: dict
-
-    @model_validator(mode="after")
-    def _has_id(self) -> RecordBody:
-        if not isinstance(self.record.get("id"), str):
-            raise ValueError(f"{self.path}: the record has no string id")
-        return self
+    record: dict  # a missing or odd id is the planner's to report, not a reason to refuse the catalog
 
 
 class RecordsBody(_Strict):
@@ -330,7 +326,8 @@ class BufferService:
             # an unmounted or empty storage_root would demote every prepared row
             if not (root.is_dir() and any(root.iterdir())):
                 raise HttpError(503, f"storage_root {root} is missing or empty; not syncing")
-            return 200, self.ledger.sync_datasets(scan_storage(root)), {}
+            started = time.time()
+            return 200, self.ledger.sync_datasets(scan_storage(root), older_than=started), {}
         finally:
             self._sync_lock.release()
 
@@ -442,13 +439,24 @@ def ledger_path(cfg: Config) -> Path:
 
 
 def open_ledger(cfg: Config) -> Ledger:
-    """The ledger on the local root; the first start copies the old `<state_dir>/buffers.sqlite` there."""
+    """The ledger on the local root. The first start moves the old `<state_dir>/buffers.sqlite` there (the old file
+    keeps a `.moved` suffix); a missing ledger beside existing backups is refused, never silently started empty."""
     path = ledger_path(cfg)
     require_local_dir(path.parent)
     old = cfg.paths.state_dir / "buffers.sqlite"
     if not path.exists() and old.exists():
-        Ledger(old).backup(path)
+        old_ledger = Ledger(old)
+        old_ledger.backup(path)
+        old_ledger.close()
+        os.replace(old, old.with_suffix(".sqlite.moved"))
         print(f"buffer-api: moved the ledger from {old} to {path}", flush=True)
+    elif not path.exists():
+        backups = sorted((cfg.paths.state_dir / "backups").glob("buffers-*.sqlite"))
+        if backups:
+            raise RuntimeError(
+                f"the ledger {path} is missing but backups exist; the newest is {backups[-1]}: "
+                f"copy it to {path} to restore it"
+            )
     return Ledger(path)
 
 
