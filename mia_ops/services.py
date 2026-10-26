@@ -118,7 +118,7 @@ class App:
         if self.package != "mia_buffers":
             return None
         url = urlparse(cfg.service.url)
-        return url.hostname or "localhost", url.port or 80
+        return url.hostname or "localhost", url.port
 
 
 APPS = {

@@ -51,7 +51,7 @@ network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
   redirect_hosts: {}                      # filled from the redirect probe; exact hosts, no patterns
 service:                                  # the buffer-api (`mia-buffers serve`) and its clients
-  url: http://host.example.org:8765
+  url: http://host.example.org:8765       # the port is required
   token_file: ~/.config/mia/service-token # chmod 600
 keeper:                                   # buffer-api's housekeeping (milestone C adds quota and eviction)
   minutes: 30                             # SQLite backup cadence; the keeper pass in milestone C

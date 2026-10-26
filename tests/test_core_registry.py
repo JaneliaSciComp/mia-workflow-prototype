@@ -23,8 +23,16 @@ def test_bearer_header_and_quoting():
 
 def test_no_token_sends_no_header():
     seen = []
-    Registry("http://svc", None, transport=transport(seen)).datasets("prepared")
+    rows = Registry("http://svc", None, transport=transport(seen, body={"datasets": [{"id": "a"}]})).datasets(
+        "prepared"
+    )
     assert "authorization" not in seen[0].headers and seen[0].url.params["state"] == "prepared"
+    assert rows == [{"id": "a"}]
+
+
+def test_catalogs_is_the_list():
+    reg = Registry("http://svc", "t", transport=transport([], body={"catalogs": [{"ref": "r"}]}))
+    assert reg.catalogs() == [{"ref": "r"}]
 
 
 def test_errors_carry_status_and_message():
@@ -58,6 +66,19 @@ def test_transport_error_is_registry_error():
 
     with pytest.raises(RegistryError) as err:
         Registry("http://svc", "t", transport=httpx.MockTransport(boom)).catalogs()
+    assert err.value.status is None
+
+
+def test_a_non_json_success_is_registry_error():
+    html = httpx.MockTransport(lambda request: httpx.Response(200, text="<html>proxy login</html>"))
+    with pytest.raises(RegistryError) as err:
+        Registry("http://svc", "t", transport=html).dataset("rec")
+    assert err.value.status == 200
+
+
+def test_an_invalid_url_is_registry_error():
+    with pytest.raises(RegistryError) as err:
+        Registry("http://svc", "t", transport=transport([])).request("GET", "/x\x00")
     assert err.value.status is None
 
 

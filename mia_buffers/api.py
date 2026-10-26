@@ -479,10 +479,11 @@ def serve(cfg: Config) -> None:
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     url = urlparse(cfg.service.url)
+    assert url.port is not None  # ServiceCfg requires an explicit port
     server = make_server(
         BufferService(ledger, token=token, storage_root=cfg.paths.storage_root),
         url.hostname or "127.0.0.1",
-        url.port or 8765,
+        url.port,
     )
     backups = cfg.paths.state_dir / "backups"
     stop = threading.Event()

@@ -10,9 +10,10 @@ import copy
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -30,6 +31,14 @@ class TemporalCfg(BaseModel):
 class ServiceCfg(BaseModel):
     url: str  # buffer-api base URL, reachable from the worker
     token_file: Path | None = None  # the worker token the service checks
+
+    @field_validator("url")
+    @classmethod
+    def _has_port(cls, url: str) -> str:
+        """An explicit port, so `serve` and `mia up` read the same one from the URL."""
+        if urlparse(url).port is None:
+            raise ValueError("service.url needs an explicit port, e.g. http://host.example.org:8765")
+        return url
 
 
 class KeeperCfg(BaseModel):

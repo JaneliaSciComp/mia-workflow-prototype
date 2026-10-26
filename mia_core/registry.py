@@ -67,7 +67,7 @@ class Registry:
         """Send the request; the parsed JSON body (None when empty), or RegistryError on any failure."""
         try:
             response = self._client.request(method, path, json=json, params=params)
-        except httpx.HTTPError as err:
+        except (httpx.HTTPError, httpx.InvalidURL) as err:
             raise RegistryError(None, str(err)) from err
         if response.status_code >= 400:
             try:
@@ -78,7 +78,10 @@ class Registry:
             raise RegistryError(response.status_code, message or response.text)
         if response.status_code == 204 or not response.content:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as err:
+            raise RegistryError(response.status_code, f"not a JSON body: {response.text[:200]}") from err
 
     def _lookup(self, path: str) -> Any:
         """GET `path`; None when the registry has no such thing (404)."""
@@ -96,7 +99,7 @@ class Registry:
         return self._lookup(f"/datasets/{quote(record, safe='')}")
 
     def datasets(self, state: str | None = None) -> list[dict]:
-        return self.request("GET", "/datasets", params={"state": state} if state else None)
+        return self.request("GET", "/datasets", params={"state": state} if state else None)["datasets"]
 
     def put_asset(self, kind: str, key: str, data: dict) -> dict:
         return self.request("PUT", f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}", json=data)
@@ -116,7 +119,7 @@ class Registry:
         return self.request("POST", "/sync/datasets")
 
     def catalogs(self) -> list[dict]:
-        return self.request("GET", "/catalogs")
+        return self.request("GET", "/catalogs")["catalogs"]
 
 
 def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bool:
