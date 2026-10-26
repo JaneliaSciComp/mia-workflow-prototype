@@ -17,9 +17,10 @@ sections are shared; each block under `services` overlays them for one service, 
 sets `MIA_SERVICE` for you (a per-app YAML file still loads when `MIA_SERVICE` is unset, deprecated). The mia-data and
 mia-buffers services need `paths.local_root`, and mia-buffers also `service.token_file`; `mia up` refuses to start them
 without. `paths.local_root` must be host-local disk, not NFS (`mia up` refuses otherwise): it holds `locks/`, and
-`<local_root>/service/buffers.sqlite` is buffer-api's SQLite ledger (the first `serve` copies an old
-`<state_dir>/buffers.sqlite` there once), with timed backups under `<state_dir>/backups/`. `service.token_file` (mode 600; `mia init-token`
-creates it) holds the buffer-api worker token and is mounted read-only into the workers.
+`<local_root>/service/buffers.sqlite` is buffer-api's SQLite ledger (the first `serve` moves an old
+`<state_dir>/buffers.sqlite` there once; the old file keeps a `.moved` suffix), with timed backups under
+`<state_dir>/backups/`. `service.token_file` (mode 600; `mia init-token` creates it) holds the buffer-api worker token
+and is mounted read-only into the workers.
 
 ## The four checks
 
@@ -153,7 +154,7 @@ mia exec mia-buffers catalog sync [--ref <catalog sha>]   # load the catalog rec
 mia exec mia-buffers datasets sync                        # rebuild the prepared rows from storage_root
 ```
 
-`POST /plan` plans a spec against the synced catalog and the registry; datasets that are not `prepared` stay in the
+`POST /plan` plans a spec against the synced catalog and the registry; datasets that are not `prepared` are out of the
 pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read the spec from a file:
 
 ```

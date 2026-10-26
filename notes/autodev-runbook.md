@@ -67,10 +67,18 @@ one. Then `mia restart <service>`.
 
 buffer-api (`mia-buffers serve`) keeps its SQLite ledger at `<local_root>/service/buffers.sqlite` (host-local disk,
 never NFS) and writes backups to `<state_dir>/backups/` every `keeper.minutes`; worker writes need the token in
-`service.token_file`. The first start moves an old `<state_dir>/buffers.sqlite` to the new place.
+`service.token_file`. The first start moves an old `<state_dir>/buffers.sqlite` to the new place (the old file keeps a
+`.moved` suffix). If the ledger is missing but `<state_dir>/backups/` holds backups, `serve` refuses to start and names
+the newest: copy it to `<local_root>/service/buffers.sqlite` to restore it.
 After the first `mia up`, fill the registry:
 `mia exec mia-buffers catalog sync` (the catalog records; `--ref <sha>` for a particular commit) and
 `mia exec mia-buffers datasets sync` (the prepared rows, from `storage_root`).
+
+Upgrading mia-buffers to the registry (milestone B): restart it with no buffer round in `buffer:sourcing`. A stage job
+submitted before the upgrade writes to the old `<levels key>/<record>` directory, and its dataset fails after the
+restart. The first round after the upgrade re-stages every record under `<levels key>/<record>/<artifact id>`. Rolling
+back to the pre-B code once new volumes are registered needs a ledger backup taken before the upgrade: the old code does
+not know the `artifact` key.
 
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
