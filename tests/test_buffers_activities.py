@@ -13,14 +13,16 @@ from mia_helpers import FakeGH
 from temporalio.exceptions import ApplicationError
 from test_buffers_config import make_cfg
 from test_buffers_plan import BCSS, CATALOG, ONE_CH, U937, spec_with
-from test_buffers_register import server, write_stage_json  # noqa: F401  (fixture)
+from test_buffers_register import token_server, write_stage_json  # noqa: F401  (fixture)
 
 from mia_buffers import activities as acts_module
 from mia_buffers.activities import Activities
 from mia_buffers.drop import cache_key, read_manifest
+from mia_buffers.jobspec import artifact_id
 from mia_buffers.models import BufferPins, BufferState
 from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment
+from mia_core.registry import Registry, RegistryError
 from mia_data.catalog import dataset_folder
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
@@ -80,6 +82,14 @@ def acts(tmp_path, monkeypatch):
     )
     activities.gh = gh
     return activities
+
+
+@pytest.fixture
+def server(acts, token_server):  # noqa: F811
+    """A buffer-api that wants the worker token `t`, and the activities' registry client holding it."""
+    acts.registry = Registry(token_server, "t")
+    yield token_server
+    acts.registry.close()
 
 
 async def admitted(acts) -> BufferPins:
@@ -349,13 +359,26 @@ async def test_verify_drop_rejects_symlink_and_empty_file(acts):
 
 
 def staged_dir(acts, record_id):
-    return acts.cfg.paths.staged_root / "p256-l1-2-4" / record_id
+    """<staged_root>/<levels key>/<record>/<artifact>: the id from the binding read_binding copied into the round,
+    the plan row's voxel size and the round's pins."""
+    round_dir = acts.cfg.paths.state_dir / "rounds" / ROUND
+    binding_hash = hashlib.sha256((round_dir / "bindings" / f"{record_id}.yaml").read_bytes()).hexdigest()
+    row = next(row for row in json.loads((round_dir / "plan.json").read_text())["rows"] if row["id"] == record_id)
+    voxel = {axis: size for axis, size in row["voxel_size_nm"].items() if size is not None}
+    pins = json.loads((round_dir / "pins.json").read_text())
+    artifact = artifact_id(binding_hash, "p256-l1-2-4", voxel, pins["harness_commit"], pins["env_digest"])
+    return acts.cfg.paths.staged_root / "p256-l1-2-4" / record_id / artifact
+
+
+async def planned_and_bound(acts, record_id: str = U937) -> None:
+    """Admit and plan the round and copy the record's binding in: the staged directory's id is built from it."""
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, record_id, ["https://zenodo.org/a.tif"])
+    await acts.read_binding(ROUND, record_id)
 
 
 async def test_prepare_stage_makes_workspace_and_dirs(acts):
-    await acts.plan(7, ROUND, await admitted(acts))
-    write_binding(acts, U937, ["https://zenodo.org/a.tif"])
-    await acts.read_binding(ROUND, U937)
+    await planned_and_bound(acts)
     workspace = Path(await acts.prepare_stage(7, ROUND, U937))
     assert workspace == acts.cfg.paths.work_root / "issue-7" / ROUND / f"stage-{U937}"
     assert yaml.safe_load((workspace / "record.yaml").read_text())["id"] == U937
@@ -363,9 +386,8 @@ async def test_prepare_stage_makes_workspace_and_dirs(acts):
     assert (acts.cfg.paths.raw_root / U937).is_dir() and staged_dir(acts, U937).is_dir()
 
 
-async def test_read_stage_reduces_report(acts, server):  # noqa: F811
-    acts.cfg.service.url = server  # read_stage registers what it read
-    await acts.plan(7, ROUND, await admitted(acts))
+async def test_read_stage_reduces_report(acts, server):  # read_stage registers what it read
+    await planned_and_bound(acts)
     assert (await acts.read_stage(ROUND, U937)).errors == ["stage.json is missing, unreadable or not a JSON object"]
     write_stage_json(staged_dir(acts, U937))
     result = await acts.read_stage(ROUND, U937)
@@ -379,9 +401,8 @@ async def test_read_stage_reduces_report(acts, server):  # noqa: F811
     assert not result.ok and result.errors == ["boom"] and result.host_not_allowed == "h.example"
 
 
-async def test_register_dataset_against_live_service(acts, server):  # noqa: F811
-    acts.cfg.service.url = server
-    await acts.plan(7, ROUND, await admitted(acts))
+async def test_register_dataset_against_live_service(acts, server):
+    await planned_and_bound(acts)
     write_stage_json(staged_dir(acts, U937))
     await acts.create_buffer(ROUND, ROUND)
     result = await acts.register_dataset(ROUND, U937, ROUND)
@@ -390,13 +411,14 @@ async def test_register_dataset_against_live_service(acts, server):  # noqa: F81
 
     status = httpx.get(f"{server}/buffers/{ROUND}/status").json()
     assert status["config"]["spec_name"] == "microscopy-foundation-pretrain" and status["volumes"] == 1
+    artifact = staged_dir(acts, U937).name  # the volume references the artifact, not the directory
+    assert httpx.get(f"{server}/assets/staged/{artifact}").json()["refs"] == [ROUND]
 
 
-async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):  # noqa: F811
+async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):
     """Review (milestone 4): 30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
     1 MiB cap the generic job-JSON reader uses; read_stage and register_dataset must still read it."""
-    acts.cfg.service.url = server
-    await acts.plan(7, ROUND, await admitted(acts))
+    await planned_and_bound(acts)
     staged = write_stage_json(staged_dir(acts, U937))
     report = json.loads((staged / "stage.json").read_text())
     base = report["volumes"][0]
@@ -443,9 +465,8 @@ async def test_admit_accepts_crlf_bodies(acts):
     assert pins.catalog_ref == REF
 
 
-async def test_register_dataset_refuses_malformed_volumes(acts, server):  # noqa: F811
-    acts.cfg.service.url = server
-    await acts.plan(7, ROUND, await admitted(acts))
+async def test_register_dataset_refuses_malformed_volumes(acts, server):
+    await planned_and_bound(acts)
     staged = write_stage_json(staged_dir(acts, U937))
     report = json.loads((staged / "stage.json").read_text())
     good = report["volumes"][0]
@@ -459,28 +480,11 @@ async def test_register_dataset_refuses_malformed_volumes(acts, server):  # noqa
     assert "path" in result.refused[f"{U937}/../../elsewhere.zarr"]
 
 
-def test_response_error_text_survives_non_json_bodies():
-    from mia_buffers.activities import _response_error
-
-    class Response:
-        text = "<html>502 Bad Gateway</html>"
-
-        def json(self):
-            raise ValueError("not json")
-
-    assert _response_error(Response()) == "<html>502 Bad Gateway</html>"
-
-
-async def test_read_stage_records_the_staged_and_raw_assets(acts, server):  # noqa: F811
-    """What the stage job left on disk is registered with buffer-api: the staged directory with the binding it
-    was built from, and the record's raw cache from files.json, so later rounds and a retire can find them."""
-    from urllib.parse import quote
-
-    import httpx
-
+async def test_read_stage_records_the_staged_and_raw_assets(acts, server):
+    """What the stage job left on disk is registered with buffer-api: the staged artifact with every input its id
+    hashes, and the record's raw cache from files.json, so later rounds and a retire can find them."""
     from mia_buffers.drop import merge_manifest
 
-    acts.cfg.service.url = server
     await acts.plan(7, ROUND, await admitted(acts))
     write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
     info = await acts.read_binding(ROUND, U937)
@@ -488,36 +492,41 @@ async def test_read_stage_records_the_staged_and_raw_assets(acts, server):  # no
     merge_manifest(acts.cfg.paths.raw_root / U937, {url: {"validators": {"size": 12}, "source": "download"}})
     write_stage_json(staged_dir(acts, U937))
     assert (await acts.read_stage(ROUND, U937)).ok
-    key = quote(str(staged_dir(acts, U937)), safe="")
-    staged = httpx.get(f"{server}/assets/staged/{key}").json()["data"]
-    assert staged == {
+    artifact = staged_dir(acts, U937).name
+    staged = acts.registry.asset("staged", artifact)
+    assert {key: staged[key] for key in ("record", "levels_key", "path", "artifact", "ok")} == {
         "record": U937,
-        "round": ROUND,
+        "levels_key": "p256-l1-2-4",
+        "path": str(staged_dir(acts, U937)),
+        "artifact": artifact,
         "ok": True,
-        "volumes": 1,
-        "bytes_fetched": 0,
-        "binding_hash": info.hash,
-        "snippets_commit": "a" * 40,
     }
-    raw = httpx.get(f"{server}/assets/raw/{U937}").json()["data"]
+    assert (staged["binding_hash"], staged["harness_commit"], staged["env_digest"]) == (info.hash, "h" * 40, "d" * 64)
+    raw = acts.registry.asset("raw", U937)
     assert raw == {"path": str(acts.cfg.paths.raw_root / U937), "files": {url: {"size": 12, "source": "download"}}}
+    acts.cfg.service.url = server  # the service's worker routes refuse a client without the token
+    with pytest.raises(RegistryError) as error:
+        Registry.from_config(acts.cfg.service).put_asset("staged", artifact, {})
+    assert error.value.status == 401
 
 
-async def test_read_binding_reports_a_pyramid_staged_earlier_for_the_same_binding(acts, server):  # noqa: F811
-    acts.cfg.service.url = server
+async def test_read_binding_reports_a_pyramid_staged_earlier_for_the_same_binding(acts, server):
     await acts.plan(7, ROUND, await admitted(acts))
     write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
     assert not (await acts.read_binding(ROUND, U937)).staged  # nothing registered yet
+    artifact = staged_dir(acts, U937).name
     write_stage_json(staged_dir(acts, U937))
     await acts.read_stage(ROUND, U937)
-    assert (await acts.read_binding(ROUND, U937)).staged
+    info = await acts.read_binding(ROUND, U937)
+    assert info.staged and info.artifact == artifact
     (staged_dir(acts, U937) / "stage.json").unlink()  # registered but gone from disk: stage again
     assert not (await acts.read_binding(ROUND, U937)).staged
     write_stage_json(staged_dir(acts, U937).parent / "tmp")
     (staged_dir(acts, U937).parent / "tmp" / "stage.json").rename(staged_dir(acts, U937) / "stage.json")
     assert (await acts.read_binding(ROUND, U937)).staged
     write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/b.tif/content"])  # a new binding
-    assert not (await acts.read_binding(ROUND, U937)).staged
-    acts.cfg.service.url = "http://127.0.0.1:9"  # buffer-api down: the binding is still read, nothing reused
+    info = await acts.read_binding(ROUND, U937)
+    assert not info.staged and info.artifact not in ("", artifact)
+    acts.registry = Registry("http://127.0.0.1:9")  # buffer-api down: the binding is still read, nothing reused
     info = await acts.read_binding(ROUND, U937)
     assert info.found and not info.staged

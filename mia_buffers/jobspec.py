@@ -7,6 +7,8 @@ its output. Download happens inside it: the harness fetches every file of the bi
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,16 @@ if TYPE_CHECKING:
 def levels_key(patch: int, levels: list[int]) -> str:
     """The staged layout's directory key: a pyramid depends on the spec's patch and levels (spec §2)."""
     return f"p{int(patch)}-l{'-'.join(str(int(level)) for level in levels)}"
+
+
+def artifact_id(
+    binding_hash: str, levels_key: str, voxel_size_nm: dict[str, float] | None, harness_commit: str, env_digest: str
+) -> str:
+    """A staged pyramid's id: 16 hex of the sha256 over every input that changes its bytes, so a pyramid on disk is
+    an immutable artifact a later round can reuse only when all of them match."""
+    voxel = {axis: float(size) for axis, size in sorted((voxel_size_nm or {}).items())}
+    payload = json.dumps([binding_hash, levels_key, voxel, harness_commit, env_digest], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def catalog_snapshot(cfg: Config, ref: str, tokens: Callable[[], str | None] = lambda: None) -> Path:

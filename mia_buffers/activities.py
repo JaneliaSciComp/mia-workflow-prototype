@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
 
-import httpx
 import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
+from mia_core.registry import Registry, RegistryError
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
@@ -40,7 +40,7 @@ from mia_data.status import render_links, render_stage
 
 from .config import HUMAN_LABELS, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
-from .jobspec import catalog_snapshot, levels_key, stage_job
+from .jobspec import artifact_id, catalog_snapshot, levels_key, stage_job
 from .models import (
     BindingInfo,
     BufferPins,
@@ -86,8 +86,8 @@ def _voxel(row: Row) -> dict[str, float]:
 
 class Activities:
     """The activity implementations, bound to the GitHub clients (issue, snippets, catalog and mia-data's
-    datasets repos), the csub job runner, buffer-api's URL (from the config) and the Temporal client (for the
-    poller)."""
+    datasets repos), the csub job runner, buffer-api's registry (from the config's `service`) and the Temporal
+    client (for the poller)."""
 
     def __init__(
         self,
@@ -104,6 +104,7 @@ class Activities:
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self._gh_datasets = gh_datasets
+        self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
         self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
         self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
@@ -203,10 +204,30 @@ class Activities:
     def _binding_path(self, round_id: str, record: str) -> Path:
         return self._round_dir(round_id) / "bindings" / f"{record}.yaml"
 
-    def _staged_dir(self, round_id: str, record: str) -> Path:
+    def _levels_key(self, round_id: str) -> str:
         spec = self._spec(round_id)
         patch = (spec.patch_for("2D") or {}).get("y") or 0
-        return self.cfg.paths.staged_root / levels_key(int(patch), spec.sampling.levels) / record
+        return levels_key(int(patch), spec.sampling.levels)
+
+    def _artifact(self, round_id: str, record: str) -> str:
+        """The record's staged artifact id: the round's binding copy, the levels key, the plan row's voxel size
+        (the value the stage job is given) and the round's harness pins."""
+        binding = self._binding_path(round_id, record)
+        if not binding.is_file():
+            raise ValueError(f"{record}: no binding copied into round {round_id}")
+        voxel = self._row(round_id, record).get("voxel_size_nm") or {}
+        pins = self._pins(round_id)
+        return artifact_id(
+            hashlib.sha256(binding.read_bytes()).hexdigest(),
+            self._levels_key(round_id),
+            {axis: size for axis, size in voxel.items() if size is not None},  # the plan keeps unknown axes as None
+            pins.harness_commit,
+            pins.env_digest,
+        )
+
+    def _staged_dir(self, round_id: str, record: str) -> Path:
+        """<staged_root>/<levels key>/<record>/<artifact id>: one immutable directory per distinct pyramid."""
+        return self.cfg.paths.staged_root / self._levels_key(round_id) / record / self._artifact(round_id, record)
 
     def _cache_dir(self, record: str) -> Path:
         if not ID_RE.fullmatch(record):
@@ -447,28 +468,24 @@ class Activities:
         manual = any(url.startswith("manual://") for url in urls) or bool(
             missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
         )
-        staged = await self._staged_before(round_id, record, digest)
+        staged, artifact = await self._staged_before(round_id, record)
         if manual:
-            return BindingInfo(True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)], staged=staged)
-        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged)
+            return BindingInfo(
+                True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)], staged=staged, artifact=artifact
+            )
+        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact)
 
-    async def _staged_before(self, round_id: str, record: str, binding_hash: str) -> bool:
-        """True when buffer-api's registry holds an `ok` pyramid for this record's staged directory, built from a
-        binding with this hash, and its stage.json is still there. Buffer-api unreachable: False (stage again)."""
-        staged = self._staged_dir(round_id, record)
+    async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str]:
+        """(found, artifact id): found when buffer-api's registry holds an `ok` pyramid under this artifact id
+        and its stage.json is still on disk. Buffer-api unreachable or refusing: not found (stage again)."""
+        artifact = self._artifact(round_id, record)
         try:
-            async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
-                response = await client.get(f"/assets/staged/{quote(str(staged), safe='')}")
-        except httpx.HTTPError as error:
+            data = await asyncio.to_thread(self.registry.asset, "staged", artifact)
+        except RegistryError as error:
             activity.logger.warning("%s: registry unavailable, staging again: %s", record, error)
-            return False
-        data = response.json().get("data") if response.status_code == 200 else None
-        return (
-            isinstance(data, dict)
-            and data.get("ok") is True
-            and data.get("binding_hash") == binding_hash
-            and (staged / "stage.json").is_file()
-        )
+            return False, artifact
+        found = isinstance(data, dict) and data.get("ok") is True
+        return found and (self._staged_dir(round_id, record) / "stage.json").is_file(), artifact
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
@@ -540,17 +557,24 @@ class Activities:
         return result
 
     async def _record_assets(self, round_id: str, record: str, result: StageResult) -> None:
-        """Register with buffer-api what the stage job left on disk: the staged directory (with the binding it was
-        built from, so a later round can reuse it) and the record's raw cache as files.json lists it."""
+        """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
+        input the id hashes, so a later round can reuse it) and the record's raw cache as files.json lists it."""
+        artifact, pins = self._artifact(round_id, record), self._pins(round_id)
         binding_path, cache = self._binding_path(round_id, record), self._cache_dir(record)
-        binding = yaml.safe_load(binding_path.read_text()) if binding_path.is_file() else {}
+        binding = yaml.safe_load(binding_path.read_text())
         staged = {
             "record": record,
+            "levels_key": self._levels_key(round_id),
+            "path": str(self._staged_dir(round_id, record)),
+            "artifact": artifact,
+            "binding_hash": hashlib.sha256(binding_path.read_bytes()).hexdigest(),
+            "harness_commit": pins.harness_commit,
+            "env_digest": pins.env_digest,
+            "voxel_size_nm": self._row(round_id, record).get("voxel_size_nm"),
             "round": round_id,
             "ok": result.ok,
             "volumes": result.volumes,
             "bytes_fetched": result.bytes_fetched,
-            "binding_hash": hashlib.sha256(binding_path.read_bytes()).hexdigest() if binding_path.is_file() else None,
             "snippets_commit": str(binding.get("snippets_commit") or "") if isinstance(binding, dict) else "",
         }
         files = {
@@ -559,9 +583,8 @@ class Activities:
             if isinstance(entry, dict)
         }
         raw = {"path": str(cache), "files": files}
-        async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
-            for kind, key, data in (("staged", str(self._staged_dir(round_id, record)), staged), ("raw", record, raw)):
-                (await client.put(f"/assets/{kind}/{quote(key, safe='')}", json=data)).raise_for_status()
+        await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
+        await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
 
     @activity.defn(name="verify_drop")
     @mia_permanent_errors
@@ -615,8 +638,7 @@ class Activities:
             tensorizer=cfg.sourcing.tensorizer,
             split_sizes={"val": cfg.sourcing.val_size, "test": cfg.sourcing.test_size},
         )
-        async with httpx.AsyncClient(base_url=cfg.service.url, timeout=30.0) as client:
-            (await client.put(f"/buffers/{quote(buffer_id, safe='')}", json=body)).raise_for_status()
+        await asyncio.to_thread(self.registry.request, "PUT", f"/buffers/{quote(buffer_id, safe='')}", json=body)
 
     @activity.defn(name="register_dataset")
     @mia_permanent_errors
@@ -628,29 +650,24 @@ class Activities:
             return RegisterResult(refused={record: "stage.json is missing, unreadable or not a JSON object"})
         result = RegisterResult()
         bodies = volume_bodies(
-            self._row(round_id, record), staged, self._spec(round_id), report=report, refused=result.refused
+            self._row(round_id, record),
+            staged,
+            self._spec(round_id),
+            report=report,
+            refused=result.refused,
+            artifact=staged.name,
         )
-        async with httpx.AsyncClient(base_url=self.cfg.service.url, timeout=30.0) as client:
-            for volume_id, body in bodies:
-                response = await client.put(
-                    f"/buffers/{quote(buffer_id, safe='')}/volumes/{quote(volume_id, safe='')}", json=body
-                )
-                if response.status_code == 200:
-                    result.registered.append(volume_id)
-                else:
-                    result.refused[volume_id] = _response_error(response)
+        for volume_id, body in bodies:
+            path = f"/buffers/{quote(buffer_id, safe='')}/volumes/{quote(volume_id, safe='')}"
+            try:
+                await asyncio.to_thread(self.registry.request, "PUT", path, json=body)
+            except RegistryError as error:
+                result.refused[volume_id] = text(error.message, 500)
+            else:
+                result.registered.append(volume_id)
         return result
 
 
 def _stage_json(staged: Path) -> Any:
     """The stage job's stage.json (untrusted job output, read within STAGE_JSON_LIMIT), or None."""
     return loads(read_untrusted(staged, "stage.json", STAGE_JSON_LIMIT))
-
-
-def _response_error(response: Any) -> str:
-    """buffer-api's `error` field, or the raw body when the answer is not JSON (a proxy's HTML page)."""
-    try:
-        body = response.json()
-    except ValueError:
-        return text(response.text, 500)
-    return text(body.get("error", response.text) if isinstance(body, dict) else response.text, 500)

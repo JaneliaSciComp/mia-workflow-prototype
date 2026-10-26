@@ -35,6 +35,7 @@ class Volume:
     recipe: dict | None
     voxel_size_nm: dict[str, float]
     normalize: dict | None = None  # per-channel lo/hi bounds the tensorizer applies (scope volume|dataset)
+    artifact: str | None = None  # the staged artifact the volume lives in (its registry key); None before ids
 
     def extent(self, axis: str) -> int:
         return self.shape[self.axes.index(axis)] if axis in self.axes else 1

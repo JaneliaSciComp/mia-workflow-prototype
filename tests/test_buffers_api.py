@@ -373,3 +373,12 @@ def test_serve_refuses_a_network_root(tmp_path, monkeypatch):
     monkeypatch.setattr("mia_core.fs.mount_type", lambda path, mounts=None: "nfs4")
     with pytest.raises(RuntimeError, match="network filesystem"):
         open_ledger(buffers_cfg(tmp_path, tmp_path / "local"))
+
+
+def test_volume_refs_are_keyed_by_artifact(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "artifact": "art1"})
+    assert call(s, "GET", "/assets/staged/art1")[1]["refs"] == ["b"]
+    call(s, "PUT", "/buffers/b/volumes/c", payload=body("c"))  # no artifact: the directory, as before
+    assert call(s, "GET", "/assets/staged/%2Fstaged%2Fc")[1]["refs"] == ["b"]

@@ -85,6 +85,7 @@ class VolumeBody(_Strict):
     recipe: dict | None = None
     voxel_size_nm: dict[str, float]
     normalize: dict | None = None  # {"lo": [per channel], "hi": [per channel]} for normalize.scope volume|dataset
+    artifact: str | None = None  # the staged artifact's id; without one the volume references its directory
 
 
 class ConsumerBody(_Strict):
@@ -241,15 +242,15 @@ class BufferService:
             recipe=parsed.recipe,
             voxel_size_nm=parsed.voxel_size_nm,
             normalize=parsed.normalize,
+            artifact=parsed.artifact,
         )
         if len(volume.shape) != len(volume.axes):
             raise HttpError(422, f"shape {volume.shape} does not match axes {volume.axes!r}")
         reason = fits(volume, config.patch, config.levels)
         if reason:
             raise HttpError(422, reason)
-        self.ledger.put_volume(buffer, volume)
-        self.ledger.add_ref(buffer, "staged", str(PurePosixPath(volume.path).parent))  # the staged directory
-        self.ledger.add_ref(buffer, "raw", volume.record)  # the record's raw cache
+        staged = parsed.artifact or str(PurePosixPath(parsed.path).parent)  # the artifact, else its directory
+        self.ledger.put_volume(buffer, volume, refs=[("staged", staged), ("raw", parsed.record)])
         return 200, {"buffer": buffer, "volume": volume_id}, {}
 
     # --- the registry: what exists on disk, and which buffers use it -----------------------------

@@ -63,6 +63,13 @@ def test_volume_bodies_split_planes_by_fraction(tmp_path, spec_2d):  # noqa: F81
     assert sum(len(v) for v in single["split_planes"].values()) == 1
 
 
+def test_volume_bodies_carry_the_artifact(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    [(_, plain)] = volume_bodies(ROW, staged, spec_2d)
+    [(_, keyed)] = volume_bodies(ROW, staged, spec_2d, artifact="0123456789abcdef")
+    assert plain["artifact"] == "u937" and keyed["artifact"] == "0123456789abcdef"
+
+
 def test_buffer_config_from_plan(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "abc", "catalog_ref": "r", "rows": []}
     cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 8, "test": 8})

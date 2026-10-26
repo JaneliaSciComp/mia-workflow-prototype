@@ -58,6 +58,7 @@ class BindingInfo:
     manual: list[list[str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     staged: bool = False  # buffer-api's registry knows a pyramid staged from this very binding, still on disk
+    artifact: str = ""  # the staged pyramid's artifact id (jobspec.artifact_id), set whenever the binding is found
 
 
 @dataclass

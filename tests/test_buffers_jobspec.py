@@ -7,7 +7,7 @@ from autodev_helpers import GIT_ID, run_git
 from test_buffers_config import make_cfg
 
 from autodev.jobs import JOB_KEY_RE
-from mia_buffers.jobspec import catalog_snapshot, levels_key, stage_job
+from mia_buffers.jobspec import artifact_id, catalog_snapshot, levels_key, stage_job
 from mia_buffers.models import BufferPins, StageJobArgs, job_key
 from mia_data.jobspec import harness_pin
 
@@ -100,3 +100,14 @@ def test_job_key_is_valid_and_distinct():
     assert JOB_KEY_RE.fullmatch(job_key(7, "i7-e1", long_record))
     assert job_key(7, "i7-e1", "x") != job_key(7, "i7-e1", "y")
     assert job_key(7, "i7-e1", "a" * 121) != job_key(7, "i7-e1", "a" * 120 + "b")
+
+
+def test_artifact_id_depends_on_every_input():
+    base = ("b" * 64, "p256-l1-2-4", {"y": 10.0, "x": 10.0}, "c" * 40, "e" * 64)
+    assert len(artifact_id(*base)) == 16 and artifact_id(*base) == artifact_id(*base)
+    assert artifact_id(*base) == artifact_id("b" * 64, "p256-l1-2-4", {"x": 10, "y": 10}, "c" * 40, "e" * 64)
+    for i, other in enumerate(("x" * 64, "p512-l1", {"y": 11.0, "x": 10.0}, "d" * 40, "f" * 64)):
+        changed = list(base)
+        changed[i] = other
+        assert artifact_id(*changed) != artifact_id(*base)
+    assert artifact_id("b" * 64, "k", None, "c" * 40, "e" * 64) != artifact_id(*base)

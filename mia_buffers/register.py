@@ -109,13 +109,20 @@ def check_volume(volume: object) -> str | None:
 
 
 def volume_bodies(
-    row: dict, staged: Path, spec: Spec, report: dict | None = None, refused: dict[str, str] | None = None
+    row: dict,
+    staged: Path,
+    spec: Spec,
+    report: dict | None = None,
+    refused: dict[str, str] | None = None,
+    *,
+    artifact: str | None = None,
 ) -> list[tuple[str, dict]]:
     """(volume id, `PUT volumes/<vol>` body) for every well-formed raw volume in the record's stage.json (or in
     `report`, the same JSON already read by the caller, e.g. through read_untrusted). Malformed entries go to
     `refused` (volume id -> reason) when a dict is given, else raise ValueError. With `normalize.scope` volume
     or dataset, each body carries `normalize` bounds from the stage job's `intensity_sample` (a volume without a
-    usable sample is refused: it must be staged again with a harness that records one)."""
+    usable sample is refused: it must be staged again with a harness that records one). Each body names the staged
+    `artifact` its volume lives in (default: the staged directory's name, the hand-registration layout)."""
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
     scope = spec.sampling.normalize.scope
@@ -176,6 +183,7 @@ def volume_bodies(
                     "recipe": row.get("channel_recipe"),
                     "voxel_size_nm": {k: v for k, v in (volume.get("voxel_size_nm") or {}).items() if v is not None},
                     "normalize": bounds,
+                    "artifact": artifact or staged.name,
                 },
             )
         )
