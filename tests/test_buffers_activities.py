@@ -26,6 +26,9 @@ from mia_buffers.models import (
     DegradedSignal,
     FetchResult,
     KeeperReport,
+    PrepOutcome,
+    PrepPins,
+    PrepState,
     QuotaCheck,
     RawStatus,
     job_key,
@@ -1348,3 +1351,97 @@ async def test_keeper_watch_survives_a_pre_d_config_and_a_failing_buffer(acts, k
     await acts._keeper_buffers(report, time.time() + 30 * 86400, dry_run=False)
     assert report.signalled == ["idle i2-e3"]  # 72 h by default; i6-e7 was used after it went idle
     assert report.errors == ["buffers: i4-e5: boom"]
+
+
+# -- milestone E: the preparation request
+
+PREP_ROUND = "p8-e21"
+
+
+def prep_body(**fields) -> str:
+    spec = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF}, **fields}
+    return f"Please prepare these.\n\n```yaml\n{yaml.safe_dump(spec, sort_keys=False)}```\n"
+
+
+def prep_issue(acts, number: int = 8, **fields) -> None:
+    acts.gh.issues[number] = {"number": number, "body": prep_body(**fields), "labels": [{"name": "prep:requested"}]}
+
+
+async def test_prep_admit_and_nudge_report_prepared_records(acts):
+    prep_issue(acts, records=[U937, BCSS, U937])
+    pins = await acts.prep_admit(8, "21")
+    assert pins == PrepPins(PREP_ROUND, REF, [U937, BCSS], 14, issue=8)
+    assert await acts.prep_admit(8, "21") == pins  # a retry: the same pins
+    round_dir = acts.cfg.paths.state_dir / "rounds" / PREP_ROUND
+    assert {row["id"] for row in json.loads((round_dir / "plan.json").read_text())["rows"]} == {U937, BCSS}
+    assert acts._record(PREP_ROUND, U937)["id"] == U937  # nudge_dataset reads the record through the round dir
+    gh = with_datasets(acts)
+    outcome = await acts.prep_nudge(PREP_ROUND, U937)  # the fixture's registry knows every record as prepared
+    assert outcome == PrepOutcome(U937, "prepared") and gh.created == [] and gh.issues == {}
+    await acts.comment_prep(8, PREP_ROUND, [outcome, PrepOutcome(BCSS, "opened", 100)])
+    await acts.comment_prep(8, PREP_ROUND, [outcome])  # once per round
+    (comment,) = acts.gh.comments[8]
+    assert "| record | outcome | issue |" in comment["body"] and f"| `{U937}` | prepared |  |" in comment["body"]
+    assert f"| `{BCSS}` | opened | o/data#100 |" in comment["body"]
+
+
+async def test_prep_admit_refuses_unknown_records(acts):
+    prep_issue(acts, records=[U937, "no-such-record"])
+    with pytest.raises(ApplicationError, match="records not in the catalog at .*no-such-record") as error:
+        await acts.prep_admit(8, "21")
+    assert error.value.non_retryable and U937 not in str(error.value)
+
+
+async def test_prep_admit_selects_records_with_a_select_block(acts):
+    select = yaml.safe_load(spec_text())["select"]
+    prep_issue(acts, select=select, timeout_days=3)
+    pins = await acts.prep_admit(8, "21")
+    assert sorted(pins.records) == sorted([BCSS, U937]) and pins.timeout_days == 3
+
+
+async def test_prep_nudge_opens_once_for_two_requests(acts):
+    acts.registry.put_dataset(U937, state="in-progress")  # not prepared: mia-data has work to do
+    prep_issue(acts, 8, records=[U937])
+    prep_issue(acts, 9, records=[U937])
+    first, second = await acts.prep_admit(8, "21"), await acts.prep_admit(9, "22")
+    gh = with_datasets(acts)
+    assert await acts.prep_nudge(first.round_id, U937) == PrepOutcome(U937, "opened", 100)
+    assert await acts.prep_nudge(second.round_id, U937) == PrepOutcome(U937, "in-progress", 100)
+    assert len(gh.created) == 1 and [x["name"] for x in gh.issues[100]["labels"]].count("data:go") == 1
+
+
+async def test_prep_nudge_maps_the_dataset_issue(acts):
+    for record in (U937, BCSS):
+        acts.registry.put_dataset(record, state="in-progress")
+    prep_issue(acts, records=[U937, BCSS])
+    await acts.prep_admit(8, "21")
+    with_datasets(acts, {5: (U937, ["data:done"]), 6: (BCSS, ["data:new"])})
+    done = await acts.prep_nudge(PREP_ROUND, U937)
+    assert (done.outcome, done.issue) == ("done-unpublished", 5) and "binding.yaml" in done.note
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
+    acts.registry.put_dataset(BCSS, state="ineligible")
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "ineligible")
+
+
+async def test_prep_status_reads_the_registry(acts):
+    acts.registry.put_dataset(U937, state="needs-human")
+    assert await acts.prep_status([U937, BCSS, "never-seen"]) == {
+        U937: "needs-human",
+        BCSS: "prepared",
+        "never-seen": "unprepared",
+    }
+    acts.registry = Registry("http://127.0.0.1:9", "t")  # nothing listens: the outage raises
+    with pytest.raises(RegistryError):
+        await acts.prep_status([U937])
+
+
+async def test_set_prep_stage_swaps_label_and_comments_once(acts):
+    prep_issue(acts)
+    state = PrepState(8, round_id=PREP_ROUND, stage="requested")
+    await acts.set_prep_stage(8, "done", state, "every record is prepared")
+    await acts.set_prep_stage(8, "done", state, "every record is prepared")
+    assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:done"]
+    (comment,) = acts.gh.comments[8]
+    assert "`prep:done`" in comment["body"] and "every record is prepared" in comment["body"]
+    with pytest.raises(ApplicationError):
+        await acts.set_prep_stage(8, "new", state, "")

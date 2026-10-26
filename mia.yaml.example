@@ -111,6 +111,7 @@ services:                                 # per service: app + the sections that
       cpus: 1
       mem_mb: 4000
       path_prepend: []
+    # evaluate: {enabled: false}          # the evaluate job after cropping: a switch only, nothing runs yet
   mia-buffers:
     app: mia-buffers
     temporal: {namespace: mia-buffers}

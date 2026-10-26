@@ -126,8 +126,9 @@ def test_init_labels_creates_buffer_labels(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_gh", lambda cfg_, repo, tokens=None: FakeGitHub(repo))
     assert main(["init-labels"]) == 0
     names = [name for _, name, _ in created]
-    assert len(names) == 12 and {"buffer:new", "buffer:ready", "buffer:go", "buffer:approve"} <= set(names)
+    assert len(names) == 16 and {"buffer:new", "buffer:ready", "buffer:go", "buffer:approve"} <= set(names)
     assert {"buffer:keep", "buffer:retire"} <= set(names)
+    assert {"prep:go", "prep:requested", "prep:done", "prep:needs-human"} <= set(names) and "prep:new" not in names
     assert all(repo == "o/buffers" for repo, _, _ in created) and "created buffer:go" in capsys.readouterr().out
 
 

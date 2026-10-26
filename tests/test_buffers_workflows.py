@@ -31,6 +31,7 @@ from mia_buffers.models import (
     FetchJobArgs,
     FetchResult,
     PlanResult,
+    PrepState,
     QuotaCheck,
     RawStatus,
     RegisterResult,
@@ -887,60 +888,44 @@ async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
     assert state.ready and dataset(state, "u937").status == "servable"
 
 
-async def test_poll_signals_dataset_updates(tmp_path):
+async def test_poll_no_longer_watches_bindings(tmp_path):
+    """Milestone E: a buffer never waits on mia-data, so the poller sends no `dataset_update` for a pre-E round
+    still waiting: a published binding and an ineligible dataset issue both go unsignalled."""
     cfg = make_cfg(tmp_path)
     gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    datasets = PollGH(issues={4: issue(4, "data:testing"), 5: issue(5, "data:ineligible", "licence-excluded")})
+    datasets = PollGH(issues={5: issue(5, "data:ineligible", "licence-excluded")})
     waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
     waiting.datasets = [
         workflows.DatasetStatus("u937", "confocal", False, "waiting-dataset", issue=4, folder="lm-u937"),
         workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-dataset", issue=5, folder="lm-bcss"),
-        workflows.DatasetStatus("other", "TEM", False, "servable", issue=6, folder="lm-other"),
     ]
     client = FakeClient({cfg.workflow_id(2): waiting})
     acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
-    assert await run_poll(acts) == ["dataset #2 bcss ineligible"]  # u937's issue is still in progress
     (cfg.paths.storage_root / "lm-u937").mkdir(parents=True)
     (cfg.paths.storage_root / "lm-u937" / "binding.yaml").write_text("record: u937\n")
-    assert await run_poll(acts) == []  # a bare binding.yaml is not prepared (spec §4.2)
-    reindex(cfg.paths.storage_root / "lm-u937", {})  # mia-data's publish writes the manifest for that binding
-    assert await run_poll(acts) == ["dataset #2 u937 binding"]
-    assert client.signals == [
-        (cfg.workflow_id(2), "dataset_update", ("bcss", "ineligible")),
-        (cfg.workflow_id(2), "dataset_update", ("u937", "binding")),
-    ]
-    assert await run_poll(acts) == []  # each update is signalled once
+    reindex(cfg.paths.storage_root / "lm-u937", {})
+    assert await run_poll(acts) == [] and client.signals == []
 
 
-async def test_poll_checks_ineligible_issues_with_list_calls_not_one_get_per_dataset(tmp_path):
-    """Review (milestone 4): a 400-dataset pool polled every 2 minutes must not spend one GitHub request per
-    dataset per pass; the ineligible issues come from labelled list calls, at most two per pass."""
-
-    class CountingGH(PollGH):
-        def __init__(self, issues):
-            super().__init__(issues)
-            self.lists, self.gets = [], []
-
-        async def list_issues(self, labels=None, state=None, **_):
-            self.lists.append(labels)
-            return await super().list_issues(labels=labels, state=state)
-
-        async def get_issue(self, n):
-            self.gets.append(n)
-            return await super().get_issue(n)
-
+async def test_poll_starts_a_prep_workflow_on_prep_go(tmp_path):
     cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    datasets = CountingGH({n: issue(n, "data:testing") for n in range(10, 40)} | {40: issue(40, "data:ineligible")})
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [
-        workflows.DatasetStatus(f"r{n}", "g", False, "waiting-dataset", issue=n, folder=f"lm-r{n}")
-        for n in range(10, 41)
-    ]
-    client = FakeClient({cfg.workflow_id(2): waiting})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
-    assert await run_poll(acts) == ["dataset #2 r40 ineligible"]
-    assert datasets.gets == [] and len(datasets.lists) <= 2
+    at = "2026-10-26T10:00:00Z"
+    gh = PollGH(
+        issues={8: issue(8, "prep:go"), 9: issue(9, "prep:go")},
+        events={(8, "prep:go"): ("alice", "71", at), (9, "prep:go"): ("eve", "72", at)},
+        perms={"alice": "write"},
+    )
+    client = FakeClient({})
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+    assert await run_poll(acts) == ["prep:go #8"]
+    ((wf, state, kw),) = client.started  # eve has no write access: her label is removed, nothing starts
+    assert (
+        wf == "MiaPrep"
+        and state == PrepState(8)
+        and kw["id"] == cfg.prep_workflow_id(8) == ("mia-buffers/o/buffers/prep-8")
+    )
+    assert kw["start_signal"] == "go" and kw["start_signal_args"] == [LabelEvent("go", "71", "alice", at)]
+    assert gh.removed == [(8, "prep:go"), (9, "prep:go")] and "does not have write access" in gh.comments[9][0]["body"]
 
 
 async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):

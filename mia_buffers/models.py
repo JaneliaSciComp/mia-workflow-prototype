@@ -260,6 +260,43 @@ class BufferState:
     superseded: list[str] = field(default_factory=list)  # buffers a go left serving, until the keeper retires them
 
 
+@dataclass
+class PrepPins:
+    """What a preparation request is pinned to at admission: its round, the catalog commit, the records it asks
+    for (named, or admitted by its `select` there) and how long it may take."""
+
+    round_id: str  # p<issue>-e<event id>
+    catalog_ref: str
+    records: list[str]
+    timeout_days: float
+    issue: int
+
+
+@dataclass
+class PrepOutcome:
+    """What `prep_nudge` found or did for one record: opened | nudged | in-progress | prepared | ineligible |
+    needs-human | done-unpublished | unknown; `issue` is its dataset issue in the datasets repo, when looked up."""
+
+    record: str
+    outcome: str
+    issue: int | None = None
+    note: str = ""
+
+
+@dataclass
+class PrepState:
+    """The durable state of one preparation request's workflow, carried across continue_as_new."""
+
+    issue: int
+    schema: int = 1
+    handled: list[str] = field(default_factory=list)  # go event ids, newest last
+    round_id: str | None = None  # p<issue>-e<event id>
+    stage: str = "new"
+    pins: PrepPins | None = None
+    outcomes: list[PrepOutcome] = field(default_factory=list)
+    settled: dict[str, str] = field(default_factory=dict)  # record -> the state it settled in
+
+
 def job_key(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
     """csub job key of a dataset's stage job: unique per round, record and rebuild, within csub's 120 characters."""
     digest = hashlib.sha256(record.encode()).hexdigest()[:8]

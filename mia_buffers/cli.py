@@ -24,7 +24,7 @@ from mia_core.registry import Registry, RegistryError, read_token
 from mia_data.cli import _gh, _github_clients
 from mia_data.jobspec import harness_env, harness_pin
 
-from .config import HUMAN_LABELS, STAGES, load_config
+from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES, load_config
 from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
@@ -108,8 +108,12 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
     from autodev.jobs import CsubJobs
 
+    from . import workflows
     from .activities import Activities
     from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper
+
+    # MiaPrep is registered once the prep workflow exists (getattr: an import of a missing name fails mypy)
+    prep = [workflow] if (workflow := getattr(workflows, "MiaPrep", None)) else []
 
     client = await _client(cfg)
     clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
@@ -125,7 +129,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper],
+        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, *prep],
         activities=activities.all(),
         max_concurrent_activities=8,
     )
@@ -179,12 +183,15 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> i
 
 
 async def cmd_init_labels(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create the stage and human labels (`buffer:*`) on the issue repo."""
+    """Create the stage and human labels of buffers (`buffer:*`) and preparation requests (`prep:*`) on the issue
+    repo."""
     gh = _gh(cfg, cfg.github.buffers_repo)
+    labels = {cfg.label(kind): value for kind, value in {**STAGES, **HUMAN_LABELS}.items()}
+    labels |= {cfg.prep_label(kind): value for kind, value in {**PREP_STAGES, **PREP_HUMAN_LABELS}.items()}
     try:
-        for kind, (color, description) in {**STAGES, **HUMAN_LABELS}.items():
-            if await gh.ensure_label(cfg.label(kind), color, description):
-                print(f"created {cfg.label(kind)}")
+        for name, (color, description) in labels.items():
+            if await gh.ensure_label(name, color, description):
+                print(f"created {name}")
     finally:
         await gh.aclose()
     return 0

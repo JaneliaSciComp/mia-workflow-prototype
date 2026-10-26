@@ -35,6 +35,13 @@ HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow sign
     "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
     "retire": ("b60205", "Retire this buffer: release its staged data"),
 }
+# a preparation request's stages and human label: `prep:<stage>` on an issue of the same repo (milestone E)
+PREP_STAGES = {
+    "requested": ("fbca04", "mia-buffers: the request's datasets are handed to mia-data"),
+    "done": ("5319e7", "mia-buffers: every requested dataset is settled"),
+    "needs-human": ("d93f0b", "mia-buffers: the request stopped, needs a human"),
+}
+PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "MIA_BUFFERS_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),
@@ -101,6 +108,12 @@ class Config(mia_data_config.Config):
 
     def workflow_id(self, issue: int) -> str:
         return f"mia-buffers/{self.github.buffers_repo}/issue-{issue}"
+
+    def prep_label(self, stage: str) -> str:
+        return f"prep:{stage}"
+
+    def prep_workflow_id(self, issue: int) -> str:
+        return f"mia-buffers/{self.github.buffers_repo}/prep-{issue}"
 
     def marker(self, text: str) -> str:
         return f"<!-- mia-buffers: {text} -->"

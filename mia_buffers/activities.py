@@ -45,7 +45,7 @@ from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
 from .api import BufferConfig
-from .config import HUMAN_LABELS, STAGES
+from .config import HUMAN_LABELS, PREP_STAGES, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
@@ -62,6 +62,9 @@ from .models import (
     FetchResult,
     KeeperReport,
     PlanResult,
+    PrepOutcome,
+    PrepPins,
+    PrepState,
     QuotaCheck,
     RawStatus,
     RegisterResult,
@@ -70,10 +73,12 @@ from .models import (
     StageResult,
     job_key,
 )
-from .plan import MANUAL_DROP_NOTE, Row, _group_key, build_plan, plan_hash
+from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
 from .poll import run_poll
 from .register import buffer_config, recipe_for, volume_bodies
-from .spec import SpecError, load_spec
+from .select import decide_all
+from .spec import SpecError, load_prep_text, load_spec
+from .specmap import facts
 from .status import render_drop_comment, render_plan_comment
 
 if TYPE_CHECKING:
@@ -85,7 +90,7 @@ if TYPE_CHECKING:
     from .config import Config
 
 log = logging.getLogger(__name__)
-ROUND_RE = re.compile(r"i\d+-e\d+")
+ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
@@ -143,7 +148,6 @@ class Activities:
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
         self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
         self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
-        self._signalled: set[tuple[int, str, str]] = set()  # poll: (issue, record, outcome) dataset updates sent
 
     @property
     def gh_data(self) -> GitHub:
@@ -199,6 +203,11 @@ class Activities:
             self.missing_records,
             self.comment_drop,
             self.nudge_dataset,
+            self.prep_admit,
+            self.prep_nudge,
+            self.prep_status,
+            self.set_prep_stage,
+            self.comment_prep,
             self.poll,
             self.keep,
         ]
@@ -214,6 +223,16 @@ class Activities:
             if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or ""):
                 return comment.get("html_url")
         return (await gh.comment(number, body)).get("html_url")
+
+    async def _swap_label(self, issue: int, want: str, stage_labels: list[str]) -> None:
+        """Leave `want` as the issue's only label among `stage_labels`."""
+        gh = self.gh_issues
+        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
+        for name in stage_labels:
+            if name in current and name != want:
+                await gh.remove_label(issue, name)
+        if want not in current:
+            await gh.add_labels(issue, [want])
 
     def _round_dir(self, round_id: str) -> Path:
         if not ROUND_RE.fullmatch(round_id):
@@ -409,13 +428,7 @@ class Activities:
         """Swap the `buffer:<stage>` label and, within a round, post the stage's comment once."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
-        gh, want = self.gh_issues, self.cfg.label(stage)
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for other in STAGES:
-            if (name := self.cfg.label(other)) in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
+        await self._swap_label(issue, self.cfg.label(stage), [self.cfg.label(other) for other in STAGES])
         if not (state and state.round_id):
             return
         if (kind := STAGE_EVENTS.get(stage)) is not None:
@@ -466,9 +479,14 @@ class Activities:
         """Hand a dataset without a binding to mia-data (spec §3 step 1): find its issue in the datasets repo by
         the record marker, open one if there is none (mia-data's own issue body, pinned to the round's catalog
         ref), and add `data:go` unless mia-data is already working on it, has finished, or found it ineligible."""
+        return (await self._nudge(round_id, record))[0]
+
+    async def _nudge(self, round_id: str, record: str) -> tuple[DatasetIssue, bool]:
+        """nudge_dataset's work, and whether it opened the dataset issue."""
         gh, record_yaml = self.gh_datasets, self._record(round_id, record)
         folder = dataset_folder(record_yaml, record)
         issue = await gh.find_issue_by_marker(MARKER.format(record))
+        created = issue is None
         if issue is None:
             title, body, labels = render_issue(
                 record_yaml,
@@ -485,18 +503,126 @@ class Activities:
         stages = [stage for stage in stages if stage not in ("go", "approve")]  # human labels are not stages
         stage = stages[0] if stages else "new"
         if stage == "ineligible" or "licence-excluded" in names:
-            return DatasetIssue(number, "ineligible", False, folder=folder)
+            return DatasetIssue(number, "ineligible", False, folder=folder), created
         if stage == "done":
             path = self.cfg.paths.storage_root / folder
             note = (
                 f"the dataset issue is `data:done` but `{path}` has no binding.yaml with a matching manifest.json: "
                 "run the dataset again (add `data:go` on it) so mia-data publishes both"
             )
-            return DatasetIssue(number, stage, False, note, folder)
+            return DatasetIssue(number, stage, False, note, folder), created
         if DATA_GO in names or stage in DATA_IN_PROGRESS:
-            return DatasetIssue(number, stage, False, folder=folder)
+            return DatasetIssue(number, stage, False, folder=folder), created
         await gh.add_labels(number, [DATA_GO])
-        return DatasetIssue(number, stage, True, folder=folder)
+        return DatasetIssue(number, stage, True, folder=folder), created
+
+    # --- preparation requests (milestone E) --------------------------------------------------
+
+    @activity.defn(name="prep_admit")
+    @mia_permanent_errors
+    async def prep_admit(self, issue: int, event_id: str) -> PrepPins:
+        """Pin a preparation request: the prep spec from the issue body's one ```yaml fence, the catalog at its ref
+        and the records it names (or its `select` admits there). Written once to state_dir/rounds/p<issue>-e<event>/
+        with a plan.json of {id, path} rows and buffer-shaped pins, so nudge_dataset reads the records as it does a
+        buffer round's; a retry returns the same pins."""
+        if not re.fullmatch(r"\d+", str(event_id)):
+            raise ValueError(f"bad event id {event_id!r}")
+        round_dir = self._round_dir(f"p{int(issue)}-e{event_id}")
+        if (round_dir / "prep.json").is_file():
+            return PrepPins(**json.loads((round_dir / "prep.json").read_text()))
+        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")
+        fences = SPEC_FENCE.findall(body)
+        if len(fences) != 1:
+            raise ValueError(
+                f"issue #{issue}: expected exactly one ```yaml block holding the preparation request, found {len(fences)}"
+            )
+        try:
+            spec = load_prep_text(fences[0])
+        except SpecError as error:
+            raise ValueError(f"preparation request refused: {error}") from error
+        ref = spec.catalog.ref
+        snapshot = await asyncio.to_thread(catalog_snapshot, self.cfg, ref, self.gh_catalog.tokens)
+        readable = [
+            (path, record)
+            for path, record in await asyncio.to_thread(load_records, snapshot)
+            if UNREADABLE not in record
+        ]
+        paths = {record["id"]: path for path, record in readable}
+        if spec.select is None:
+            records = list(dict.fromkeys(spec.records))
+            if unknown := [record for record in records if record not in paths]:
+                raise ValueError(f"records not in the catalog at {ref}: {', '.join(unknown)}")
+        else:
+            decisions = decide_all([facts(path, record) for path, record in readable], spec.select)
+            records = [decision.id for decision in decisions if decision.admitted]
+            if not records:
+                raise ValueError(f"the select block admits no record at {ref}")
+        round_dir.mkdir(parents=True, exist_ok=True)
+        write_atomic(round_dir / "spec.yaml", fences[0])
+        write_atomic(
+            round_dir / "plan.json", json.dumps({"rows": [{"id": id_, "path": paths[id_]} for id_ in records]})
+        )
+        spec_hash = hashlib.sha256(fences[0].encode()).hexdigest()
+        write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(BufferPins(spec_hash, ref, "", ""))))
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue))
+        write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
+        return pins
+
+    @activity.defn(name="prep_nudge")
+    @mia_permanent_errors
+    async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
+        """Hand one requested record to mia-data unless the registry already settled it (prepared, ineligible or
+        needs-human: GitHub is not touched); otherwise nudge_dataset, its result named for the request's comment."""
+        try:
+            row = await asyncio.to_thread(self.registry.dataset, record)
+        except RegistryError as error:  # best effort: the dataset issue tells the rest
+            log.warning("prep_nudge: registry row of %s unread: %s", record, error)
+            row = None
+        if (state := (row or {}).get("state")) in ("prepared", "ineligible", "needs-human"):
+            return PrepOutcome(record, state)
+        found, created = await self._nudge(round_id, record)
+        if found.stage == "ineligible":
+            outcome = "ineligible"
+        elif found.stage == "done":
+            outcome = "done-unpublished"
+        elif found.nudged:
+            outcome = "opened" if created else "nudged"
+        else:  # data:go present already, or mia-data is working on it
+            outcome = "in-progress"
+        return PrepOutcome(record, outcome, found.number, found.note)
+
+    @activity.defn(name="prep_status")
+    @mia_permanent_errors
+    async def prep_status(self, records: list[str]) -> dict[str, str]:
+        """Each record's registry state, `unprepared` when it has no row. A registry outage raises."""
+        states = {row["id"]: row.get("state", "unprepared") for row in await asyncio.to_thread(self.registry.datasets)}
+        return {record: states.get(record, "unprepared") for record in records}
+
+    @activity.defn(name="set_prep_stage")
+    @mia_permanent_errors
+    async def set_prep_stage(self, issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
+        """Swap the `prep:<stage>` label and, within a request's round, post the stage's comment once."""
+        if stage not in PREP_STAGES:
+            raise ValueError(f"unknown preparation stage {stage!r}")
+        await self._swap_label(issue, self.cfg.prep_label(stage), [self.cfg.prep_label(other) for other in PREP_STAGES])
+        if not (state and state.round_id):
+            return
+        marker = self.cfg.marker(f"prep stage {state.round_id} {stage}")
+        body = render_stage(stage, self._clean(detail), prefix="prep") + f"\n{marker}"
+        await self._comment_once(self.gh_issues, issue, body, marker)
+
+    @activity.defn(name="comment_prep")
+    @mia_permanent_errors
+    async def comment_prep(self, issue: int, round_id: str, outcomes: list[PrepOutcome]) -> None:
+        """Post, once per round, what was done for each requested record, with its dataset issue."""
+        repo = self.cfg.github.datasets_repo  # the dataset issues live there: a bare #N would link this repo's
+        lines = ["| record | outcome | issue |", "|---|---|---|"]
+        for entry in outcomes:
+            outcome = f"{entry.outcome}: {entry.note}" if entry.note else entry.outcome
+            lines.append(f"| `{entry.record}` | {outcome} | {f'{repo}#{entry.issue}' if entry.issue else ''} |")
+        marker = self.cfg.marker(f"prep outcomes {round_id}")
+        body = "\n".join(lines)
+        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{marker}", marker)
 
     @activity.defn(name="comment_drop")
     @mia_permanent_errors

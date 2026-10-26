@@ -134,6 +134,10 @@ class NetworkCfg(BaseModel):
     redirect_hosts: dict[str, list[str]] = {}  # data host -> hosts it redirects to; exact names, no patterns
 
 
+class EvaluateCfg(BaseModel):
+    enabled: bool = False  # the evaluate job after cropping; a switch only, no job is built yet
+
+
 class Config(BaseModel):
     """The whole mia_data.yaml, validated, plus the derived names (labels, markers, queues) built from it."""
 
@@ -148,6 +152,7 @@ class Config(BaseModel):
     harness: HarnessCfg
     network: NetworkCfg = NetworkCfg()
     service: ServiceCfg | None = None
+    evaluate: EvaluateCfg = EvaluateCfg()
 
     @model_validator(mode="after")
     def _finish(self) -> Config:

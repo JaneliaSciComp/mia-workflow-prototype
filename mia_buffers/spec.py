@@ -270,6 +270,31 @@ def load_spec_text(text: str) -> Spec:
         raise SpecError(str(error)) from error
 
 
+class PrepSpec(_Strict):
+    """A preparation request's YAML: the records to hand to mia-data, named or chosen by a buffer spec's `select`."""
+
+    schema_version: Literal[1]
+    kind: Literal["preparation"]
+    catalog: CatalogRef
+    records: list[str] = []
+    select: Select | None = None
+    timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
+
+    @model_validator(mode="after")
+    def _records_or_select(self) -> PrepSpec:
+        if bool(self.records) == (self.select is not None):
+            raise ValueError("give exactly one of `records` (a non-empty list of record ids) or `select`")
+        return self
+
+
+def load_prep_text(text: str) -> PrepSpec:
+    """Validate a preparation request's YAML text."""
+    try:
+        return PrepSpec.model_validate(yaml.safe_load(text))
+    except (yaml.YAMLError, ValidationError) as error:
+        raise SpecError(str(error)) from error
+
+
 def load_spec(path: Path) -> Spec:
     return load_spec_text(path.read_text())
 

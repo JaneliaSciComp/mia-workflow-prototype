@@ -5,8 +5,10 @@
 - for issues in `buffer:sourcing` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
   directory holds a file gets a `dropped` signal once that directory's listing has been stable for a whole poll
   interval (a file still being copied grows between passes), and once per change of it;
-- for the same issues, a dataset waiting on mia-data gets a `dataset_update` signal when its folder is prepared
-  under storage_root (`binding`) or its dataset issue is labelled `data:ineligible` (`ineligible`), once each.
+- a `prep:go` label on a preparation request becomes the `go` signal of its `MiaPrep` workflow, the same way.
+
+A buffer no longer waits on mia-data (milestone E), so nothing watches for bindings: a pre-E round still waiting on
+a dataset is planned again (`buffer:go`) once the dataset is prepared.
 
 Runs as the `poll` activity and uses the activity object's clients and helpers.
 """
@@ -18,10 +20,9 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from mia_data.poll import deliver_label
-from mia_data.publish import prepared_row
 
-from .config import HUMAN_LABELS
-from .models import BufferState
+from .config import HUMAN_LABELS, PREP_HUMAN_LABELS
+from .models import BufferState, PrepState
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -43,14 +44,29 @@ async def run_poll(activities: Activities) -> list[str]:
                     done.append(f"{kind} #{issue['number']}")
             except Exception:
                 log.exception("poll: issue #%s %s failed", issue["number"], label)
-    ineligible: dict[str, set[int]] = {}  # the datasets repo's ineligible issues, listed once per pass when needed
+    for kind in PREP_HUMAN_LABELS:
+        label = cfg.prep_label(kind)
+        for issue in await gh.list_issues(labels=label, state="open"):
+            try:
+                if await deliver_label(
+                    activities,
+                    kind,
+                    label,
+                    issue,
+                    workflow="MiaPrep",
+                    make_state=PrepState,
+                    guard=None,
+                    workflow_id=cfg.prep_workflow_id,
+                ):
+                    done.append(f"{label} #{issue['number']}")
+            except Exception:
+                log.exception("poll: issue #%s %s failed", issue["number"], label)
     for stage in ("sourcing", "ready"):
         for issue in await gh.list_issues(labels=cfg.label(stage), state="open"):
             try:
                 done += await notice_drops(activities, issue["number"])
-                done += await notice_datasets(activities, issue["number"], ineligible)
             except Exception:
-                log.exception("poll: issue #%s drop or dataset signals failed", issue["number"])
+                log.exception("poll: issue #%s drop signals failed", issue["number"])
     if done:
         log.info("poll: %s", ", ".join(done))
     return done
@@ -81,43 +97,6 @@ async def _buffer_state(activities: Activities, number: int) -> tuple[Any, Buffe
         if error.status != RPCStatusCode.NOT_FOUND:
             raise
         return handle, None
-
-
-async def _ineligible_issues(activities: Activities, cache: dict[str, set[int]]) -> set[int]:
-    """Numbers of the datasets repo's issues labelled ineligible, from two list calls per poll pass (never one
-    request per waiting dataset: a pool of hundreds would exhaust the App's rate limit)."""
-    if "numbers" not in cache:
-        numbers: set[int] = set()
-        for label in ("data:ineligible", "licence-excluded"):
-            issues = await activities.gh_datasets.list_issues(labels=label, state="all")
-            numbers |= {int(issue["number"]) for issue in issues}
-        cache["numbers"] = numbers
-    return cache["numbers"]
-
-
-async def notice_datasets(activities: Activities, number: int, ineligible: dict[str, set[int]]) -> list[str]:
-    """Signal `dataset_update(record, outcome)` for every dataset of issue `number` waiting on mia-data whose
-    binding is now published, or whose dataset issue became ineligible; each outcome once per process.
-    `ineligible` is the pass's cache for the datasets repo's ineligible issue numbers."""
-    handle, state = await _buffer_state(activities, number)
-    if state is None:
-        return []
-    cfg, done = activities.cfg, []
-    for dataset in state.datasets:
-        if dataset.status != "waiting-dataset":
-            continue
-        outcome = None
-        if dataset.folder and prepared_row(cfg.paths.storage_root / dataset.folder) is not None:  # spec §4.2
-            outcome = "binding"
-        elif dataset.issue is not None and dataset.issue in await _ineligible_issues(activities, ineligible):
-            outcome = "ineligible"
-        key = (number, dataset.record, outcome or "")
-        if outcome is None or key in activities._signalled:
-            continue
-        await handle.signal("dataset_update", args=[dataset.record, outcome])
-        activities._signalled.add(key)
-        done.append(f"dataset #{number} {dataset.record} {outcome}")
-    return done
 
 
 async def notice_drops(activities: Activities, number: int) -> list[str]:

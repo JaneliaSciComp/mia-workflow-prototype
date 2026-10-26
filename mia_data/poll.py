@@ -73,13 +73,15 @@ async def deliver_label(
     workflow: str = "MiaDataDataset",
     make_state: Callable[[int], Any] = DatasetState,
     guard: Callable[[str, dict], str | None] | None = _licence_guard,
+    workflow_id: Callable[[int], str] | None = None,
 ) -> bool:
     """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
 
     Only a person with write access, or a bot login listed in `github.trusted_bots` (the buffer worker, spec §6.2),
     counts; `guard` may name a reason to refuse the label. The label is removed
     only once Temporal has accepted the signal, so a crash in between leaves it for the next poll. Returns True
-    when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard."""
+    when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard, and for its
+    preparation requests with their own `workflow_id` (default: `cfg.workflow_id`)."""
     cfg, gh_data, number = activities.cfg, activities.gh_data, issue["number"]
     actor, event_id, labeled_at = await gh_data.label_event(number, label)
     trusted = actor in getattr(cfg.github, "trusted_bots", [])
@@ -104,7 +106,7 @@ async def deliver_label(
     await activities.temporal.start_workflow(
         workflow,
         make_state(number),
-        id=cfg.workflow_id(number),
+        id=(workflow_id or cfg.workflow_id)(number),
         task_queue=cfg.task_queue,
         start_signal=kind,
         start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)],

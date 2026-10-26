@@ -101,3 +101,7 @@ def test_local_root_and_service_are_optional(tmp_path):
 def test_shared_agent_hosts_still_refused_by_mia_data(tmp_path):
     with pytest.raises(ValidationError, match="agent.allow_hosts is not used by mia-data"):
         make_cfg(tmp_path, agent={"allow_hosts": ["pypi.org"]})
+
+
+def test_evaluate_is_off_by_default(tmp_path):
+    assert make_cfg(tmp_path).evaluate.enabled is False

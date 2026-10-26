@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mia_buffers.spec import Spec, SpecError, load_spec, load_spec_text, spec_hash, spec_text_hash
+from mia_buffers.spec import Spec, SpecError, load_prep_text, load_spec, load_spec_text, spec_hash, spec_text_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
 
@@ -90,3 +90,38 @@ def test_lifecycle_fields_and_defaults(tmp_path):
     )
     with pytest.raises(SpecError, match="unprepared"):
         load_spec(path)
+
+
+# -- the preparation request (milestone E)
+
+PREP_SELECT = {"paths": ["datasets/**"], "where": {"license": {"in": ["CC0-1.0"]}}}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"records": ["a", "b"]}, {"select": PREP_SELECT}],
+)
+def test_prep_spec_takes_records_or_select(body):
+    text = yaml.safe_dump(
+        {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, **body}
+    )
+    spec = load_prep_text(text)
+    assert spec.timeout_days == 14 and (spec.records == ["a", "b"]) == ("records" in body)
+    assert (spec.select is not None) == ("select" in body)
+
+
+@pytest.mark.parametrize(
+    "body,needle",
+    [
+        ({"records": ["a"], "select": PREP_SELECT}, "exactly one"),
+        ({}, "exactly one"),
+        ({"records": []}, "exactly one"),
+        ({"records": ["a"], "kind": "buffer"}, "kind"),
+        ({"records": ["a"], "timeout_days": 0}, "timeout_days"),
+        ({"records": ["a"], "name": "x"}, "name"),
+    ],
+)
+def test_prep_spec_refused(body, needle):
+    data = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, **body}
+    with pytest.raises(SpecError, match=needle):
+        load_prep_text(yaml.safe_dump(data))
