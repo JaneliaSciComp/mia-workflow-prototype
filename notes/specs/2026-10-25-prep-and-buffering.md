@@ -710,8 +710,11 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
   logged warning, instead of failing registration.
 - The events routes do not require the buffer's config: `created` and `planned` precede `create_buffer`.
 - A retire appends to an existing archive; `seq` restarts at 1 after a retire.
-- Lifecycle signals that arrive while stragglers still source wait until the stragglers settle. After a `go`
-  during ready or idle the old buffer stays registered, and the keeper's signals carry no buffer id.
+- Lifecycle labels outside the ready loop (review, sourcing, stragglers still sourcing) are refused at once. After a
+  `go` during ready or idle the old buffer stays registered; the keeper's signals carry the buffer id and the
+  workflow ignores those about it, so it never idles by itself (deferred).
+- A degraded re-send is judged against buffer-api's current missing volumes (`missing_records`); a rebuild ignores
+  `binding.staged` and its publish replaces the final directory.
 
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 

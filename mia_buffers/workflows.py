@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from mia_data.models import JobDone, LabelEvent, LockTaken
 
     from .models import (
+        MAX_POLL_MINUTES,
         BindingInfo,
         BufferPins,
         BufferState,
@@ -56,7 +57,7 @@ MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the lat
 # dataset statuses that wait on a human, on mia-data or on quota: dropped at the timeout, abandoned by a new go
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
 ABANDONED = "abandoned: a new buffer:go started another round"
-MAX_POLL_MINUTES = 30  # a lock or quota wait polls after poll_minutes, doubling each try up to this (c-cache)
+RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this issue has no ready or idle buffer"
 NOT_IDLE = "the buffer is ready, not idle"
 AUTO_APPROVE = "plan.auto_approve: sourcing starts without review"
@@ -83,6 +84,17 @@ class LockChanged(Exception):
 def _backoff(poll_minutes: int, tries: int) -> timedelta:
     """The sleep before the next try of a poll: `poll_minutes`, doubling with each try, at most MAX_POLL_MINUTES."""
     return timedelta(minutes=min(poll_minutes * 2**tries, MAX_POLL_MINUTES))
+
+
+def _label(event: Any) -> LabelEvent | None:
+    """A label event given to a two-parameter signal with one argument arrives as a dict (the SDK converts by
+    type hint only when every parameter has an argument)."""
+    return LabelEvent(**event) if isinstance(event, dict) else event
+
+
+def _abandoned(dataset: DatasetStatus) -> bool:
+    """A new go or a retire cancelled the dataset's task: its reason says so."""
+    return dataset.reason.startswith("abandoned:")
 
 
 def _rollover_due() -> bool:
@@ -113,13 +125,17 @@ class MiaBuffer:
         self.limits: SourcingLimits | None = None
         self.timed_out = False  # the round's day limit fired: a dataset that turns blocked now is dropped (c-cache)
         self.held: set[str] = set()  # owners of the raw-cache locks this run holds (c-cache)
-        self.lifecycle: list[tuple[str, Any]] = []  # (idle|keep|retire|degraded, event or signal) (d-lifecycle)
+        self.lifecycle: list[tuple[str, Any, str]] = []  # (idle|keep|retire|degraded, event or signal, buffer)
         self.lifecycle_on = False  # this run takes the d-lifecycle path, decided once at its start
         self.board: list[asyncio.Task] = []  # fire-and-forget status board writes, awaited before the round goes on
         self.progress = 0  # bumped by every dataset status change; the ticker backs off while it stays put
         self.tick = 0  # the shared ticker's count; lock and quota waiters wake on its next value (d-tick)
         self.wanted = 0  # the tick a waiter waits for; the ticker starts no timer while it has been reached
         self._ticker: asyncio.Task | None = None
+        self.rebuild: list[tuple[asyncio.Task, DatasetStatus]] = []  # degraded datasets staging again (d-lifecycle)
+        self.rebuild_slots: tuple[asyncio.Semaphore, asyncio.Semaphore] | None = None  # their stage and fetch slots
+        self.degraded_records: set[str] = set()  # records of the degraded signals the running rebuild answers
+        self.degraded_reason = ""
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -138,25 +154,27 @@ class MiaBuffer:
         """The poller saw the dataset's binding published (`binding`) or its issue go `data:ineligible`."""
         self.dataset_updates[record] = outcome
 
-    @workflow.signal
-    def degraded(self, signal: DegradedSignal) -> None:
-        """The keeper found staged pyramids of these records gone from disk."""
-        self.lifecycle.append(("degraded", signal))
+    # lifecycle signals queue as (kind, label event or DegradedSignal, the buffer the keeper meant or "")
 
     @workflow.signal
-    def idle(self, event: LabelEvent | None = None) -> None:
-        """The keeper saw no consumer for the spec's idle.hours."""
-        self.lifecycle.append(("idle", event))
+    def degraded(self, signal: DegradedSignal) -> None:
+        """The keeper found staged pyramids of these records of `signal.buffer` gone from disk."""
+        self.lifecycle.append(("degraded", signal, signal.buffer))
+
+    @workflow.signal
+    def idle(self, event: LabelEvent | None = None, buffer: str = "") -> None:
+        """The keeper saw no consumer of `buffer` for the spec's idle.hours."""
+        self.lifecycle.append(("idle", _label(event), buffer))
 
     @workflow.signal
     def keep(self, event: LabelEvent) -> None:
         """`buffer:keep`: an idle buffer goes back to ready."""
-        self.lifecycle.append(("keep", event))
+        self.lifecycle.append(("keep", event, ""))
 
     @workflow.signal
-    def retire(self, event: LabelEvent | None = None) -> None:
-        """`buffer:retire`, or the keeper after retire_after_days of idleness."""
-        self.lifecycle.append(("retire", event))
+    def retire(self, event: LabelEvent | None = None, buffer: str = "") -> None:
+        """`buffer:retire` (an event), or the keeper (`buffer`) after retire_after_days of idleness."""
+        self.lifecycle.append(("retire", _label(event), buffer))
 
     @workflow.query
     def status(self) -> BufferState:
@@ -264,7 +282,7 @@ class MiaBuffer:
         if not self._lifecycle():
             return
         queued, self.lifecycle = self.lifecycle, []
-        for kind, payload in queued:
+        for kind, payload, _buffer in queued:
             if isinstance(payload, LabelEvent):
                 if not self._seen(payload):
                     await self._refuse(f"buffer:{kind}", NO_BUFFER, payload)
@@ -326,8 +344,13 @@ class MiaBuffer:
         """Wait for an approve newer than the plan (True), or a new go (False). Stale approves are refused."""
         planned_at = _parse_time(self.state.planned_at) or workflow.now()
         while True:
-            await workflow.wait_condition(lambda: bool(self.approve_events or self.go_events) or _rollover_due())
+            await workflow.wait_condition(
+                lambda: bool(self.approve_events or self.go_events or self._lifecycle()) or _rollover_due()
+            )
+            await self._refuse_lifecycle()  # refused now: a rollover would lose them
             if not (self.approve_events or self.go_events):
+                if not _rollover_due():
+                    continue
                 workflow.continue_as_new(self.state)  # stage plan-review: the next run resumes here
             while self.approve_events:
                 event = self.approve_events.pop(0)
@@ -432,21 +455,34 @@ class MiaBuffer:
 
     async def _steady(self) -> None:
         """The buffer is ready or idle: act on lifecycle signals until a go (the main loop plans again; this buffer
-        stays registered), a retire, or a degraded pass that leaves a group below the floor (needs-human). An
-        approve is refused; a quiet history rolls over and the next run comes back here."""
+        stays registered), a retire, or a rebuild that leaves a group below the floor (needs-human). A rebuild runs
+        alongside: a go or a retire abandons it. An approve is refused; a quiet history rolls over (never while a
+        rebuild runs) and the next run comes back here."""
         while True:
             await workflow.wait_condition(
-                lambda: bool(self.lifecycle or self.go_events or self.approve_events) or _rollover_due()
+                lambda: (
+                    bool(self.lifecycle or self.go_events or self.approve_events)
+                    or self._rebuilt()
+                    or (_rollover_due() and not self.rebuild)
+                )
             )
+            if self._rebuilt():
+                if not await self._end_rebuild():
+                    return
+                continue
             if not (self.lifecycle or self.go_events or self.approve_events):
                 workflow.continue_as_new(self.state)  # stage ready or idle: run() comes back here
             await self._refuse_queued(gos=False)
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events:
+                await self._cancel_rebuild(ABANDONED)
                 return
             while self.lifecycle:
-                kind, payload = self.lifecycle.pop(0)
+                kind, payload, buffer = self.lifecycle.pop(0)
                 if isinstance(payload, LabelEvent) and self._seen(payload):
+                    continue
+                if buffer and buffer != self.state.buffer_id:  # about a buffer an earlier round left registered
+                    workflow.logger.info("issue #%d: %s of buffer %s ignored", self.state.issue, kind, buffer)
                     continue
                 if not await self._on_lifecycle(kind, payload):
                     return
@@ -466,56 +502,83 @@ class MiaBuffer:
             await self._stage("ready")
             await self._comment("kept", f"keep {state.round_id} {payload.event_id}")
         elif kind == "retire":
+            await self._cancel_rebuild(RETIRED_WHILE)
             retired = await self._act("retire_buffer", state.round_id, state.buffer_id, seconds=600, result_type=dict)
             state.retired, state.idle_since = True, None
             await self._stage("retired", RETIRED.format(path=retired.get("archive") or "none"))
             return False
         elif kind == "degraded":
-            return await self._rebuild(payload)
+            return await self._degraded(payload)
         return True  # an idle while idle: the keeper says it again each pass
 
-    async def _rebuild(self, signal: DegradedSignal) -> bool:
-        """Stage the named servable datasets again from the raw cache (a dataset whose raw cache is gone fails),
-        then stay as we are while every group is at its floor, else needs-human. False: the round is over."""
+    async def _degraded(self, signal: DegradedSignal) -> bool:
+        """Start staging again, from the raw cache, the named servable datasets whose volumes buffer-api finds
+        missing now (a dataset whose raw cache is gone fails). The keeper re-sends while a pyramid stays missing:
+        a record rebuilt since, being rebuilt or failed is left alone. False: the round is over."""
         state = self.state
-        assert state.round_id
-        named = set(signal.records)
+        assert state.round_id and state.buffer_id
+        missing = set(await self._act("missing_records", state.buffer_id, seconds=300, result_type=list[str]))
+        named = set(signal.records) & missing
         hit = [dataset for dataset in state.datasets if dataset.record in named and dataset.status == "servable"]
-        if not hit:  # the keeper re-sends while a pyramid stays missing: those are failed or rebuilt already
+        if not hit:
             return True
         limits = await self._limits()
-        again = []
+        self.degraded_reason = signal.reason
         for dataset in hit:
-            binding = await self._act(
-                "read_binding", state.round_id, dataset.record, seconds=300, result_type=BindingInfo
-            )
-            if binding.staged:  # its pyramid is on disk (rebuilt since the keeper looked): a stale re-send
-                continue
-            if await self._act("raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool):
-                dataset.rebuilds += 1
-                self._set(dataset, "pending")
-                again.append(dataset)
-            else:
+            self.degraded_records.add(dataset.record)
+            if not await self._act("raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool):
                 await self._fail(dataset, RAW_GONE)
-        if again:
-            self.timed_out = False  # the round's day limit is long past; a quota block waits, not drops
-            semaphore = asyncio.Semaphore(max(1, limits.parallel))
-            fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
-            self._start_ticker(limits)
-            try:
-                await asyncio.gather(*(self._source(dataset, semaphore, fetch_slots) for dataset in again))
-            finally:
-                await self._stop_ticker()
+                continue
+            dataset.rebuilds += 1
+            self._set(dataset, "pending")
+            if self.rebuild_slots is None:  # the first of this rebuild: its slots and its ticker
+                self.timed_out = False  # the round's day limit is long past; a quota block waits, not drops
+                self.rebuild_slots = (
+                    asyncio.Semaphore(max(1, limits.parallel)),
+                    asyncio.Semaphore(max(1, limits.parallel_fetch)),
+                )
+                self._start_ticker(limits)
+            self.rebuild.append((asyncio.create_task(self._source(dataset, *self.rebuild_slots)), dataset))
+        return True if self.rebuild else await self._end_rebuild()
+
+    def _rebuilt(self) -> bool:
+        return bool(self.rebuild) and all(task.done() for task, _ in self.rebuild)
+
+    async def _close_rebuild(self) -> None:
+        """The rebuild's tasks (done or cancelled), ticker and board writes, all ended."""
+        tasks = [task for task, _ in self.rebuild]
+        self.rebuild, self.rebuild_slots = [], None
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self._stop_ticker()
         await self._flush_board()
-        records = ", ".join(sorted(d.record for d in state.datasets if d.record in named and d.status != "servable"))
+
+    async def _cancel_rebuild(self, reason: str) -> None:
+        """A go or a retire: abandon the datasets still staging again."""
+        for task, dataset in self.rebuild:
+            if not task.done():
+                task.cancel()
+                self._set(dataset, "failed", reason)
+        await self._close_rebuild()
+        self.degraded_records = set()
+
+    async def _end_rebuild(self) -> bool:
+        """Every degraded dataset is servable again or failed: stay while every group is at its floor (say which
+        were rebuilt), else needs-human naming the records. False: the round is over."""
+        state = self.state
+        assert state.round_id
+        await self._close_rebuild()
+        degraded, self.degraded_records = self.degraded_records, set()
+        datasets = [dataset for dataset in state.datasets if dataset.record in degraded]
         if not self._ready_now():
+            gone = [d for d in state.datasets if d.status != "servable" and (d in datasets or d.reason == RAW_GONE)]
+            records = ", ".join(sorted(d.record for d in gone))
             await self._finish(
                 "needs-human",
-                f"pyramids missing ({signal.reason}): {records}; these weighting groups are now below "
+                f"pyramids missing ({self.degraded_reason}): {records}; these weighting groups are now below "
                 f"ready.min_fraction {state.min_fraction:g}: {', '.join(self._below())}",
             )
             return False
-        if rebuilt := sorted(dataset.record for dataset in again if dataset.status == "servable"):
+        if rebuilt := sorted(d.record for d in datasets if d.status == "servable"):
             await self._comment(
                 f"rebuilt {', '.join(rebuilt)}", f"rebuilt {state.round_id} {' '.join(rebuilt)} {self.progress}"
             )
@@ -571,7 +634,10 @@ class MiaBuffer:
                 quiet, seen = 0, self.progress
             await workflow.sleep(timedelta(minutes=min(limits.poll_minutes * 2**quiet, limits.max_tick_minutes)))
             self.tick += 1
-            quiet = 0 if self.progress != seen else quiet + 1
+            if self.progress != seen:
+                quiet = 0
+            elif limits.poll_minutes * 2**quiet < limits.max_tick_minutes:  # no further once at the cap
+                quiet += 1
             seen = self.progress
 
     async def _next_tick(self) -> None:
@@ -605,9 +671,11 @@ class MiaBuffer:
                     all(task.done() for task in tasks)
                     or bool(self.approve_events)
                     or bool(self.go_events and abandonable())
+                    or self._lifecycle()
                 )
             )
             await self._refuse_queued(gos=False)
+            await self._refuse_lifecycle()  # the buffer is ready, but its datasets are still sourcing
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events and abandonable():
                 for task, dataset in pairs:
@@ -634,7 +702,7 @@ class MiaBuffer:
             if dataset.status == "servable":  # only the "servable" comment failed; the volumes are registered
                 workflow.logger.warning("issue #%d: %s: %s", self.state.issue, dataset.record, error_message(error))
                 return
-            if (dataset.status == "dropped" or dataset.reason == ABANDONED) and workflow.patched("c-cache"):
+            if (dataset.status == "dropped" or _abandoned(dataset)) and workflow.patched("c-cache"):
                 return  # a cancel that landed inside an activity: the drop or abandon already says why
             await self._fail(dataset, error_message(error))
 
@@ -705,7 +773,7 @@ class MiaBuffer:
         if binding.manual and not dataset.rebuilds:  # a rebuild found the dropped files in the raw cache
             await self._await_drop(dataset, mark=True)
             self._set(dataset, "pending")  # no longer waiting on a human: not dropped at the timeout, nor abandoned
-        if binding.staged:  # the registry holds this binding's pyramid from an earlier round: reuse it, no lock
+        if binding.staged and not dataset.rebuilds:  # the registry holds this binding's pyramid: reuse it, no lock
             return await self._reuse(dataset, semaphore, " The pyramid was staged earlier for this binding and reused.")
         owner = f"mia-buffers {round_id} {record}"
         lock = ["raw", record, owner]
@@ -736,7 +804,7 @@ class MiaBuffer:
         assert state.round_id and state.buffer_id
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
-        if binding.staged:  # the lock's previous holder staged this very binding while we waited
+        if binding.staged and not dataset.rebuilds:  # the lock's previous holder staged it while we waited
             built = f" The pyramid was staged by {holder} while this buffer waited and reused." if holder else ""
             return await self._reuse(
                 dataset, semaphore, built or " The pyramid was staged earlier for this binding and reused."
@@ -870,7 +938,7 @@ class MiaBuffer:
                 return False
             self._set(dataset, "blocked", f"raw quota over by {quota.over_by} bytes")
             await self._release(["raw", dataset.record, owner])
-            if dataset.status == "dropped" or dataset.reason == ABANDONED:  # cancelled meanwhile
+            if dataset.status == "dropped" or _abandoned(dataset):  # cancelled meanwhile
                 return False
             if not said:
                 await self._comment(

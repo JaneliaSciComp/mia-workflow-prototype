@@ -277,9 +277,17 @@ with its latest event, volume and `missing` counts, servable volumes per split, 
 today's draws.
 
 **Degraded.** `GET /buffers/<id>/status` stats each volume's pyramid directory (when the service has a staged root)
-and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records, reason)`. The
-workflow stages those records again from the raw cache when it is `ready`, under the same artifact id, and goes
-`needs-human` only if a weighting group falls below `ready.min_fraction`; a record whose raw cache is gone fails.
+and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records, reason,
+buffer)`. The workflow asks buffer-api which of those records are still missing (`missing_records`; a re-send for one
+rebuilt, rebuilding or failed is ignored) and stages them again from the raw cache, under the same artifact id, with a
+job key and build directory of their own; the publish sets the broken final directory aside as `.building-stale-*`.
+The rebuild runs alongside the ready loop: a `go` or a retire abandons it. The issue goes `needs-human` only if a
+weighting group falls below `ready.min_fraction`; a record whose raw cache is gone fails.
+
+**Whose signal.** The keeper's `idle`, `retire` and `degraded` name the buffer they are about; the workflow ignores
+one about another buffer (an earlier round's, left registered by a `go` from ready, never idles by itself). A
+`buffer:keep` or `buffer:retire` label while there is no ready or idle buffer (planning, review, sourcing, stragglers
+still sourcing, or a finished workflow) is refused with a comment at once.
 
 **One ticker.** Lock and quota waits share one timer per round: it ticks every `poll_minutes`, doubling while no
 dataset changes status, to at most 30 minutes, and runs only while someone waits. mia-data keeps its own backoff.

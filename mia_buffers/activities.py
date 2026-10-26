@@ -49,6 +49,7 @@ from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
+    MAX_POLL_MINUTES,
     BindingInfo,
     BufferPins,
     BufferState,
@@ -73,7 +74,6 @@ from .poll import run_poll
 from .register import buffer_config, recipe_for, volume_bodies
 from .spec import SpecError, load_spec
 from .status import render_drop_comment, render_plan_comment
-from .workflows import MAX_POLL_MINUTES
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -194,6 +194,7 @@ class Activities:
             self.mark_dataset,
             self.retire_buffer,
             self.raw_ready,
+            self.missing_records,
             self.comment_drop,
             self.nudge_dataset,
             self.poll,
@@ -655,7 +656,7 @@ class Activities:
         final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record, rebuild)
         report = _stage_json(building if building.exists() else final)
         if isinstance(report, dict) and report.get("ok") is True and building.exists():
-            report = await asyncio.to_thread(self._publish, round_id, record, report, building, final)
+            report = await asyncio.to_thread(self._publish, round_id, record, report, building, final, rebuild > 0)
         if not isinstance(report, dict):
             return StageResult(False, errors=["stage.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
@@ -683,11 +684,16 @@ class Activities:
             "env_digest": pins.env_digest,
         }
 
-    def _publish(self, round_id: str, record: str, report: dict, building: Path, final: Path) -> Any:
+    def _publish(
+        self, round_id: str, record: str, report: dict, building: Path, final: Path, replace: bool = False
+    ) -> Any:
         """Write the artifact block into the build's stage.json and rename the build to its final directory. Returns
-        the published report: the build's, or the final directory's when that was there first."""
+        the published report: the build's, or the final directory's when that was there first. `replace` (a rebuild
+        of a degraded pyramid): the final directory, broken though its stage.json says ok, is set aside first."""
         report["artifact"] = self._artifact_block(round_id, record)
         write_atomic(building / "stage.json", json.dumps(report, indent=2))
+        if replace and final.exists():  # for the `.building-*` sweep
+            os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
         try:
             os.rename(building, final)
         except OSError:
@@ -965,6 +971,13 @@ class Activities:
             log,
         )
 
+    @activity.defn(name="missing_records")
+    @mia_permanent_errors
+    async def missing_records(self, buffer_id: str) -> list[str]:
+        """The records of the buffer's volumes whose path is gone from disk now (buffer-api stats each one)."""
+        missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]
+        return sorted({str(volume).split("/", 1)[0] for volume in missing})
+
     @activity.defn(name="retire_buffer")
     @mia_permanent_errors
     async def retire_buffer(self, round_id: str, buffer_id: str) -> dict:
@@ -1048,24 +1061,25 @@ class Activities:
             kind = latest.get("kind")
             if not (ROUND_RE.fullmatch(buffer_id) and kind in ("ready", "idle")):
                 continue
-            signals: list[tuple[str, Any, str]] = []
+            signals: list[tuple[str, list[Any], str]] = []
             missing = (await asyncio.to_thread(registry.status, buffer_id))["missing"]  # stats the pyramids
             if missing:
                 records = sorted({volume.split("/", 1)[0] for volume in missing})
                 reason = "pyramid missing: " + ", ".join(missing)
-                signals.append(("degraded", DegradedSignal(records, text(reason, 500)), ",".join(records)))
+                signal = DegradedSignal(records, text(reason, 500), buffer_id)
+                signals.append(("degraded", [signal], ",".join(records)))
             idle_s, age = float(config["idle_hours"]) * 3600, now - float(latest["at"])
             seen = buffer.get("consumers_seen")
             if kind == "ready" and age > idle_s and (seen is None or now - float(seen) > idle_s):
-                signals.append(("idle", None, ""))
+                signals.append(("idle", [None, buffer_id], ""))  # no label event; the buffer it is about
             if kind == "idle" and age > float(config["retire_after_days"]) * 86400:
-                signals.append(("retire", None, ""))
+                signals.append(("retire", [None, buffer_id], ""))
             workflow_id = self.cfg.workflow_id(_issue_of(buffer_id))
-            for name, arg, detail in signals:
+            for name, args, detail in signals:
                 line = f"{name} {buffer_id} {detail}".rstrip()
                 if not dry_run and self.client is not None:
                     try:
-                        await self.client.get_workflow_handle(workflow_id).signal(name, arg)
+                        await self.client.get_workflow_handle(workflow_id).signal(name, args=args)
                     except RPCError as error:
                         if error.status != RPCStatusCode.NOT_FOUND:
                             raise

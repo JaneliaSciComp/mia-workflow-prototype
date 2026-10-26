@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+MAX_POLL_MINUTES = 30  # a lock or quota wait polls after poll_minutes, doubling each try up to this
+
 
 @dataclass
 class BufferPins:
@@ -56,14 +58,7 @@ class DegradedSignal:
 
     records: list[str]
     reason: str
-
-
-@dataclass
-class LifecycleEvent:
-    """A lifecycle signal the ready-state loop handles: idle, keep, retire or degraded, with its detail."""
-
-    kind: str
-    detail: str = ""
+    buffer: str = ""  # the buffer the keeper looked at; the workflow ignores a signal for a buffer it superseded
 
 
 @dataclass

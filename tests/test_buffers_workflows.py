@@ -104,6 +104,7 @@ class Mocks:
         release_gates=None,
         raw_ready=None,
         quota_after=None,
+        missing=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -119,6 +120,7 @@ class Mocks:
         self.raw_ready = raw_ready or {}  # record -> raw_ready's answer; default True
         self.board: list[tuple[str, str]] = []  # (record, status) as mark_dataset received them
         self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
+        self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -289,6 +291,13 @@ class Mocks:
             rec("retire_buffer", buffer_id)
             return {"refs": 2, "draws": 5, "archive": f"/state/archive/{buffer_id}.draws.jsonl.gz"}
 
+        @activity.defn(name="missing_records")
+        async def missing_records(buffer_id: str) -> list[str]:
+            rec("missing_records", buffer_id)
+            if self.missing is None:
+                return [d.record for d in self.plan.pool]
+            return self.missing.pop(0) if len(self.missing) > 1 else self.missing[0]
+
         @activity.defn(name="raw_ready")
         async def raw_ready(round_id: str, record: str) -> bool:
             rec("raw_ready", record)
@@ -306,6 +315,7 @@ class Mocks:
             mark_dataset,
             retire_buffer,
             raw_ready,
+            missing_records,
         ]
 
     def await_act(self):
@@ -1391,18 +1401,24 @@ async def test_a_lifecycle_label_without_a_ready_buffer_is_refused(env):
 
 
 async def test_degraded_rebuilds_from_the_raw_cache(env):
+    """The zarr is gone but stage.json is still there, so the registry says the binding is staged: the rebuild must
+    stage anyway (no reuse of the broken paths), with its own key, workspace and build dir (read_stage replaces)."""
     unstaged = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"])
-    # sourcing reads the binding twice, the rebuild once to check and twice to source, the re-send once: staged
-    m = Mocks(plan=ONLY_U937, bindings={"u937": [unstaged] * 5 + [replace(unstaged, staged=True)]})
+    m = Mocks(
+        plan=ONLY_U937,
+        bindings={"u937": [unstaged, unstaged, replace(unstaged, staged=True)]},  # sourcing reads it twice
+        missing=[["u937"], []],  # the re-send comes after the rebuild: nothing is missing any more
+    )
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "ready")
-        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr"))
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
-        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr"))  # a stale re-send
-        await until(lambda: len(m.of("read_binding")) == 6, m=m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await until(lambda: len(m.of("missing_records")) == 2, m=m)
         await asyncio.sleep(0.3)
         state = await h.query(MiaBuffer.status)
+    assert len(m.of("read_binding")) == 4  # staged=True on both of the rebuild's reads, and staged anyway
     u937 = dataset(state, "u937")
     assert (u937.status, u937.rebuilds) == ("servable", 1) and state.stage == "ready"
     assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
@@ -1523,7 +1539,7 @@ async def test_replay_buffer_history_d(env):
             await waits_on_lock(h, "u937")
             await env.sleep(timedelta(minutes=3))
             await idle(h, m, "ready")
-            await h.signal(MiaBuffer.idle)
+            await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # as the keeper sends it
             await idle(h, m, "idle")
             await h.signal(MiaBuffer.keep, ev("keep", "31"))
             await idle(h, m, "ready")
@@ -1532,3 +1548,65 @@ async def test_replay_buffer_history_d(env):
             LIFECYCLE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-d-lifecycle", LIFECYCLE_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+async def test_a_keeper_signal_about_another_buffer_is_ignored(env):
+    """After a go from the ready loop the earlier buffer stays registered and ready; the keeper's signals about it
+    carry its id and must not idle or retire this round's buffer."""
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.idle, args=[None, "i7-e3"])
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e3"])
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e3"))
+        await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # about this round's buffer
+        await idle(h, m, "idle")
+    assert m.stages[-2:] == ["ready", "idle"] and not m.of("retire_buffer") and not m.of("missing_records")
+
+
+async def test_retire_abandons_a_rebuild_that_waits(env):
+    """A rebuild whose raw lock is held elsewhere waits on the ticker; a retire does not wait for it."""
+    m = Mocks(plan=ONLY_U937, locks={"u937": [LockTaken(True), LockTaken(True), HELD]})  # sourcing takes it twice
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await waits_on_lock(h, "u937")
+        await h.signal(MiaBuffer.retire, ev("retire", "32"))
+        await idle(h, m, "retired")
+        takes = len(m.of("take_lock"))
+        await env.sleep(timedelta(hours=1))
+        await asyncio.sleep(0.3)
+        state = await h.query(MiaBuffer.status)
+        events = (await h.fetch_history()).events
+    assert m.of("retire_buffer") == [("i7-e11",)] and len(m.of("take_lock")) == takes
+    assert dataset(state, "u937").reason == "abandoned: the buffer was retired" and ticker_timers_pending(events) == []
+
+
+async def test_go_abandons_a_rebuild_that_waits(env):
+    m = Mocks(plan=ONLY_U937, locks={"u937": [LockTaken(True), LockTaken(True), HELD]})  # sourcing takes it twice
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "ready")
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await waits_on_lock(h, "u937")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "plan-review")
+        state = await h.query(MiaBuffer.status)
+    assert state.round_id == "i7-e15" and m.stages[-3:] == ["ready", "planning", "plan-review"]
+
+
+async def test_lifecycle_labels_outside_the_ready_loop_are_refused_at_once(env):
+    """In plan-review (where a rollover would lose them) and while stragglers still source after ready."""
+    m = Mocks(plan=ONE_GROUP)
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.retire, ev("retire", "21"))
+        await until(lambda: m.of("refuse_label"), m=m)
+        await approve(h, m)
+        await idle(h, m, "ready")  # a servable, b waits for its drop
+        await h.signal(MiaBuffer.keep, ev("keep", "22"))
+        await until(lambda: len(m.of("refuse_label")) == 2, m=m)
+    assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("buffer:retire", "21"), ("buffer:keep", "22")]
+    assert not m.of("retire_buffer")

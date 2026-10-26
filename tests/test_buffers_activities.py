@@ -1128,6 +1128,11 @@ async def test_read_stage_publishes_by_rename_and_reuses_an_existing_artifact(ac
     result = await acts.read_stage(ROUND, U937)
     assert result.ok and result.volumes == 1 and not building.exists()
     assert json.loads((final / "stage.json").read_text())["artifact"]["id"] == final.name
+    await acts.prepare_stage(7, ROUND, U937, 1)  # a rebuild of a degraded pyramid: the fresh build replaces it
+    staged_into(acts._building_dir(ROUND, U937, 1), volumes=[])
+    result = await acts.read_stage(ROUND, U937, 1)
+    assert result.ok and result.volumes == 0 and not acts._building_dir(ROUND, U937, 1).exists()
+    assert len(list(final.parent.glob(f".building-stale-{final.name}-*"))) == 1  # the broken one, for the sweep
 
 
 async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
@@ -1185,7 +1190,7 @@ async def test_mark_dataset_and_retire(acts, server):
 
 
 class FakeTemporal:
-    """get_workflow_handle(id).signal(name, arg) recorded as (id, name, arg); `gone` ids raise not found."""
+    """get_workflow_handle(id).signal(name, args=[...]) recorded as (id, name, args); `gone` ids raise not found."""
 
     def __init__(self, gone=()):
         self.sent, self.gone = [], set(gone)
@@ -1196,10 +1201,10 @@ class FakeTemporal:
         temporal = self
 
         class Handle:
-            async def signal(self, name, arg=None):
+            async def signal(self, name, *, args):
                 if workflow_id in temporal.gone:
                     raise RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
-                temporal.sent.append((workflow_id, name, arg))
+                temporal.sent.append((workflow_id, name, args))
 
         return Handle()
 
@@ -1241,11 +1246,12 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
         (
             acts.cfg.workflow_id(2),
             "degraded",
-            DegradedSignal(["rec-a", "rec-b"], "pyramid missing: rec-a/v0.zarr, rec-b/v0.zarr"),
+            [DegradedSignal(["rec-a", "rec-b"], "pyramid missing: rec-a/v0.zarr, rec-b/v0.zarr", "i2-e3")],
         ),
-        (acts.cfg.workflow_id(4), "idle", None),
-        (acts.cfg.workflow_id(6), "retire", None),
+        (acts.cfg.workflow_id(4), "idle", [None, "i4-e5"]),
+        (acts.cfg.workflow_id(6), "retire", [None, "i6-e7"]),
     ]
+    assert await acts.missing_records("i2-e3") == ["rec-a", "rec-b"] and await acts.missing_records("i4-e5") == []
     acts.client = None  # the CLI's `assets sync` builds no Temporal client: it reports what it would signal
     report = KeeperReport()
     await acts._keeper_buffers(report, now, dry_run=False)
