@@ -39,7 +39,7 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 
 | path | |
 |---|---|
-| `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the untrusted-output helpers (`untrusted.py`). Imports no application package; every package may import it |
+| `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the worker-side client of buffer-api's registry (`registry.py`), the untrusted-output helpers (`untrusted.py`). Imports no application package; every package may import it |
 | `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
 | `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `notes/specs/2026-10-21-training-buffers.md`; walkthroughs below |
@@ -134,6 +134,32 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    as a list). Train is a stream of fresh crops (`idx` is ignored, `len` is `n_samples`); val and test replay a
    frozen list that is identical every epoch. Each DataLoader worker registers its own consumer.
    `GET /buffers/<id>/status` shows servable volumes per split, draws per volume and consumers.
+
+## The registry (milestone B)
+
+The ledger now also holds one row per dataset (state `in-progress`, `ineligible`, `needs-human` or `prepared`, with the
+folder, binding hash and crop count of a prepared one) and the catalog records of each synced commit. It lives in
+`<local_root>/service/buffers.sqlite` with backups under `<state_dir>/backups/`. mia-data writes the dataset rows as
+its stages change (`mia_core.registry.Registry`, best effort).
+
+Three capability levels, enforced per route: consumer routes (register a consumer, `next`, `split`, `status`) and read
+routes (every other `GET`, and `POST /plan`) are open; worker routes (every other `PUT`, `POST`, `DELETE`) need
+`Authorization: Bearer <contents of service.token_file>`, else `401 {"error": "unauthorized"}`.
+
+Sync commands, for a fresh service or one that missed writes:
+
+```
+mia exec mia-buffers catalog sync [--ref <catalog sha>]   # load the catalog records of a commit
+mia exec mia-buffers datasets sync                        # rebuild the prepared rows from storage_root
+```
+
+`POST /plan` plans a spec against the synced catalog and the registry; datasets that are not `prepared` stay in the
+pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read the spec from a file:
+
+```
+python -c 'import json,sys; print(json.dumps({"spec": open(sys.argv[1]).read()}))' spec.yaml |
+  curl -s -XPOST http://host.example.org:8765/plan --data-binary @-
+```
 
 ## Running a buffer from an issue (milestone 3)
 

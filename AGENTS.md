@@ -26,6 +26,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
 - **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
   files are deprecated. `paths.local_root` must be host-local disk.
+- **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer routes needs
+  `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx call.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

@@ -1,8 +1,10 @@
 import hashlib
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
 from autodev_helpers import GIT_ID, run_git
@@ -11,6 +13,7 @@ from temporalio.exceptions import ApplicationError
 from test_autodev_agent import FakeCsub
 
 from autodev.jobs import CsubJobs
+from mia_core.registry import Registry
 from mia_data.activities import Activities
 from mia_data.models import DatasetState, JobArgs, job_key
 
@@ -188,6 +191,54 @@ async def test_set_stage_swaps_labels_and_appends_one_comment_per_stage(tmp_path
     assert f"[Workspace](https://fg.example/work/issue-1/{ROUND})" in bodies[2]
     assert "**Totals:** 16 new" in bodies[1] and "[Crops](https://fg.example/crops/lm-human-rec-1)" in bodies[1]
     assert "[Gallery](https://github.com/o/data/tree/galleries/galleries/rec-1/" + ROUND + ")" in bodies[1]
+
+
+def _registry_seen(t, handler=None):
+    """Give the activities a registry on a mock transport; the (path, body) of each write lands in the list."""
+    seen = []
+
+    def record(request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={})
+
+    t.a.registry = Registry("http://svc", "t", transport=httpx.MockTransport(handler or record))
+    return seen
+
+
+async def test_set_stage_reports_the_dataset_state(tmp_path):
+    t = _setup(tmp_path)
+    seen = _registry_seen(t)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    await t.a.set_stage(1, "matching", state)
+    assert seen[-1] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    await t.a.set_stage(1, "ineligible", state)
+    assert seen[-1][1]["state"] == "ineligible"
+    dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
+    dataset_dir.mkdir(parents=True)
+    binding_bytes = yaml.safe_dump(BINDING).encode()
+    (dataset_dir / "binding.yaml").write_bytes(binding_bytes)
+    manifest = {"count": 2, "binding": {"sha256": hashlib.sha256(binding_bytes).hexdigest()}}
+    (dataset_dir / "manifest.json").write_text(json.dumps(manifest))
+    await t.a.set_stage(1, "done", state)
+    row = seen[-1][1]
+    assert row["state"] == "prepared" and row["crops"] == 2 and row["binding_hash"] and row["folder"]
+    assert "record" not in row and row["issue"] == 1
+    await t.a.set_stage(1, "matching", None)  # no round: no write
+    assert len(seen) == 3
+
+
+async def test_set_stage_survives_a_down_registry(tmp_path, caplog):
+    def down(request):
+        raise httpx.ConnectError("down")
+
+    t = _setup(tmp_path)
+    t.data.issues[1]["labels"] = [{"name": "data:new"}]
+    _registry_seen(t, down)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    with caplog.at_level(logging.WARNING):
+        await t.a.set_stage(1, "matching", state)  # no exception
+    assert "registry write skipped" in caplog.text
+    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:matching"] and len(t.data.comments[1]) == 1
 
 
 async def test_comment_can_carry_the_binding(tmp_path):

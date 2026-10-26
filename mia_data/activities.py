@@ -26,6 +26,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
+from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -186,6 +187,7 @@ class Activities:
     ):
         self.cfg, self.gh_data, self.gh_snippets, self.gh_catalog = cfg, gh_data, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
+        self.registry = Registry.from_config(cfg.service) if cfg.service else None  # buffer-api, when configured
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
         self._sent: dict[int, tuple] = {}  # poll: PR number -> the (head, state, merge, needs_human) last signalled
@@ -289,6 +291,17 @@ class Activities:
         """Where the dataset's crops are published under storage_root."""
         return self.cfg.paths.storage_root / catalog.dataset_folder(self._record(round_id), pins.record)
 
+    def dataset_fields(self, issue: int, round_id: str, stage: str) -> dict:
+        """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
+        binding and a manifest that matches it, else in-progress, or ineligible / needs-human at those stages."""
+        row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
+        if row:
+            row.pop("record")
+            fields = row
+        else:
+            fields = {"state": {"ineligible": "ineligible", "needs-human": "needs-human"}.get(stage, "in-progress")}
+        return {**fields, "data_stage": stage, "issue": issue}
+
     async def _snapshot(self, sha: str) -> Path:
         return await asyncio.to_thread(snapshot, self.cfg, sha, self.gh_snippets.tokens)
 
@@ -360,6 +373,14 @@ class Activities:
         if not (state and state.round_id):
             return
         round_id, paths = state.round_id, self.cfg.paths
+        if registry := self.registry:
+            record, fields = self._pins(round_id).record, self.dataset_fields(issue, round_id, stage)
+            await asyncio.to_thread(
+                best_effort,
+                lambda: registry.put_dataset(record, **fields),
+                f"dataset {record}",
+                log,  # the module logger: best_effort takes a Logger, not activity.logger's adapter
+            )
         links = {"Workspace": paths.link(self._round_workspace(issue, round_id))}
         if stage == "done":
             pins = self._pins(round_id)

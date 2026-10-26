@@ -150,6 +150,13 @@ cannot handle ends in `data:needs-human` with a comment saying why and what to c
 retries from the start with a new seed, or, when the round was following a snippet PR that is still open, picks
 that PR up again.
 
+## The registry hears every stage
+
+`set_stage` sends the dataset's state to buffer-api (`PUT /datasets/<record>`, best effort: a down service is logged
+and never fails the round). `prepared` means `binding.yaml` plus a `manifest.json` whose binding hash matches it;
+before that a dataset is `in-progress`, `ineligible` or `needs-human`. `mia-buffers datasets sync` rebuilds the
+prepared rows from `storage_root` when the service missed a write.
+
 ## Trust boundaries in one paragraph
 
 Agents never hold GitHub credentials or reach GitHub; the worker does every GitHub write. Each job asks csub
