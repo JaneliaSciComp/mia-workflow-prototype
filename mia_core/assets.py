@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from mia_core.fs import dir_bytes
-from mia_core.untrusted import loads, read_untrusted
+from mia_core.untrusted import loads, read_untrusted, text
 
 ASSET_STATES = ("fetching", "staging", "waiting-drop", "ready", "partial", "missing", "evicted")
 MANIFEST = "files.json"
@@ -23,6 +23,16 @@ def whole_file_url(url: str) -> str:
     return url.split("::", 1)[0]
 
 
+def _file_entry(entry: dict) -> dict:
+    """The size and source of one files.json entry, reduced to bounded typed values."""
+    validators = entry.get("validators")
+    size = validators.get("size") if isinstance(validators, dict) else None
+    return {
+        "size": size if isinstance(size, int) and not isinstance(size, bool) else None,
+        "source": text(entry.get("source"), 50) or None,
+    }
+
+
 def raw_asset(cache_dir: Path, urls: Iterable[str]) -> dict:
     """The raw-cache asset row: path, bytes, files.json entries, and `ready` when every url of `urls` is cached."""
     manifest = read_files_json(cache_dir)
@@ -31,10 +41,6 @@ def raw_asset(cache_dir: Path, urls: Iterable[str]) -> dict:
     return {
         "path": str(cache_dir),
         "bytes": dir_bytes(cache_dir),
-        "files": {
-            str(url)[:500]: {"size": (entry.get("validators") or {}).get("size"), "source": entry.get("source")}
-            for url, entry in manifest.items()
-            if isinstance(entry, dict)
-        },
+        "files": {text(url, 500): _file_entry(entry) for url, entry in manifest.items() if isinstance(entry, dict)},
         "state": "ready" if ready else "partial",
     }

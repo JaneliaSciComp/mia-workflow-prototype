@@ -63,10 +63,13 @@ def dir_bytes(path: Path) -> int:
     try:
         with os.scandir(path) as entries:
             for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    total += dir_bytes(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        total += dir_bytes(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    pass  # removed while we walked
     except FileNotFoundError:
         pass
     return total

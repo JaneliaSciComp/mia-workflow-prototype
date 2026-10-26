@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+_COUNTER = itertools.count()  # shared by every LockDir in the process, so temporary names never collide
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 
 
@@ -41,41 +43,70 @@ class LockDir:
                 raise ValueError(f"lock name {name!r} must match {NAME_RE.pattern}")
         return self.root / kind / key
 
+    def _unique(self, path: Path, label: str) -> Path:
+        """A sibling name of `path` nobody else uses (pid plus a counter); dot-prefixed, so never listed as a lock."""
+        return path.with_name(f".{path.name}.{label}-{os.getpid()}-{next(_COUNTER)}")
+
+    def _read(self, path: Path, kind: str, key: str) -> Holder | None:
+        """The holder a lock file at `path` records; an unreadable file is a stale holder, a missing one None."""
+        try:
+            data = json.loads(path.read_text())
+            owner, taken_at = str(data["owner"]), float(data["taken_at"])
+            heartbeat_at, ttl_s = float(data["heartbeat_at"]), float(data["ttl_s"])
+        except FileNotFoundError:
+            return None
+        except (ValueError, KeyError, TypeError):  # includes a non-UTF-8 file
+            return Holder(kind, key, "", 0, 0, 0, True)
+        return Holder(kind, key, owner, taken_at, heartbeat_at, ttl_s, heartbeat_at + ttl_s < self.now())
+
     def take(self, kind: str, key: str, owner: str, ttl_s: float) -> bool:
-        """Create the lock file; a stale one is renamed aside first. False when someone else holds it."""
+        """Create the lock file; a stale one is renamed aside first. False when someone else holds it.
+
+        The file is written complete under a temporary name and hard-linked into place, so it never exists
+        empty; a taker that renames aside a lock it did not observe stale puts it back and loses."""
         path = self.path(kind, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                holder = self.holder(kind, key)
-                if holder is None:
-                    continue  # released between our create and our read
-                if not holder.stale:
+        now = self.now()
+        temporary = self._unique(path, "new")
+        temporary.write_text(json.dumps({"owner": owner, "taken_at": now, "heartbeat_at": now, "ttl_s": ttl_s}))
+        try:
+            for _ in range(2):
+                try:
+                    os.link(temporary, path)
+                    return True
+                except FileExistsError:
+                    pass
+                observed = self.holder(kind, key)
+                if observed is None:
+                    continue  # released between our link and our read
+                if not observed.stale:
                     return False
-                with contextlib.suppress(FileNotFoundError):  # a second taker may have renamed it already
-                    os.replace(path, path.with_name(f"{key}.stale-{int(self.now())}"))
-                continue
-            now = self.now()
-            with os.fdopen(fd, "w") as handle:
-                handle.write(json.dumps({"owner": owner, "taken_at": now, "heartbeat_at": now, "ttl_s": ttl_s}))
-            return True
-        return False
+                aside = self._unique(path, "aside")
+                try:
+                    os.replace(path, aside)
+                except FileNotFoundError:
+                    continue
+                moved = self._read(aside, kind, key)
+                if moved is None or (moved.owner, moved.heartbeat_at) != (observed.owner, observed.heartbeat_at):
+                    # another taker got in first and we moved its live lock: put it back and lose
+                    with contextlib.suppress(FileExistsError):
+                        os.link(aside, path)
+                    aside.unlink(missing_ok=True)
+                    return False
+                for name in (f"{key}.stale-{int(now)}", f"{key}.stale-{int(now)}-{os.getpid()}-{next(_COUNTER)}"):
+                    try:
+                        os.link(aside, path.with_name(name))  # link, not rename: never overwrites earlier evidence
+                        break
+                    except FileExistsError:
+                        continue
+                aside.unlink(missing_ok=True)
+            return False
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def holder(self, kind: str, key: str) -> Holder | None:
         """The current holder, None when there is no lock file; an unreadable file is a stale holder."""
-        try:
-            text = self.path(kind, key).read_text()
-        except FileNotFoundError:
-            return None
-        try:
-            data = json.loads(text)
-            owner, taken_at = str(data["owner"]), float(data["taken_at"])
-            heartbeat_at, ttl_s = float(data["heartbeat_at"]), float(data["ttl_s"])
-        except (ValueError, KeyError, TypeError):
-            return Holder(kind, key, "", 0, 0, 0, True)
-        return Holder(kind, key, owner, taken_at, heartbeat_at, ttl_s, heartbeat_at + ttl_s < self.now())
+        return self._read(self.path(kind, key), kind, key)
 
     def heartbeat(self, kind: str, key: str, owner: str) -> bool:
         """Refresh the heartbeat; False when the lock is gone or someone else holds it."""
@@ -84,19 +115,33 @@ class LockDir:
             return False
         path = self.path(kind, key)
         data = {"owner": owner, "taken_at": holder.taken_at, "heartbeat_at": self.now(), "ttl_s": holder.ttl_s}
-        temporary = path.with_name(f"{key}.tmp-{os.getpid()}")
+        temporary = self._unique(path, "hb")
         temporary.write_text(json.dumps(data))
+        # ponytail: a takeover between this check and the replace lets a lapsed owner overwrite the new lock for one
+        # heartbeat; the owner has stopped heartbeating for a whole ttl by then. Upgrade: link-based swap.
+        current = self.holder(kind, key)
+        if current is None or current.owner != owner:
+            temporary.unlink(missing_ok=True)
+            return False
         os.replace(temporary, path)
         return True
 
     def release(self, kind: str, key: str, owner: str) -> bool:
-        """Remove the lock file; False when the lock is gone or someone else holds it."""
-        holder = self.holder(kind, key)
-        if holder is None or holder.owner != owner:
+        """Remove the lock file; False when the lock is gone or someone else holds it (it is put back)."""
+        path = self.path(kind, key)
+        claimed = self._unique(path, "rel")
+        try:
+            os.replace(path, claimed)  # takes the file out of play before looking at whose it is
+        except FileNotFoundError:
             return False
-        with contextlib.suppress(FileNotFoundError):
-            self.path(kind, key).unlink()
-        return True
+        holder = self._read(claimed, kind, key)
+        if holder is not None and holder.owner == owner:
+            claimed.unlink()
+            return True
+        with contextlib.suppress(FileExistsError):
+            os.link(claimed, path)
+        claimed.unlink(missing_ok=True)
+        return False
 
     def holders(self) -> list[Holder]:
         """Every lock file under the root (renamed-aside stale copies and temporaries excluded), by kind then key."""
@@ -119,7 +164,7 @@ class LockDir:
     def hold(
         self, kind: str, key: str, owner: str, ttl_s: float, timeout_s: float, poll_s: float = 2.0
     ) -> Iterator[None]:
-        """Block until the lock is taken (TimeoutError after `timeout_s`); release it on exit."""
+        """Block until the lock is taken (TimeoutError after `timeout_s`); release it on exit. Does not heartbeat."""
         deadline = self.now() + timeout_s
         while not self.take(kind, key, owner, ttl_s):
             current = self.holder(kind, key)
