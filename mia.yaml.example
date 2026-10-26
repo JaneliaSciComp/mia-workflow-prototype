@@ -6,7 +6,8 @@
 sandbox_dir: ../agentic-sandbox/scripts   # agentic-sandbox's scripts dir, relative to this repo
 temporal:
   managed: true                           # dev hosts: mia runs a local dev server (omit the section for an external Temporal)
-  state_dir: ~/.local/state/temporal      # managed only: temporal.db, logs/, and bin/temporal if downloaded
+  state_dir: /scratch/mia/temporal        # managed only: temporal.db (SQLite: host-local disk, refused on a network
+                                          # fs), logs/, and bin/temporal if downloaded
   address: localhost:7233                 # $TEMPORAL_ADDRESS overrides
   poll_minutes: 2                         # namespace is per service, below
 github:                                   # shared: who the services act as, and the repos every service reads

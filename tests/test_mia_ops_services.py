@@ -107,6 +107,8 @@ def fake(monkeypatch, tmp_path):
                 state.running.discard(argv[3].lstrip("="))
                 if argv[3] == "=temporal":
                     state.healthy = False
+            elif argv[1] == "list-panes":
+                return subprocess.CompletedProcess(argv, 0, stdout="4242\n", stderr="")
         elif isinstance(argv, list) and argv[0] == "/usr/bin/temporal":
             if argv[1:4] == ["operator", "cluster", "health"]:
                 rc = 0 if state.healthy else 1
@@ -482,6 +484,32 @@ def test_up_refuses_a_network_local_root(tmp_path, fake, monkeypatch):
     with pytest.raises(SystemExit, match="network filesystem"):
         services.service_up(s.services["mia-buffers"], s, Temporal(s))
     assert not tmux_calls(fake, "new-session")
+
+
+def test_temporal_up_refuses_a_network_state_dir(tmp_path, fake, monkeypatch):
+    s = make_stack_v2(tmp_path)
+
+    def on_nfs(path):
+        raise RuntimeError(f"{path} is on nfs, a network filesystem; it must be host-local disk")
+
+    monkeypatch.setattr(services, "require_local_dir", on_nfs)
+    with pytest.raises(SystemExit, match="temporal.state_dir"):
+        Temporal(s).up()
+    assert not tmux_calls(fake, "new-session")
+
+
+def test_kill_waits_for_the_pane_process_group_to_exit(fake, monkeypatch):
+    """A restart must not start the next Temporal while the old one is still closing temporal.db."""
+    fake.running.add("temporal")
+    polls, naps = [], []
+    monkeypatch.setattr(
+        services.os,
+        "killpg",
+        lambda pgid, sig: polls.append(pgid) if len(polls) < 2 else (_ for _ in ()).throw(ProcessLookupError()),
+    )
+    monkeypatch.setattr(services.time, "sleep", naps.append)
+    assert services.kill("temporal") == 0
+    assert polls == [4242, 4242] and naps == [0.1, 0.1]  # alive twice, then gone
 
 
 def test_up_refuses_a_missing_local_root_for_data_and_buffers(tmp_path, fake):

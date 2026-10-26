@@ -549,7 +549,7 @@ catalog and snippets repos, the harness checkout, the Temporal address, the limi
 ```yaml
 # mia.yaml (git-ignored; mia.yaml.example tracked)
 sandbox_dir: ../agentic-sandbox/scripts
-temporal: {managed: true, state_dir: ~/.local/state/temporal, address: localhost:7233, poll_minutes: 2}
+temporal: {managed: true, state_dir: /scratch/mia/temporal, address: localhost:7233, poll_minutes: 2}  # host-local
 github:                                   # shared: the App, the repos every service reads
   auth: app
   app_id: 1234

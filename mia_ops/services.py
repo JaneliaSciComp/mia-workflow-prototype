@@ -42,12 +42,30 @@ def is_running(session: str) -> bool:
     return _tmux("has-session", "-t", f"={session}", capture_output=True).returncode == 0
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def kill(session: str) -> int:
+    """Kill the session and wait for its processes to exit: tmux only delivers SIGHUP, and a Temporal server still
+    closing its SQLite database when `up` starts the next one makes that one fail with `database is locked`."""
     if not is_running(session):
         print(f"{session}: not running")
         return 0
+    panes = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}", capture_output=True).stdout
+    groups = [int(pid) for pid in panes.split() if pid.isdigit()]  # each pane's command leads its process group
     rc = _tmux("kill-session", "-t", f"={session}").returncode
     if rc == 0:
+        for _ in range(300):
+            if not any(_group_alive(pgid) for pgid in groups):
+                break
+            time.sleep(0.1)
+        else:
+            print(f"{session}: still exiting after 30 s", file=sys.stderr)
         print(f"{session}: stopped")
     return rc
 
@@ -274,6 +292,10 @@ class Temporal:
             return
         if not self.managed:
             sys.exit(f"temporal: unreachable at {self.address} (temporal.managed is false; see your cluster)")
+        try:
+            require_local_dir(self.state)  # temporal.db is SQLite: its locks do not work on a network filesystem
+        except RuntimeError as error:
+            sys.exit(f"temporal: {error} (temporal.state_dir)")
         self.log.parent.mkdir(parents=True, exist_ok=True)
         server = shell(self.cli(), "server", "start-dev", "--db-filename", self.state / "temporal.db")
         new_session(self.SESSION, "temporal", f"{server} 2>&1 | tee -a {shell(self.log)}")
