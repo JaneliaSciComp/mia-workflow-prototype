@@ -526,15 +526,17 @@ async def test_stage_report_not_ok_fails_dataset_without_registering(env):
     assert "no weighting group reached" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
 
 
-async def test_job_exit_failure_fails_dataset(env):
+async def test_job_exit_failure_fails_dataset_with_the_reports_errors(env):
     only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
-    m = Mocks(plan=only, states={"stage-u937": ("EXIT", 1)})
+    report = StageResult(False, 0, ["host 'zenodo.org' is not allowed (requests: https://zenodo.org/a.zip)"])
+    m = Mocks(plan=only, states={"stage-u937": ("EXIT", 1)}, stage={"u937": report})
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "needs-human")
         state = await h.query(MiaBuffer.status)
-    assert dataset(state, "u937").status == "failed" and "exit" in dataset(state, "u937").reason.lower()
-    assert not m.of("read_stage")
+    reason = dataset(state, "u937").reason
+    assert dataset(state, "u937").status == "failed" and "exited with code 1" in reason and "zenodo.org" in reason
+    assert len(m.of("read_stage")) == 1 and not m.of("register_dataset")
 
 
 async def test_drop_with_missing_files_keeps_waiting(env):

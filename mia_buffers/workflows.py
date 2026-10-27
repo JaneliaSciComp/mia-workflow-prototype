@@ -882,9 +882,13 @@ class MiaBuffer:
             )
             if job.state not in ("DONE", "EXIT"):
                 return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
-            if job.state == "EXIT" and job.exit_code not in (0, None):
-                return await self._fail(dataset, f"stage job {job.job_id} exited with code {job.exit_code}")
+            exited = job.state == "EXIT" and job.exit_code not in (0, None)
+            why = f"stage job {job.job_id} exited with code {job.exit_code}"
+            if exited and not workflow.patched("stage-errors"):
+                return await self._fail(dataset, why)
             staged = await self._act("read_stage", round_id, record, *rebuild, seconds=300, result_type=StageResult)
+            if exited:  # stage-errors: the harness exits 1 with its reasons in stage.json; the comment says them
+                return await self._fail(dataset, f"{why}: {'; '.join(staged.errors) or 'no errors in stage.json'}")
         await self._register(dataset, staged, "")
 
     async def _reuse(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, reused: str) -> None:
