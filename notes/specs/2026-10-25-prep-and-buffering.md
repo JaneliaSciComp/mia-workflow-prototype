@@ -1,6 +1,8 @@
 # MIA: data preparation and buffering as two pipelines around one registry — Spec
 
-**Status:** draft v0.2 · 2026-10-25 · architecture, not yet approved. v0.2 takes the architecture review of
+**Status:** draft v0.3 · 2026-10-27 · milestones A–F built on branch `training-buffers`. v0.3 is the amendment in
+§12: the data pipeline stops judging eligibility (no `ineligible` state, no size or licence verdict; §1.14), after
+the first live preparation request declared a dataset unusable for everyone by one consumer's patch size. v0.2 took the architecture review of
 `ae37969` (`mia-client-test/notes/2026-10-25-training-buffers-architecture-review.md`): immutable staged
 artifacts (§1.10, §5.2), the service's state on host-local disk (§1.11, §3), a worker token on mutating routes
 (§1.12, §7), "the plan decides, registration applies" (§1.13, §5.7), recipe pins in the buffer config (§5.7), a
@@ -142,6 +144,14 @@ The architecture review of 2026-10-25 added four calls that are cheap now and ex
     `splits.seed`. From now on the plan row carries the split policy and registration consumes rows, never the
     spec; the buffer config carries the recipe pin (tensorizer, params, harness commit, environment digest) and
     the client checks its checkout against it (§5.7).
+14. **Eligibility is the consumer's decision; the data pipeline has none.** (v0.3, §12.) mia-data answers one
+    question per record: can the snippets read it, and does the reading look right to a human. Whether a dataset
+    is *usable* depends on who asks: licence, modality, organism, annotations, voxel size and fit at a patch and
+    levels are all fields of a buffer spec, and the planner already evaluates every one of them per spec, at plan
+    time. Until now mia-data also stamped `data:ineligible` on a dataset whose raw arrays were under 256 pixels or
+    whose licence was not in a configured list: a verdict with no spec behind it, written once, for every buffer
+    that will ever ask. Two buffers with different patch sizes cannot share a dataset row that carries one
+    buffer's size verdict. The state goes away; the only stops in data preparation are `needs-human` ones.
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -175,7 +185,7 @@ other way round.
 |---|---|---|---|---|
 | `catalogs` | `ref` | a synced catalog commit: `synced_at`, record count | `mia-buffers catalog sync` | the catalog mirror |
 | `records` | `(ref, id)` | the planner's `Facts` for the record as JSON (what `specmap.facts` returns: dims, modality, family, organism, licence, annotations, arrays with shapes and dtypes, voxel size, bytes, download method, hosts, DOI) plus `path` and `title` | `catalog sync` | the catalog at `ref` |
-| `datasets` | `id` | preparation state: `state` (`unprepared` is the absence of a row · `in-progress` · `prepared` · `ineligible` · `needs-human`), `data_stage` (mia-data's `data:<stage>`), `issue`, `folder`, `binding_hash`, `binding_commit` (snippets commit), `published_at`, `crops` (count), `evaluation` (JSON, §4.3, null until evaluated), `updated_at` | mia-data's `set_stage` and `publish_crops` activities (best effort), `mia-buffers datasets sync` | `storage_root/<folder>/{binding.yaml, manifest.json, evaluation.yaml}` and the datasets repo's labels |
+| `datasets` | `id` | preparation state: `state` (`unprepared` is the absence of a row · `in-progress` · `prepared` · `needs-human`; `ineligible` existed until v0.3, §12), `data_stage` (mia-data's `data:<stage>`), `issue`, `folder`, `binding_hash`, `binding_commit` (snippets commit), `published_at`, `crops` (count), `evaluation` (JSON, §4.3, null until evaluated), `updated_at` | mia-data's `set_stage` and `publish_crops` activities (best effort), `mia-buffers datasets sync` | `storage_root/<folder>/{binding.yaml, manifest.json, evaluation.yaml}` and the datasets repo's labels |
 | `assets` | `(kind, key)` | `raw`: key = record → files from `files.json`; `staged`: key = **artifact id** (§1.10) → `record`, `levels_key`, `path`, `binding_hash`, `harness_commit`, `env_digest`, `voxel_size_nm`, stage facts; both: `state` (`fetching` · `staging` · `waiting-drop` · `ready` · `partial` · `missing` · `evicted`), `bytes`, `job` (csub job id while a job builds it), `last_used`, `scanned_at` | the workers after every job that touched the cache; the keeper's scan | the roots: `files.json`, `stage.json` (which records the artifact's inputs), directory sizes |
 | `refs` | `(buffer, kind, key)` | as now, keyed by artifact id for `staged`; written with the volume in one transaction; removed on retire | the buffers worker | the ledger's volumes |
 | `buffer_datasets` | `(buffer, record)` | the per-dataset status the workflow holds today (`pending` · `fetching` · `waiting-drop` · `staging` · `servable` · `failed` · `skipped`), `reason`, `job`, `updated_at` | the buffers worker on every change | the workflow's `status` query |
@@ -242,8 +252,8 @@ mia-data's round is unchanged in shape: seed, `data:go`, match agent, smoke, tes
 ### 4.1 The registry hears every stage
 
 `set_stage` and `publish_crops` call `PUT /datasets/<record>` (best effort, §3). Publication sends `prepared`
-with the binding hash, the snippets commit, the folder, the crop count and `published_at`; `ineligible` and
-`needs-human` send their state; the in-between stages send `in-progress` with `data_stage`. The record id is
+with the binding hash, the snippets commit, the folder, the crop count and `published_at`; `needs-human` sends
+its state; the in-between stages send `in-progress` with `data_stage` (`ineligible` was a third state until v0.3, §12). The record id is
 the trusted one from the issue marker, never from the record body. mia-data therefore reads `service.url` and
 `service.token_file` from the shared configuration (§8) and uses the registry client in `mia_core/registry.py`
 (§8), as mia-buffers does.
@@ -302,7 +312,7 @@ records: [<id>, <id>, …]                  # or the same `select` block a buffe
 
 A small workflow `MiaPrep` (same poller, same label discipline) runs `nudge_dataset` for every record, as the
 buffer workflow does today, posts one comment listing what it did (issue opened, `data:go` added, already in
-progress, already prepared, ineligible), moves the issue to `prep:requested`, and closes with `prep:done` when the
+progress, already prepared), moves the issue to `prep:requested`, and closes with `prep:done` when the
 registry shows every record out of `in-progress`, or `prep:needs-human` naming the rest after
 `sourcing.dataset_timeout_days`. The page composes this issue from the explorer's current filter ("Request
 preparation for the N unprepared records that pass this spec"). The existing `nudge_dataset`,
@@ -653,6 +663,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 | E | `MiaPrep` and the `prep:go` issue; the poller's binding watch removed | a preparation request for an unprepared record opens its dataset issue, adds `data:go`, and the registry shows `in-progress` then `prepared` |
 | F | the page: datasets with YAML and issue links, buffers, cache, preparation views | the lead composes a 2D gray buffer on the page, opens the issue from it, and follows it to `ready` without opening the issue again |
 | G | evaluation step | its own spec and plan; the row schema in §4.3 is the contract |
+| H | eligibility leaves the data pipeline (§12): no `ineligible` state, no size or licence verdict, crops capped by the image, the harness's crop size a parameter | issue 213 (60×59 yeast traps) reaches `data:review` with whole-image test crops and, approved, `prepared`; `POST /plan` with the 2D gray spec lists it under the footprint reason while a 32-pixel-patch spec admits it; `GET /datasets` knows no `ineligible`; `mia-data init-labels` creates neither `data:ineligible`, `maybe-small` nor `licence-excluded`; the replay fixtures pass unchanged |
 
 **Built in C (2026-10-26).** Deviations from this spec and rulings made during the build:
 
@@ -733,7 +744,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
   catalog snapshot at `catalog.ref`, not the registry (selection only: no fit, no weights); the spec adds
   `timeout_days` (default 14). At most 200 records per request (a `# ponytail:`; split a larger one).
 - Progress is read from the registry (`GET /datasets`) on a backoff, `poll_minutes` doubling to 30 minutes; a record
-  settles when `prepared`, `ineligible` or `needs-human`. `prep:done` needs all settled and none `needs-human`;
+  settles when `prepared`, `ineligible` or `needs-human` (v0.3 drops `ineligible`, §12). `prep:done` needs all settled and none `needs-human`;
   `prep:needs-human` is reported when the request settles or times out, not when a record turns `needs-human`.
 - A failed nudge (outcome `unknown`, the error as its note) and a `done-unpublished` record settle as `needs-human`
   at once and the rest are still followed; a failed outcomes comment is logged and the request goes on.
@@ -791,3 +802,57 @@ Milestones A, B and C are independent of each other; D needs B and C; E needs B;
   pool or `not prepared`); weight share and the heaviest list use the prepared pool, the only rows the plan weighs.
 - No browser test in CI: the route-coverage test, the service tests and an operator run cover the page.
 - Restart buffer-api before the worker (`max_empty_fraction` on the strict `BufferConfig`).
+- Fixed 2026-10-27 (`5918aed`): `mia up` allowed `service.url`'s host only to the buffers worker's sandbox, so every
+  registry write of a mia-data round went to the sandbox proxy and was dropped; no dataset row had ever been
+  written by a round, and a preparation request could not see its records settle. Every worker whose
+  configuration names the service is allowed its host now.
+
+## 12. Amendment v0.3: eligibility leaves the data pipeline
+
+**What happened.** The first live preparation request (mia-buffers#3, 2026-10-27) named four records. One,
+`zenodo-5553771-detecdiv-yeast-trap-segmentation`, holds 60×59-pixel traps. Its catalog record said so, the seed
+labelled the issue `maybe-small`, and the match agent still ran, the harness's smoke step declared the data
+ineligible because no raw reached 256×256, and the round ended `data:ineligible` (mia-workflow-data#213). That
+256 is the harness's `CROP` constant and mia-data's `crops.size`, both left from the crops proof of concept, when
+mia-data's product was 256-pixel published crops. The product has since become a binding plus a human-reviewed
+reading of the data; the pyramids a buffer trains on are built by the buffer, at its own levels and patch, and the
+planner's fit rule (training-buffers §1: `patch × max(levels)` against the record's extents) already decides per
+spec whether a dataset serves a buffer. The data pipeline was taking a consumer's decision with a stale constant,
+and taking it once for everyone: a buffer with a 32-pixel patch would have found the yeast traps already
+condemned. The seed's licence check (`crops.licences`, `licence-excluded`, `data:ineligible` at seed time) is the
+same shape: `select.where.license` is a required field of every buffer spec, so the planner decides licence per
+spec too, and mia-data neither serves nor redistributes anything.
+
+**The rule.** Data preparation decides whether a record can be read and whether the reading looks right; it
+decides nothing about who may use it. Its outcomes are `prepared` and `needs-human` (and `in-progress` on the
+way). Every usability criterion lives in a buffer spec and is evaluated by the planner, per spec, at plan time;
+a record a plan rejects is never asked for. A preparation request prepares the records it names without judging
+them, because the spec that will use them is not its business. What the page shows per record is the planner's
+reason for the spec on screen ("footprint 256×256 exceeds 60×59"), which is where that verdict belongs.
+
+**Changes.**
+
+| where | change |
+|---|---|
+| mia-snippets harness | `CROP` becomes a `--size` option of `smoke` and `run` (default 256) and the crop edge of one raw is `min(size, Y, X)`: a raw smaller than the size yields whole-image crops, and `capacity`, the overlap rule and the `crop.json` box use that edge. `smoke.json` loses `eligible` (it keeps `shapes`); nothing in the harness refuses a raw for its size. The `api.py` comment citing a "SPEC §4.1" that does not exist goes; SPEC §6 says "one patch of `--size`, capped by the image" |
+| mia-data prompt `match.md` | outcomes `matched`, `needs_snippet`, `blocked`; the `ineligible` outcome and its "no raw array has Y ≥ 256 and X ≥ 256" clause are removed |
+| mia-data `workflows.py` | the eligibility-mismatch check and the `ineligible` finish go; the crop steps pass `crops.size` as `--size`. No `patched()` marker: both branches issued no command on the live histories (every running round passed smoke as eligible), and the crop size is an activity-side job argument; the replay fixtures must pass unchanged, which the build verifies before it ships |
+| mia-data `models.py` | `SmokeResult.eligible` stays with default `True` and `MatchResult.shapes` stays with default `None` (wire format); nothing reads them |
+| mia-data `seed.py`, `config.py` | labels at seed: `data:new`, `modality:<family>`, `has-labels`. `maybe-small`, `licence-excluded` and `crops.licences` are removed; `data:ineligible` leaves the stage-label table and `init-labels`. `dataset_fields` maps stages to `prepared`, `needs-human` or `in-progress` only |
+| registry `api.py`, `ledger.py` | `DATASET_STATES = ("in-progress", "prepared", "needs-human")`; a `PUT` with `ineligible` is `422` |
+| mia-buffers `workflows.py`, `activities.py` | `MiaPrep` settles a record on `prepared` or `needs-human`. `nudge_dataset` treats a `data:ineligible` issue as `new` (adds `data:go`) during the migration and the `"ineligible"` outcome goes. The pre-E `waiting-dataset` path of `MiaBuffer`, with its two drop-on-ineligible branches, is deleted: no pre-E history is live (verify with a `list_workflows` over running `MiaBuffer` runs before deleting; a live one is terminated and re-planned, as the E ruling already says) |
+| page | the "ineligible" count on the Unprepared tile goes; the per-record fit reason, already shown, is the only size verdict on the page |
+| docs | `development.md`: the dataset states, the rule above under "Rules that are not obvious from the code", and the harness's `--size` |
+
+**Migration.** The registry holds no `ineligible` row (none was ever written, see the F note above). The
+datasets repo has 11 open `data:ineligible` issues (10 by licence, 1 by size) and `maybe-small` on 10 others:
+after the deploy, delete the three labels from the repo by hand (`gh label delete` strips them from every issue);
+an issue left without a `data:` label is `new` to the nudge and to the poller, and the next preparation request
+that names it adds `data:go`. mia-workflow-data#213 gets `data:go` by hand as the acceptance run.
+
+**Not changed.** `crops.size` stays the review crop's preferred edge: a human still needs something to look at,
+and 256 is a fine default when the image allows it. `has-labels` stays as information. The planner's fit rule,
+`select.where.license` and the page's funnel are untouched; this amendment removes a duplicate of them, it adds
+nothing to them. Whether mia-data should refuse records on any ground other than "cannot read it" or "a human
+must decide" is answered **no**; if a policy stop is ever wanted (an embargoed source, say), it is a new, named
+state with its own spec paragraph, not `ineligible`.
