@@ -72,6 +72,9 @@ class FakeGH:
     async def issue_comments(self, n):
         return self.comments.get(n, [])
 
+    async def permission(self, login):
+        return getattr(self, "permissions", {}).get(login, "none")
+
     async def comment(self, n, body, login="bot"):
         cs = self.comments.setdefault(n, [])
         cs.append(

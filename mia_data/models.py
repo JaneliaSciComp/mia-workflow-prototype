@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class LabelEvent:
-    """A human adding `data:go` or `data:approve` to a dataset issue, delivered to the workflow as a signal."""
+    """A human adding `data:go`, `data:approve` or `data:reject` to a dataset issue, delivered as a signal."""
 
-    kind: str  # go | approve
+    kind: str  # go | approve | reject
     event_id: str
     actor: str
     at: str  # ISO-8601 from GitHub
@@ -65,6 +65,7 @@ class Test:
     tree_sha: str | None = None
     crop_workspace: str | None = None  # the round's set (spec §13): where its crops and verify report are
     verify_workspace: str | None = None
+    approved_at: str | None = None  # the `data:approve` event's time, once a reviewer approved this set (spec §14)
 
 
 @dataclass

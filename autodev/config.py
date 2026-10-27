@@ -56,11 +56,8 @@ class GitHubCfg(BaseModel):
     api_url: str = "https://api.github.com"
     git_url: str | None = None  # default https://github.com/<repo>.git; tests use a local path
     protected_paths: list[str] = [".github/"]
-    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label counts without a permission lookup
+    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label, `/approve` and `/revise` count (see review.py)
     required_checks: list[str] = []  # status contexts / check-run names that must be present and green before merge
-    auto_merge: bool = (
-        False  # merge without a human approval once every required check is green (needs required_checks)
-    )
 
 
 class PathsCfg(BaseModel):
@@ -149,8 +146,6 @@ class Config(BaseModel):
         if bad := [slug for slug in slugs if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", slug)]:
             raise ValueError(f"github.trusted_bots: {bad} must be GitHub App slugs")
         github.trusted_bots = [f"{slug}[bot]" for slug in slugs]
-        if github.auto_merge and not github.required_checks:
-            raise ValueError("github.auto_merge needs github.required_checks: the checks are the only gate then")
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())

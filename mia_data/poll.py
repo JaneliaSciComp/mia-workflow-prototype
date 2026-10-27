@@ -2,7 +2,8 @@
 
 Three jobs, each done per item so one bad issue or PR never skips the rest (the next poll retries it):
 
-- deliver a `data:go` / `data:approve` label on a dataset issue as a signal, starting the dataset workflow if needed;
+- deliver a `data:go` / `data:approve` / `data:reject` label on a dataset issue as a signal, starting the dataset
+  workflow if needed;
 - wake the dataset workflow whose snippet PR changed (head, state, merge, needs-human);
 - pass the `mia-data/crops` status on snippet PRs that add no snippet, so it never blocks them.
 

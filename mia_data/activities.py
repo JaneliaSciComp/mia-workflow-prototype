@@ -27,6 +27,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
+from autodev.review import WRITE_PERMISSIONS
 from mia_core.assets import raw_asset
 from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, best_effort
@@ -788,13 +789,37 @@ class Activities:
 
     # --- snippet development -----------------------------------------------------------------
 
+    @activity.defn(name="read_feedback")
+    @mia_permanent_errors
+    async def read_feedback(self, issue: int, since: str | None, until: str) -> str:
+        """The reviewer's comments on the data issue after `since` (the set's report) and up to `until` (the
+        reject), by people with write access, the bot's own left out: what goes to the agent fixing the snippet
+        (spec §14). Neutralized and capped; "(no details)" when there are none."""
+        comments, permission = [], {}
+        for comment in await self.gh_data.issue_comments(issue):
+            login, at = (comment.get("user") or {}).get("login"), comment.get("created_at") or ""
+            if not login or login == self.bot or not ((since or "") < at <= until):
+                continue
+            if login not in permission:
+                permission[login] = await self.gh_data.permission(login)
+            if permission[login] in WRITE_PERMISSIONS:
+                comments.append(f"{login} wrote:\n{_text(comment.get('body'), 8000)}")
+        return self._clean("\n\n".join(comments))[:16000] or "(no details)"
+
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
-    async def open_snippet_issue(self, issue: int, round_id: str, draft: dict, snippet_issue: int | None = None) -> int:
+    async def open_snippet_issue(
+        self, issue: int, round_id: str, draft: dict, snippet_issue: int | None = None, binding: str | None = None
+    ) -> int:
         """Open the mia-snippets issue asking autodev for a new snippet, or find it again: the one the workflow
         remembers as `snippet_issue` from an earlier round, while it is still open, else by this round's
-        first-line marker on a retry. Returns the issue number."""
+        first-line marker on a retry. Returns the issue number.
+
+        With `binding` (one of this round's, from state_dir), the request is to supersede the snippets that
+        binding names: a reviewer rejected its crops and `draft["what_fails"]` is their comments (spec §14)."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
+        if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
+            raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
@@ -826,13 +851,39 @@ class Activities:
             {key: record.get(key) for key in ("title", "imaging", "data", "technical")}, sort_keys=False
         )
         draft = draft or {}
-        body = "\n\n".join(
-            [
+        data_link = f"[{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue})"
+        spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
+        if binding:  # a reviewer rejected this binding's crops: supersede its snippets
+            bound = yaml.safe_load(Path(binding).read_text()) or {}
+            names = sorted(
+                {
+                    array["snippet"]
+                    for section in ("raw", "labels")
+                    for array in bound.get(section) or []
+                    if isinstance(array, dict) and isinstance(array.get("snippet"), str)
+                }
+            )
+            listed = ", ".join(f"`{name}`" for name in names) or "(none named)"
+            parts = [
                 marker,
-                f"For [{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue}): "
-                f"dataset `{pins.record}` has no snippet that reads it.",
-                f"Read [SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md) first, and add the "
-                f"binding you test as `examples/{pins.record}.yaml`.",
+                f"For {data_link}: dataset `{pins.record}` is read by {listed}, but a reviewer rejected the crops "
+                "made with this binding.",
+                "**The reviewer's comments:**",
+                _fenced(self._clean(_text(draft.get("what_fails"), 16000))),
+                f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
+                f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
+                f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
+                _fenced(self._clean(excerpt[:8000]), "yaml"),
+                "**The rejected binding:**",
+                _fenced(self._clean(yaml.safe_dump(bound, sort_keys=False)[:16000]), "yaml"),
+            ]
+            title = f"Fix the crops of {self._clean(pins.record)}: supersede {self._clean(', '.join(names))}"
+        else:
+            parts = [
+                marker,
+                f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
+                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
                 "**What fails** (the match agent's report):",
@@ -842,9 +893,8 @@ class Activities:
                 "**Draft binding:**",
                 _fenced(self._clean(yaml.safe_dump(draft.get("draft_binding"), sort_keys=False)[:16000]), "yaml"),
             ]
-        )
-        title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
-        return (await gh.create_issue(title, body, ["snippets:go"]))["number"]
+            title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
+        return (await gh.create_issue(title, "\n\n".join(parts), ["snippets:go"]))["number"]
 
     @activity.defn(name="pr_state")
     @mia_permanent_errors

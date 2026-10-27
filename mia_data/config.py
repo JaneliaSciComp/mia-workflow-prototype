@@ -34,14 +34,18 @@ STAGES = {
     "matching": ("fbca04", "mia-data: matching the dataset to a snippet"),
     "developing": ("fbca04", "mia-data: agent writing a snippet"),
     "testing": ("fbca04", "mia-data: making the crops to review"),
-    "pr-ready": ("1d76db", "mia-data: snippet PR ready for review"),
     "review": ("1d76db", "mia-data: waiting for review"),
+    "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
 }
 HUMAN_LABELS = {  # set by humans
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
-    "approve": ("0e8a16", "Approve the test crops; produce the full set"),
+    "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
+    "reject": (
+        "d93f0b",
+        "Reject the crops under review: your comments since the review go to the agent fixing the snippet",
+    ),
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),

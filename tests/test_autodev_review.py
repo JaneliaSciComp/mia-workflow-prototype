@@ -162,3 +162,24 @@ async def test_check_state_reads_both_apis(gh):
     )
     respx.get(f"{API}{R}/commits/{HEAD}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
     assert await gh.check_state(HEAD) == "success"
+
+
+def test_a_trusted_bot_commands_only_from_the_first_line():
+    """The mia-data worker (same App login as the bot) posts `/approve` and `/revise` for the data issue's
+    reviewer; its other comments quote agent text, so a command further down a comment never counts."""
+    trusted = Reviewers(W, "bot", False, MP, frozenset({"worker[bot]"}))
+    assert ok([], [cm(1, "worker[bot]", f"/approve {HEAD}\n\nmia-data: the crops were approved")], bot="bot") is False
+    assert approved(HEAD, [], [cm(1, "worker[bot]", f"/approve {HEAD}\n\nmia-data")], trusted, None)
+    assert not approved(HEAD, [], [cm(1, "worker[bot]", f"Test crops at x:\n/approve {HEAD}")], trusted, None)
+    assert not approved(HEAD, [], [cm(1, "stranger[bot]", f"/approve {HEAD}")], trusted, None)
+    fb = feedback(
+        [],
+        [],
+        [
+            cm(2, "worker[bot]", "/revise the masks are shifted by one pixel"),
+            cm(3, "worker[bot]", "report\n/revise no"),
+        ],
+        trusted,
+    )
+    assert [item.text for item in fb] == ["the masks are shifted by one pixel"]
+    assert feedback([], [], [cm(4, "alice", "intro\n/revise yes")], trusted)[0].text == "yes"  # humans: any line

@@ -152,4 +152,6 @@ names what is missing); P4 see the plan.
    dataset issues from the catalog.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Labels on a dataset issue: `data:go` starts a run; `data:approve` approves the snippet PR / crops for publish.
+6. Labels on a dataset issue: `data:go` starts a run; `data:approve` publishes the crops under review (and merges
+   the snippet PR that made them); `data:reject`, with your comments on the issue, sends them to the agent fixing
+   the snippet and the next crops come back for review.

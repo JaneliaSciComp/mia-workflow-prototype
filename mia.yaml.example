@@ -72,8 +72,7 @@ services:                                 # per service: app + the sections that
       base_branch: main
       protected_paths: [".github/"]
       # required_checks: ["mia-data/crops"]   # status contexts / check-run names that must be present and green
-      # auto_merge: false                     # true: merge once the required checks are green, no human approval
-      # trusted_bots: [some-app]              # GitHub App slugs whose `go` label starts work (no permission lookup)
+      # trusted_bots: [some-app]              # GitHub App slugs whose `go`, `/approve` and `/revise` count
     agent:
       model: sonnet
       walltime_min: 60                    # <= 60 lands in the short queue
@@ -102,7 +101,7 @@ services:                                 # per service: app + the sections that
     crops:
       size: 256
       per_round: 16                       # the round's set: reviewed and, approved, published (one set per round)
-      test_per_round: 4                   # a snippet PR head's test crops; never published
+      test_per_round: 4                   # crops of the hand-run `test-pr` command only; a round makes per_round
       per_plane: 4
       per_file: 8
     gallery: {branch: galleries}

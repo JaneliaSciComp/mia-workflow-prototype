@@ -14,6 +14,7 @@ flowchart TD
         issue["dataset issue<br/>data:new"]
         go{{"human adds data:go"}}
         approve{{"human adds data:approve"}}
+        reject{{"human comments, adds data:reject"}}
         gallery[("galleries branch<br/>the round's PNGs")]
     end
 
@@ -33,19 +34,22 @@ flowchart TD
     tcrop -->|at least half verified, shown in the issue| review["data:review"]
     tcrop --> gallery
     review --> approve
-    approve --> publish["publish those crops<br/>to paths.storage_root"]
+    review --> reject
+    approve -->|matched binding| publish["publish the reviewed crops<br/>to paths.storage_root"]
+    approve -->|snippet PR head: /approve| merge
+    reject -->|matched binding: supersede the snippet| dev
+    reject -->|snippet PR head: /revise with the comments| pr
     publish -->|data:done| done["issue comment:<br/>totals, folder links"]
 
     subgraph snippets["GitHub: mia-snippets"]
         dev["mia-snippets issue<br/>snippets:go"]
         pr["PR adding snippets/&lt;name&gt;/<br/>(autodev's Claude agent)"]
-        merge{{"human reviews + merges"}}
+        merge{{"autodev merges"}}
     end
 
     dev --> pr
-    pr -->|each new head: 4 test crops, private cache| tcrop
-    pr --> merge
-    merge -->|tree matches the tested head| tcrop
+    pr -->|each new head: the round's 16 crops, private cache| tcrop
+    merge -->|tree matches the approved head| publish
 ```
 
 ## Overview
@@ -115,13 +119,17 @@ no writable cache and takes no lock.
 When the agent answers `needs_snippet`, the worker opens an issue in mia-snippets labelled `snippets:go`, with
 the draft binding and what failed. A second autodev deployment, `snippets`, turns that issue into a PR adding
 `snippets/<name>/` and an example binding. The data issue sits in `data:developing` and wakes up whenever the
-PR changes. Every new PR head gets test crops (step 5) and a required `mia-data/crops` commit status on that
-exact commit. A human reviews and merges the PR; after the merge, a tree-hash comparison confirms the merged
-snippet is the one that was tested, or the merge commit is tested again. If the round ends in `data:needs-human`
-while the PR is still open (a lost job, a failed status write), a new `data:go` resumes that PR: the current head
-is tested again under a new round, and no second snippets issue is opened. A PR closed or merged by then means a
-new match. Components: autodev (its own namespace; the two workflows interact only through GitHub), mia-snippets
-CI, the GitHub client.
+PR changes. Every new PR head gets the round's crops (step 5), made by an untrusted job with a private cache, and
+a required `mia-data/crops` commit status on that exact commit. A head whose crops pass goes to `data:review`
+like a matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it.
+Nobody merges the PR by hand: `data:approve` on the data issue makes the worker post `/approve <head>` on the
+PR (stage `data:merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved
+crops are published; otherwise the merge commit gets its own crops, reviewed again. If the round ends in
+`data:needs-human` while the PR is still open (a lost job, a failed status write), a new `data:go` resumes that
+PR: the current head is tested again under a new round, and no second snippets issue is opened. A PR closed or
+merged by then means a new match. Components: autodev (its own namespace; the two workflows interact only
+through GitHub, and autodev takes `/approve` and `/revise` from the worker because its login is in
+`github.trusted_bots`), mia-snippets CI, the GitHub client.
 
 ### 5. Crops, review and publication
 
@@ -136,10 +144,14 @@ published. The passing crops' `raw.png` and `overlay.png` are committed to the `
 mia-workflow-data, and a comment on the issue shows them inline with the binding and the agent's reasons. The
 issue moves to `data:review`.
 
-**Validation.** A human approves the set with `data:approve` on the data issue (for a new snippet the PR review
-is the approval, and the set made at the merge commit is published without a second review). A `data:approve`
-counts only while the issue is in review and only if it is newer than the round's crops. The gate is one event;
-when the evaluation step exists, a VLM's `ok` verdict can stand in for the label.
+**Validation.** A human approves the set with `data:approve` on the data issue, or rejects it with `data:reject`
+after saying what is wrong in plain comments. On a reject the worker collects the comments by people with write
+access posted after the set's report and before the reject, and sends them to the agent: as `/revise` on the
+snippet PR when the round is following one, else in a new mia-snippets issue asking autodev to supersede the
+binding's snippet (a merged snippet is never edited). The next crops come back to `data:review`; the loop runs
+until an approve. Either label counts only while the issue is in review and only if it is newer than the
+round's crops. The gate is one event; when the evaluation step exists, a VLM's `ok` verdict can stand in for
+the label.
 
 **Publication.** The approve publishes the very crops that were reviewed: the worker reads the round's verify
 report back from its workspaces and copies every crop that passed into `paths.storage_root/<dataset>/<crop_id>/`
@@ -150,13 +162,14 @@ later starts another round and adds more crops. There is no production phase and
 history from before this change replays the old path behind the `one-crop-set` marker.
 
 The trusted crop job holds the record's raw lock as in step 3, owner `mia-data <round> crop`, from before the
-crop job until its verify report is read, and puts the `raw` asset row afterwards; a PR head's test crops
-(`crops.test_per_round`, 4) mount the cache read-only and take no lock.
+crop job until its verify report is read, and puts the `raw` asset row afterwards; a PR head's crop job mounts
+the cache read-only, writes a private one and takes no lock.
 
 ## How the issue reads
 
 Every stage change posts a new comment, never an edit: the stage, what it produced, and the folders to look at.
-Labels show the current stage, exactly one `data:*` at a time, set only by the worker. Anything the system
+Labels show the current stage, exactly one `data:*` at a time, set only by the worker; `data:go`, `data:approve`
+and `data:reject` are yours, and the poller removes them once delivered. Anything the system
 cannot handle ends in `data:needs-human` with a comment saying why and what to change; a `data:go` afterwards
 retries from the start with a new seed, or, when the round was following a snippet PR that is still open, picks
 that PR up again.
@@ -173,8 +186,8 @@ prepared rows from `storage_root` when the service missed a write.
 Agents never hold GitHub credentials or reach GitHub; the worker does every GitHub write. Each job asks csub
 only for the hosts in its binding, and the broker's policy is the ceiling: a host missing from the policy fails
 the round before submission, with a comment naming it. Unreviewed snippet code from a PR head runs only inside
-job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs human
-approval of the exact head plus the required statuses; publishing a matched binding needs `data:approve`.
+job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs a human's
+`data:approve` of the crops its exact head made, plus the required status; so does publishing them.
 Details: spec §9.
 
 ## Operating it

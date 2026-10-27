@@ -60,7 +60,7 @@ class Mocks:
         outcome="matched",
         smoke=None,
         states=None,
-        test_ok=4,
+        test_ok=16,
         set_ok=16,
         n_effective=16,
         await_failures=0,
@@ -168,16 +168,16 @@ class Mocks:
         async def read_verify(ws: str, crop_ws: str | None = None, record: str | None = None) -> VerifyResult:
             rec("read_verify", ws, crop_ws, *([record] if record else []))
             job = self.crop_jobs.get(crop_ws or "")
-            the_set = bool(job and job.trusted)  # the dataset's own set (16); a PR head's test crops (4)
+            trusted = bool(job and job.trusted)  # a matched binding's or the merge commit's set; else a PR head's
             by_sha = next((v for s, v in self.test_ok_by.items() if s in ws), None)  # by tested SHA
-            k = by_sha if by_sha is not None else (self.set_ok if the_set else self.test_ok)
-            n = job.n_crops if job else (16 if the_set else 4)
+            k = by_sha if by_sha is not None else (self.set_ok if trusted else self.test_ok)
+            n = job.n_crops if job else 16
             return VerifyResult(
                 k,
                 n,
                 [] if k == n else ["c9: overlaps c1"],
                 [{"crop_id": f"c{i}", "files": {}} for i in range(k)],
-                self.n_effective if the_set else 4,
+                self.n_effective if trusted else n,
                 bytes_fetched=1234,
             )
 
@@ -196,9 +196,16 @@ class Mocks:
             return {"published": [c["crop_id"] for c in verified], "already": [], "total": len(verified)}
 
         @activity.defn(name="open_snippet_issue")
-        async def open_snippet_issue(issue: int, round_id: str, draft: dict, snippet_issue: int | None = None) -> int:
-            rec("open_snippet_issue", round_id, snippet_issue)
+        async def open_snippet_issue(
+            issue: int, round_id: str, draft: dict, snippet_issue: int | None = None, binding: str | None = None
+        ) -> int:
+            rec("open_snippet_issue", round_id, snippet_issue, *([binding, draft] if binding else []))
             return 100
+
+        @activity.defn(name="read_feedback")
+        async def read_feedback(issue: int, since: str | None, until: str) -> str:
+            rec("read_feedback", issue, since, until)
+            return "alice wrote:\nthe masks are shifted by one pixel"
 
         @activity.defn(name="pr_state")
         async def pr_state(pr: int) -> PrUpdate:
@@ -236,6 +243,7 @@ class Mocks:
             publish_gallery,
             publish_crops,
             open_snippet_issue,
+            read_feedback,
             pr_state,
             set_crop_status,
             tree_sha,
@@ -282,8 +290,10 @@ async def idle(h, m, stage):
     """Wait until set_stage(stage) ran and the workflow is blocked again (its last history event is a completed
     workflow task, not a scheduled activity), so the next signal finds it waiting rather than busy."""
     await until(lambda: m.stages[-1:] == [stage])
+    trailing = {EventType.EVENT_TYPE_MARKER_RECORDED, EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES}
     for _ in range(500):
-        if (await h.fetch_history()).events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+        events = [e for e in (await h.fetch_history()).events if e.event_type not in trailing]  # a patch marker
+        if events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
             return
         await asyncio.sleep(0.02)
     raise AssertionError("workflow never went idle")
@@ -313,10 +323,14 @@ async def started(env, m, first=None, runner=None):
             await h.terminate()
 
 
-async def approve_review(h, m, eid="12", dt=1):
+async def approve_review(h, m, eid="12", dt=1, kind="approve"):
     await idle(h, m, "review")
     fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
-    await h.signal(MiaDataDataset.approve, ev("approve", eid, shift(fin, dt)))
+    await h.signal(getattr(MiaDataDataset, kind), ev(kind, eid, shift(fin, dt)))
+
+
+async def reject_review(h, m, eid="12", dt=1):
+    await approve_review(h, m, eid, dt, kind="reject")
 
 
 async def test_a_stage_write_does_not_hold_the_round(env):
@@ -590,15 +604,22 @@ async def wake(h, m, now):
     await h.signal(MiaDataDataset.pr_update, head("0" * 40))
 
 
-async def to_pr_ready(h, m):
-    """needs_snippet → snippets issue → h1 tested → pr-ready."""
+async def to_review(h, m):
+    """needs_snippet → snippets issue → h1's set made and shown → review."""
     await idle(h, m, "developing")
     await wake(h, m, head(H1))
-    await idle(h, m, "pr-ready")
+    await idle(h, m, "review")
+
+
+def pr_comments(m):
+    return [a[0] for a in m.of("comment") if a[2] == "snippets"]
 
 
 async def happy(h, m):
-    await to_pr_ready(h, m)
+    """h1's set approved → `/approve h1` → autodev merges → h1's crops are published under the merge commit."""
+    await to_review(h, m)
+    await approve_review(h, m)
+    await idle(h, m, "merging")
     await wake(h, m, head(H1, "merged", MC))
     await idle(h, m, "done")
 
@@ -608,33 +629,134 @@ async def test_develop_happy_path(env):
     async with started(env, m) as h:
         await happy(h, m)
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "pr-ready", "testing", "done"]  # the set at the merge
+    assert m.stages == ["matching", "developing", "testing", "review", "merging", "done"]
     assert statuses(m) == [(H1, "pending"), (H1, "success")]
     assert m.of("set_crop_status")[1][2] == f"https://github.com/o/snippets/issues/5#test i7-e11 {H1}"  # the PR comment
-    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no smoke: tested
-    assert [a[2] for a in m.of("take_lock")] == ["mia-data i7-e11 crop"]  # the PR head's test crops take no lock
-    test, the_set = [a for a in m.jobs() if a.n_crops]
-    assert (test.sha, test.trusted, test.n_crops, test.batch) == (H1, False, 4, 0)  # PR head: read-only dataset cache
-    assert (the_set.sha, the_set.trusted, the_set.n_crops, the_set.batch) == (MC, True, 16, 0)  # the merge: the set
-    assert m.of("adopt_pr_binding") == [(5, H1), (5, MC)]  # the merge commit's binding is pinned to the merge
-    assert m.of("prepare_job")[-1] == (f"verify-{MC}", f"/s/binding-pr-{MC[:7]}.yaml")
-    assert m.of("publish_crops")[0][2] == MC and m.of("publish_gallery")[0] == (H1, 4)
-    assert st.snippet_issue == 100 and st.pr == 5 and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
-    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T"), (MC, True, "T")]  # head test, the set
-    assert [a[2] for a in m.of("set_stage") if a[0] == "pr-ready"] == [f"**Snippet PR:** {PR_URL}\n"]
-    assert {a[2] for a in m.of("comment")} == {"snippets", "data"}
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify"]  # no smoke: tested; no second set
+    assert not m.of("take_lock")  # the PR head's crop job writes a private cache, not the record's
+    (the_set,) = [a for a in m.jobs() if a.n_crops]
+    assert (the_set.sha, the_set.trusted, the_set.n_crops, the_set.batch) == (H1, False, 16, 0)  # the dataset's set
+    assert the_set.existing  # dedups against a published manifest like any set
+    assert m.of("adopt_pr_binding") == [(5, H1), (5, MC)]  # the merge commit's binding is what is published
+    assert pr_comments(m)[-1] == f"/approve {H1}"  # autodev merges on the worker's word
+    assert m.of("publish_crops")[0] == (f"/w/i7-e11/crop-{H1}-1", 16, MC, f"/s/binding-pr-{MC[:7]}.yaml")
+    assert m.of("publish_gallery") == [(H1, 16)]
+    assert st.snippet_issue == 100 and st.pr is None and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
+    assert [(t.sha, t.ok, t.tree_sha, bool(t.approved_at)) for t in st.tests] == [(H1, True, "T", True)]
+    assert [a[2] for a in m.of("set_stage") if a[0] == "review"] == [f"**Snippet PR:** {PR_URL}\n"]
+    assert "16 crops published" in m.of("set_stage")[-1][2]
 
 
 async def test_revise_new_head_retests(env):
+    """A head whose set fails goes back to autodev as `/revise` with the report; the stage leaves review."""
     m = Mocks(outcome="needs_snippet", test_ok_by={H2: 0})
     async with started(env, m) as h:
-        await to_pr_ready(h, m)
+        await to_review(h, m)
         await wake(h, m, head(H2))
         await until(lambda: (H2, "failure") in statuses(m))
         await idle(h, m, "testing")
-    assert m.stages[-3:] == ["testing", "pr-ready", "testing"]  # h1's success does not make h2 ready
+    assert m.stages[-3:] == ["testing", "review", "testing"]  # h1's success does not make h2 ready
     assert statuses(m) == [(H1, "pending"), (H1, "success"), (H2, "pending"), (H2, "failure")]
     assert [a.sha for a in m.jobs() if a.n_crops] == [H1, H2] and "cropping" not in m.stages
+    h1_report, h2_report = pr_comments(m)
+    assert h1_report.startswith("Crops at") and h2_report.startswith(f"/revise the crops at `{H2}` failed")
+    assert "0 of 16 verified (at least 8 needed)" in h2_report
+
+
+async def test_reject_in_develop_review_sends_the_comments_to_the_pr(env):
+    """data:reject at a PR head's review: the reviewer's comments since the set's report go to the PR as
+    `/revise`; the next head's set comes back to review, and its approve merges (spec §14)."""
+    m = Mocks(outcome="needs_snippet", trees={H2: "T2", MC: "T2"})
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await reject_review(h, m, eid="12")
+        await idle(h, m, "developing")
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await wake(h, m, head(H2))
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "merging")
+        await wake(h, m, head(H2, "merged", MC))
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == [
+        "matching",
+        "developing",
+        "testing",
+        "review",
+        "developing",
+        "testing",
+        "review",
+        "merging",
+        "done",
+    ]
+    assert m.of("read_feedback") == [(7, fin, shift(fin, 1))]  # the comments between the report and the reject
+    assert pr_comments(m)[1] == "/revise alice wrote:\nthe masks are shifted by one pixel"
+    assert pr_comments(m)[-1] == f"/approve {H2}" and not m.of("refuse_label")
+    assert [(t.sha, bool(t.approved_at)) for t in st.tests] == [(H1, False), (H2, True)]
+    assert m.of("publish_crops")[0][0] == f"/w/i7-e11/crop-{H2}-1"
+
+
+async def test_reject_in_matched_review_asks_for_a_superseding_snippet(env):
+    """data:reject on a matched binding's crops: a snippets issue asks autodev to supersede the binding's
+    snippet, with the comments; the round goes on as a develop round and ends like one (spec §14)."""
+    m = Mocks(trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await reject_review(h, m)
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "merging")
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "testing", "review", "developing", "testing", "review", "merging", "done"]
+    assert m.of("open_snippet_issue") == [
+        ("i7-e11", None, "/s/binding-1.yaml", {"what_fails": "alice wrote:\nthe masks are shifted by one pixel"})
+    ]
+    assert "superseding" in m.of("set_stage")[3][1]
+    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify", "crop", "verify"]
+    assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(PINS.snippets_commit, True), (H1, False)]
+    assert m.of("publish_crops")[0][2] == MC and st.pins.snippets_commit == MC and st.snippet_issue == 100
+
+
+async def test_stale_and_misplaced_rejects_are_refused(env):
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await h.signal(MiaDataDataset.reject, ev("reject", "12"))  # not in review
+        await until(lambda: m.of("refuse_label"))
+        await wake(h, m, head(H1))
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.reject, ev("reject", "13"))  # older than the set
+        await until(lambda: len(m.of("refuse_label")) == 2)
+        await idle(h, m, "review")
+    assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("data:reject", "12"), ("data:reject", "13")]
+    assert "data:review" in m.of("refuse_label")[0][1] and "older" in m.of("refuse_label")[1][1]
+    assert not m.of("read_feedback") and m.stages[-1] == "review"
+
+
+async def test_rollover_at_a_pr_heads_review_keeps_following_the_pr(env, monkeypatch):
+    from temporalio import workflow
+
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    m.roll = False  # the rollover is due once h1's set is at review, and once
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: m.roll and workflow.info().continued_run_id is None)
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await idle(h, m, "developing")
+        m.roll = True
+        await wake(h, m, head(H1))
+        await until(lambda: m.stages[-1:] == ["review"])
+        for _ in range(500):
+            if (await h.describe()).run_id != h.first_run_id:
+                break
+            await asyncio.sleep(0.02)
+        await approve_review(h, m)
+        await idle(h, m, "merging")
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+    assert (await h.describe()).run_id != h.first_run_id
+    assert m.stages == ["matching", "developing", "testing", "review", "merging", "done"]
+    assert pr_comments(m)[-1] == f"/approve {H1}"
 
 
 async def test_stale_result_ignored(env):
@@ -648,21 +770,30 @@ async def test_stale_result_ignored(env):
         await until(lambda: (H2, "failure") in statuses(m))
         await idle(h, m, "testing")
         st = await h.query(MiaDataDataset.status)
-    assert "pr-ready" not in m.stages and [(t.sha, t.ok) for t in st.tests] == [(H1, True), (H2, False)]
+    assert "review" not in m.stages and [(t.sha, t.ok) for t in st.tests] == [(H1, True), (H2, False)]
     assert statuses(m)[-2:] == [(H2, "pending"), (H2, "failure")]  # h1's late success is h1's, not h2's
 
 
 @pytest.mark.parametrize("merge_ok", [True, False])
-async def test_merge_with_different_tree_retests_merge_commit(env, merge_ok):
+async def test_merge_with_different_tree_makes_the_merge_commits_set_for_review(env, merge_ok):
+    """The merged snippet is not the approved head's (someone pushed more): its own set, reviewed again."""
     m = Mocks(outcome="needs_snippet", trees={H1: "T1", MC: "T2"}, test_ok_by={} if merge_ok else {MC: 0})
     async with started(env, m) as h:
-        await to_pr_ready(h, m)
+        await to_review(h, m)
+        await approve_review(h, m)
+        await idle(h, m, "merging")
         await wake(h, m, head(H1, "merged", MC))
+        if merge_ok:
+            await approve_review(h, m, eid="13")
         await idle(h, m, "done" if merge_ok else "needs-human")
+        st = await h.query(MiaDataDataset.status)
     tests = [a for a in m.jobs() if a.n_crops and not a.batch]
-    assert [(a.sha, a.trusted) for a in tests] == [(H1, False), (MC, True)]  # the merge commit is reviewed code
+    assert [(a.sha, a.trusted) for a in tests] == [(H1, False), (MC, True)]  # the merge commit: a trusted job
     assert statuses(m) == [(H1, "pending"), (H1, "success")]  # no status on the merge commit
     assert bool(m.of("publish_crops")) == merge_ok and (m.stages[-1] == "done") == merge_ok
+    assert m.stages[3:6] == ["review", "merging", "testing"] and "not the reviewed head" in m.of("set_stage")[5][1]
+    if merge_ok:
+        assert m.of("publish_crops")[0][0] == f"/w/i7-e11/crop-{MC}-1" and st.tests[-1].approved_at
 
 
 async def test_head_test_that_cannot_run_posts_error(env):
@@ -702,6 +833,8 @@ async def test_revision_limit(env):
 
 
 async def test_merge_signal_before_test_finishes(env):
+    """A human merged the PR by hand while h1's set was still being made: nobody approved h1's crops, so the
+    merge commit's set is made and reviewed like a matched binding's."""
     m = Mocks(outcome="needs_snippet", gate=asyncio.Event(), gate_on=H1, trees={H1: "T", MC: "T"})
     async with started(env, m) as h:
         await idle(h, m, "developing")
@@ -709,14 +842,12 @@ async def test_merge_signal_before_test_finishes(env):
         await until(lambda: any(H1 in a[1] for a in m.of("await")))
         await wake(h, m, head(H1, "merged", MC))
         m.gate.set()
+        await approve_review(h, m)
         await idle(h, m, "done")
-    assert m.stages == ["matching", "developing", "testing", "done"]
+    assert m.stages == ["matching", "developing", "testing", "testing", "review", "done"]
     assert statuses(m) == [(H1, "pending"), (H1, "success")]
-    assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [
-        (H1, False),
-        (MC, True),
-    ]  # h1's test carried the merge
-    assert m.names().index("tree_sha") > m.names().index("read_verify")
+    assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(H1, False), (MC, True)]
+    assert m.of("publish_crops")[0][0] == f"/w/i7-e11/crop-{MC}-1"
 
 
 async def to_needs_human_in_develop(h, m):
@@ -734,20 +865,21 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
         await to_needs_human_in_develop(h, m)
         m.states = {}  # the infrastructure is fixed
         await h.signal(MiaDataDataset.go, ev("go", "12"))
-        await idle(h, m, "pr-ready")
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "merging")
         await wake(h, m, head(H1, "merged", MC))
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "pr-ready", "testing", "done"]
+    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "review", "merging", "done"]
     assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
-    assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify", "crop", "verify"]  # no second match
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify"]  # no second match
     keys = [a[0] for a in m.of("submit")]
     assert len(keys) == len(set(keys)) and keys[2].startswith("mia-7-i7-e12-crop-")  # the retest is the new round's
     assert statuses(m) == [(H1, "pending"), (H1, "error"), (H1, "pending"), (H1, "success")]
     resumed = m.of("set_stage")[4]
     assert resumed[0] == "testing" and "resuming" in resumed[1] and PR_URL in resumed[1]
-    assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, 5) and not m.of("refuse_label")
-    assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}", f"i7-e12-{MC[:12]}"]
+    assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, None) and not m.of("refuse_label")
+    assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}"]
 
 
 @pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])

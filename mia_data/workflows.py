@@ -1,9 +1,11 @@
 """The Temporal workflows that take a dataset issue from `go` label to published crops.
 
 `MiaDataDataset` lives as long as the issue does. Each `go` starts a round: an agent matches the dataset to
-a loader snippet, the worker smoke-tests that match, test crops are made and shown on the issue, a human
-approves them, and the full set is cropped and published. When no snippet fits, the round instead opens
-an issue in mia-snippets for autodev to write one and follows that PR until it merges.
+a loader snippet, the worker smoke-tests that match, the round's crops are made and shown on the issue, and a
+human approves them (published) or rejects them with comments (spec §14: autodev gets the comments and a
+superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
+for autodev to write one and follows that PR: every head's crops are reviewed the same way, the approve merges
+the PR, and the approved crops are published.
 
 Workflow code does no I/O: every GitHub, filesystem and cluster interaction is an activity called by name
 (see activities.py). The durable state is a `DatasetState`, handed to continue_as_new at quiet points.
@@ -43,11 +45,13 @@ with workflow.unsafe.imports_passed_through():
         job_key,
     )
 
-GO, APPROVE = "data:go", "data:approve"
+GO, APPROVE, REJECT = "data:go", "data:approve", "data:reject"
 BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
-NOT_REVIEW = "`data:approve` counts only while the issue is in `data:review`, for the round under review."
+NOT_REVIEW = (
+    "`data:approve` and `data:reject` count only while the issue is in `data:review`, for the round under review."
+)
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
-DEVELOP = ("developing", "testing", "pr-ready")  # the stages spent following a snippet PR
+DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
@@ -82,6 +86,7 @@ class MiaDataDataset:
         self.state = state  # durable: carried into continue_as_new
         self.go_events: list[LabelEvent] = []  # signals not yet acted on
         self.approve_events: list[LabelEvent] = []
+        self.reject_events: list[LabelEvent] = []
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
 
@@ -92,6 +97,10 @@ class MiaDataDataset:
     @workflow.signal
     def approve(self, event: LabelEvent) -> None:
         self.approve_events.append(event)
+
+    @workflow.signal
+    def reject(self, event: LabelEvent) -> None:
+        self.reject_events.append(event)
 
     @workflow.signal
     def pr_update(self, update: PrUpdate) -> None:
@@ -106,15 +115,15 @@ class MiaDataDataset:
     @workflow.run
     async def run(self, state: DatasetState) -> None:
         rounds = 0
-        if state.stage == "review" and state.tests:  # rolled over while waiting for an approve
+        if state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
             await self._guard(self._from_review())
-        elif state.stage in DEVELOP and state.snippet_issue:  # ... or while following the snippet PR
+        elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
             await self._guard(self._follow_pr())
         while True:
-            await workflow.wait_condition(lambda: bool(self.go_events or self.approve_events) or _rollover_due())
-            if not (self.go_events or self.approve_events):
+            await workflow.wait_condition(lambda: bool(self._labels()) or _rollover_due())
+            if not self._labels():
                 await self._rollover()  # idle, nothing queued
-            await self._refuse_queued(gos=False)  # idle: an approve has no round under review to apply to
+            await self._refuse_queued(gos=False)  # idle: a verdict has no round under review to apply to
             if not self.go_events:
                 continue
             event = self.go_events.pop(0)
@@ -122,7 +131,7 @@ class MiaDataDataset:
                 continue
             rounds += 1
             await self._guard(self._round(event))
-            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not (self.go_events or self.approve_events):
+            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self._labels():
                 await self._rollover()
 
     # --- helpers ---------------------------------------------------------------------------
@@ -156,6 +165,10 @@ class MiaDataDataset:
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
+
+    def _labels(self) -> bool:
+        """Whether any label signal is queued."""
+        return bool(self.go_events or self.approve_events or self.reject_events)
 
     def _seen(self, event: LabelEvent) -> bool:
         """True if this label event was handled before; otherwise record it as handled now."""
@@ -211,9 +224,11 @@ class MiaDataDataset:
 
     async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
         """Every label queued now arrived while it couldn't count: answer each new one with refuse_label."""
-        queued = []
-        if approves:
-            queued, self.approve_events = [(APPROVE, NOT_REVIEW, event) for event in self.approve_events], []
+        queued: list[tuple[str, str, LabelEvent]] = []
+        if approves:  # both verdicts
+            queued = [(APPROVE, NOT_REVIEW, event) for event in self.approve_events]
+            queued += [(REJECT, NOT_REVIEW, event) for event in self.reject_events]
+            self.approve_events, self.reject_events = [], []
         if gos:
             queued, self.go_events = queued + [(GO, BUSY, event) for event in self.go_events], []
         for label, reason, event in queued:
@@ -382,7 +397,8 @@ class MiaDataDataset:
     ) -> tuple[Test, list[str], str]:
         """Make crops at `sha`, judge them and publish their gallery. With `n_crops` this is the dataset's own set
         (spec §13: the crops a human validates and the round publishes; at least half must verify, and the jobs
-        dedup against a published manifest); without, a PR head's test crops (`test_n`, every one must verify).
+        dedup against a published manifest); without, a pre-§14 PR head's test crops (`test_n`, every one must
+        verify), replayed only.
 
         Returns (the Test record, descriptions of failed jobs, the markdown report for the issue)."""
         state = self.state
@@ -449,7 +465,7 @@ class MiaDataDataset:
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
         no_size_verdict = workflow.patched("h-no-eligibility")  # pre-H histories carry an `ineligible` outcome
         if match.outcome == "needs_snippet":
-            return await self._develop(match, snippet_issue)
+            return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
             return await self._finish("needs-human", f"match blocked: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
@@ -505,19 +521,36 @@ class MiaDataDataset:
                 "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
             )
         await self._stage("review")
-        await self._refuse_queued(approves=False)  # gos that came while the round ran; approves are judged below
+        await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._from_review()
 
     async def _from_review(self) -> None:
-        if await self._review():
-            await self._publish_set()  # else a new go came during review: the next round starts from matching
+        """At `data:review` without a PR to follow: approve publishes the set; reject asks autodev for a snippet
+        superseding the binding's, with the reviewer's comments, and the round goes on as a develop round
+        (spec §14); a new go ends the round and starts the next from matching."""
+        kind, event = await self._review()
+        if kind == "approve" and event:
+            self.state.tests[-1].approved_at = event.at
+            await self._publish_set()
+        elif kind == "reject" and event:
+            feedback = await self._feedback(event)
+            await self._develop({"what_fails": feedback}, self.state.snippet_issue, binding=self.state.binding)
 
-    async def _publish_set(self) -> None:
-        """Publish the set that was validated: the round's own crops (spec §13), read back from their workspaces.
-        A run from before `one-crop-set`, or a Test record without workspaces (a round that reached review before
-        I and was approved after), takes the old production path instead."""
+    async def _feedback(self, event: LabelEvent) -> str:
+        """The reviewer's comments on the issue since the set's report and up to this reject (spec §14)."""
         state = self.state
-        test = state.tests[-1]
+        return await self._act(
+            "read_feedback", state.issue, state.tests[-1].finished_at, event.at, seconds=300, result_type=str
+        )
+
+    async def _publish_set(self, test: Test | None = None, sha: str | None = None) -> None:
+        """Publish the set that was validated: the round's own crops (spec §13), read back from their workspaces;
+        `test` is the approved PR head's on the develop path (spec §14), else the round's last, and `sha` the
+        mia-snippets commit to publish under (the merge commit for a PR head's crops). A run from before
+        `one-crop-set`, or a Test record without workspaces (a round that reached review before I and was
+        approved after), takes the old production path instead."""
+        state = self.state
+        test = test or state.tests[-1]
         if not (workflow.patched("one-crop-set") and test.crop_workspace and test.verify_workspace):
             return await self._produce()
         verify = await self._act("read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult)
@@ -527,7 +560,7 @@ class MiaDataDataset:
             state.round_id,
             test.crop_workspace,
             verify.crops,
-            test.sha,
+            sha or test.sha,
             state.binding,
             seconds=300,
             result_type=dict,
@@ -587,47 +620,63 @@ class MiaDataDataset:
             extra,
         )
 
-    async def _review(self) -> bool:
-        """Wait for an approve newer than the test result (True), or a new go (False). Stale approves are refused."""
-        tested_at = _parse_time(self.state.tests[-1].finished_at) or workflow.now()  # unparseable: nothing older counts
-        while True:
-            await workflow.wait_condition(lambda: bool(self.approve_events or self.go_events) or _rollover_due())
-            if not (self.approve_events or self.go_events):
-                await self._rollover()  # stage review: the next run resumes here
-            while self.approve_events:
-                event = self.approve_events.pop(0)
-                if self._seen(event):
-                    continue
-                if (approved_at := _parse_time(event.at)) and approved_at > tested_at:
-                    return True
+    def _tested_at(self) -> datetime:
+        """When the set under review was made; a verdict counts only if it is newer."""
+        return _parse_time(self.state.tests[-1].finished_at) or workflow.now()  # unparseable: nothing older counts
+
+    async def _verdict(self) -> tuple[str, LabelEvent] | None:
+        """The oldest approve or reject newer than the set under review, as ("approve" | "reject", event); older
+        ones are refused as stale, and any queued behind the one taken as not-in-review."""
+        tested_at, found = self._tested_at(), None
+        queued = [("approve", event) for event in self.approve_events] + [
+            ("reject", event) for event in self.reject_events
+        ]
+        self.approve_events, self.reject_events = [], []
+        for kind, event in sorted(queued, key=lambda pair: pair[1].at):  # GitHub's ISO-8601 UTC strings sort
+            if self._seen(event):
+                continue
+            label = APPROVE if kind == "approve" else REJECT
+            if found:
+                await self._refuse(label, NOT_REVIEW, event)
+            elif (at := _parse_time(event.at)) and at > tested_at:
+                found = (kind, event)
+            else:
                 await self._refuse(
-                    APPROVE, "it is older than the round's test crops; add it again to approve them", event
+                    label, f"it is older than the round's test crops; add it again to {kind} them", event
                 )
+        return found
+
+    async def _review(self) -> tuple[str, LabelEvent | None]:
+        """Wait at review for a verdict newer than the set (see _verdict), or a new go: ("go", None)."""
+        while True:
+            await workflow.wait_condition(lambda: self._labels() or _rollover_due())
+            if not self._labels():
+                await self._rollover()  # stage review: the next run resumes here
+            if verdict := await self._verdict():
+                return verdict
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events:
-                return False
+                return "go", None
 
     # --- the development path ---------------------------------------------------------------
 
-    async def _develop(self, match: MatchResult, snippet_issue: int | None = None) -> None:
-        """No snippet fits: open the mia-snippets issue (autodev writes the snippet), then follow its PR.
+    async def _develop(self, draft: dict, snippet_issue: int | None = None, binding: str | None = None) -> None:
+        """Open the mia-snippets issue (autodev writes the snippet), then follow its PR: no snippet fits (`draft`
+        is the match agent's), or, with `binding`, a reviewer rejected that binding's crops and `draft` carries
+        their comments: the issue asks for a snippet superseding the binding's (spec §14).
 
         `snippet_issue` is the issue an earlier round opened for this dataset, when the workflow still knows it:
         the activity reuses it while it is open rather than asking autodev for the same snippet twice."""
         state = self.state
+        extra: list[Any] = [snippet_issue, binding] if binding else ([snippet_issue] if snippet_issue else [])
         state.snippet_issue = await self._act(
-            "open_snippet_issue",
-            state.issue,
-            state.round_id,
-            match.draft or {},
-            *([snippet_issue] if snippet_issue else []),  # the extra argument only when it carries something
-            seconds=300,
-            result_type=int,
+            "open_snippet_issue", state.issue, state.round_id, draft, *extra, seconds=300, result_type=int
         )
+        what = "a snippet superseding the binding's, from your comments," if binding else "the snippet"
         await self._stage(
             "developing",
-            f"autodev is writing the snippet in mia-snippets issue #{state.snippet_issue}; "
-            "each PR head gets test crops",
+            f"autodev is writing {what} in mia-snippets issue #{state.snippet_issue}; each PR head's crops come "
+            "back here for review",
         )
         await self._follow_pr()
 
@@ -651,19 +700,46 @@ class MiaDataDataset:
         return True
 
     async def _follow_pr(self) -> None:
-        """Wake on pr_update until the round ends, refusing labels meanwhile (busy). Rolls over only here, idle."""
+        """The develop round's one wait: wake on pr_update and on labels until the round ends. At `review` (the
+        PR head's set passed) an approve or reject is the verdict (spec §14); any other label is refused (a go is
+        busy throughout). Rolls over only here, idle."""
         state = self.state
         await self._limits()
+        loop = workflow.patched("review-loop")
         while True:
-            await workflow.wait_condition(
-                lambda: bool(state.pending or self.go_events or self.approve_events) or _rollover_due()
-            )
-            if not (state.pending or self.go_events or self.approve_events):
+            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or _rollover_due())
+            if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
+            if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
+                kind, event = verdict
+                await (self._approve_pr(event) if kind == "approve" else self._revise_pr(event))
             await self._refuse_queued()
             while state.pending:
                 if await self._on_pr(state.pending.pop(0).pr):
                     return
+
+    async def _approve_pr(self, event: LabelEvent) -> None:
+        """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
+        the round (_merged), which publishes these very crops when the merged snippet is the reviewed one."""
+        state, test = self.state, self.state.tests[-1]
+        test.approved_at = event.at
+        await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
+        await self._stage(
+            "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are published"
+        )
+
+    async def _revise_pr(self, event: LabelEvent) -> None:
+        """The reviewer rejected the PR head's set: their comments go to the PR as `/revise`; autodev's next head
+        brings its crops back to review."""
+        state = self.state
+        feedback = await self._feedback(event)
+        await self._act(
+            "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
+        )
+        await self._stage(
+            "developing",
+            "your comments went to the snippet PR as a revision request; the next head's crops come back for review",
+        )
 
     async def _on_pr(self, pr_number: int, pr: PrUpdate | None = None) -> bool:
         """Act on the PR as it is now (never on the signal's copy) until nothing is left to do.
@@ -693,11 +769,12 @@ class MiaDataDataset:
         return False
 
     async def _test_head(self, pr: PrUpdate) -> PrUpdate:
-        """Test an untested PR head with the example binding the PR ships, posting the `mia-data/crops` status.
-
-        Returns the PR as it is after the test: only a passing result for a head that is still current moves
-        the stage to pr-ready."""
+        """Make the dataset's set at an untested PR head with the example binding the PR ships, posting the
+        `mia-data/crops` status. Returns the PR as it is after the test: only a passing result for a head that is
+        still current moves the stage to `review` (spec §14); a failing one goes to the PR as `/revise`, so autodev
+        fixes it. Pre-§14 histories made `test_n` test crops and moved to `pr-ready`."""
         state, head = self.state, pr.head_sha
+        loop = workflow.patched("review-loop")
         if state.stage != "testing":
             await self._stage("testing")
         await self._act("set_crop_status", head, "pending", None)
@@ -717,7 +794,8 @@ class MiaDataDataset:
                     binding["hash"],
                     binding["name"],
                 )
-                test, _, report = await self._test(head, f"{state.seed}-t{head[:7]}", trusted=False)
+                n_crops = (await self._limits()).per_round if loop else None
+                test, _, report = await self._test(head, f"{state.seed}-t{head[:7]}", trusted=False, n_crops=n_crops)
                 test.tree_sha = await self._act("tree_sha", head, binding["name"])
         except (ActivityError, RoundFailed):
             with contextlib.suppress(ActivityError):  # never leave the required status pending
@@ -725,7 +803,10 @@ class MiaDataDataset:
             raise
         state.tests.append(test)
         marker = f"test {state.round_id} {head}"
-        pr_url = await self._act("comment", pr.pr, report, marker, "snippets", state.binding, state.binding_hash)
+        pr_report = (
+            report if test.ok or not loop else f"/revise the crops at `{head}` failed; make them pass:\n\n{report}"
+        )
+        pr_url = await self._act("comment", pr.pr, pr_report, marker, "snippets", state.binding, state.binding_hash)
         issue_url = await self._act("comment", state.issue, report, marker, "data", state.binding, state.binding_hash)
         url = pr_url or issue_url  # the commit status links the PR comment
         current = await self._act("pr_state", pr.pr, result_type=PrUpdate)
@@ -733,14 +814,14 @@ class MiaDataDataset:
             "set_crop_status", head, "success" if test.ok else "failure", url
         )  # the head's own, current or not
         if test.ok and current.head_sha == head and current.state == "open":
-            await self._stage("pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
+            await self._stage("review" if loop else "pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:
-        """The snippet PR merged: produce crops pinned to the merge commit.
-
-        The merged head's passing test carries over if the snippet tree is unchanged by the merge; otherwise
-        the merge commit gets its own (trusted, status-less) test first. An older head's pass never counts."""
+        """The snippet PR merged. Spec §14: when the merged snippet tree is an approved head's, the crops that
+        were approved are published under the merge commit; otherwise the merge commit gets its own set, which
+        waits at review like a matched binding's. Pre-§14 histories made the set at the merge commit and
+        published it without a review."""
         state, merge_sha = self.state, pr.merge_sha
         if not merge_sha:
             raise RoundFailed(f"snippet PR #{pr.pr} is merged but GitHub reports no merge commit")
@@ -752,9 +833,39 @@ class MiaDataDataset:
                 "needs-human", "; ".join(["the merged example binding was not adopted", *binding["errors"]])
             )
         state.binding, state.binding_hash, state.snippet_name = binding["path"], binding["hash"], binding["name"]
-        # The dataset's set is made at the merge commit, reviewed code, whatever the PR head's test showed: a PR
-        # head's crops came from a private cache and are never published (spec §13). Pre-I histories skipped this
-        # when the merged tree was the tested one.
+        if workflow.patched("review-loop"):
+            state.pins, state.pr = dataclasses.replace(state.pins, snippets_commit=merge_sha), None  # followed no more
+            approved = next(
+                (t for t in reversed(state.tests) if t.approved_at and t.ok and tree and t.tree_sha == tree), None
+            )
+            if approved:
+                return await self._publish_set(approved, merge_sha)
+            await self._stage(
+                "testing", "the merged snippet is not the reviewed head's; making its own crops for review"
+            )
+            test, failed_jobs, report = await self._test(
+                merge_sha, f"{state.seed}-t{merge_sha[:7]}", n_crops=(await self._limits()).per_round
+            )
+            test.tree_sha = tree
+            state.tests.append(test)
+            await self._act(
+                "comment",
+                state.issue,
+                report,
+                f"test {state.round_id} {merge_sha}",
+                "data",
+                state.binding,
+                state.binding_hash,
+            )
+            if not test.ok:
+                return await self._finish(
+                    "needs-human", "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs])
+                )
+            await self._stage("review")
+            await self._refuse_queued(approves=False)
+            return await self._from_review()
+        # Pre-§14: the set is made at the merge commit and published without a review. Pre-I histories skipped the
+        # test when the merged tree was the tested one.
         carried = tree and any(test.ok and test.sha == pr.head_sha and test.tree_sha == tree for test in state.tests)
         if workflow.patched("one-crop-set") or not carried:
             if state.stage != "testing":

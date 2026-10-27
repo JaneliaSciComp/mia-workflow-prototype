@@ -37,12 +37,6 @@ def test_app_auth_requires_key_settings(tmp_path):
         load_config(p)
 
 
-def test_auto_merge_needs_required_checks(tmp_path):
-    with pytest.raises(ValueError, match="auto_merge needs github.required_checks"):
-        make_cfg(tmp_path, github={"auto_merge": True})
-    assert make_cfg(tmp_path, github={"auto_merge": True, "required_checks": ["mia-data/crops"]}).github.auto_merge
-
-
 def test_deployment_name_is_restricted(tmp_path):
     with pytest.raises(ValueError, match="deployment"):
         make_cfg(tmp_path, deployment="Auto Dev")

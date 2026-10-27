@@ -96,24 +96,6 @@ async def test_untrusted_bot_label_is_ignored(tmp_path, gh):
     assert not temporal.started
 
 
-@respx.mock
-async def test_auto_merge_counts_green_required_checks_as_the_approval(tmp_path, gh):
-    head = "abc1234def"
-    respx.get(f"{API}{R}/pulls/5").mock(
-        return_value=httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": head}})
-    )
-    for path in ("pulls/5/reviews", "pulls/5/comments", "issues/5/comments"):
-        respx.get(f"{API}{R}/{path}").mock(return_value=httpx.Response(200, json=[]))  # nobody approved
-    respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
-    green = [{"context": "mia-data/crops", "state": "success"}]
-    respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": green}))
-    snap = await acts(tmp_path, gh, required_checks=["mia-data/crops"], auto_merge=True).observe_pr(ObserveInput(5))
-    assert snap.approved and snap.checks == "success"
-    respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
-    with pytest.raises(ApplicationError, match="nothing to do"):  # the check is missing: pending, not approved
-        await acts(tmp_path, gh, required_checks=["mia-data/crops"], auto_merge=True).observe_pr(ObserveInput(5))
-
-
 async def _observe_required(tmp_path, gh, runs, statuses):
     head = "abc1234def"
     respx.get(f"{API}{R}/pulls/5").mock(

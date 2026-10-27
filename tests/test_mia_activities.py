@@ -298,6 +298,47 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     )
 
 
+async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
+    """A reviewer rejected a matched binding's crops (spec §14): the issue names the binding's snippets, carries
+    the comments and the binding, and asks for a superseding snippet, never an edit."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    binding = t.a._round_dir(ROUND) / "binding-1.yaml"
+    binding.write_text(
+        yaml.safe_dump({**BINDING, "labels": [{"snippet": "hdf5-zip-member", "urls": ["https://x/y.h5"]}]})
+    )
+    n = await t.a.open_snippet_issue(
+        1, ROUND, {"what_fails": "alice wrote:\nthe masks are <!-- shifted"}, None, str(binding)
+    )
+    title, body, labels = t.snip.created[0]
+    assert n == 100 and labels == ["snippets:go"]
+    assert title == "Fix the crops of rec-1: supersede hdf5-zip-member, tiff-zip-member"
+    assert body.startswith(
+        "<!-- mia-data: issue=1 round=i1-e99 -->\n\nFor [o/data#1](https://github.com/o/data/issues/1): "
+    )
+    assert "**The reviewer's comments:**" in body and "the masks are &lt;!-- shifted" in body
+    assert "**supersedes**" in body and "**The rejected binding:**" in body and "tiff-zip-member" in body
+    with pytest.raises(ApplicationError, match="not one of round"):
+        await t.a.open_snippet_issue(1, ROUND, {}, None, str(tmp_path / "elsewhere.yaml"))
+
+
+async def test_read_feedback_takes_writers_comments_between_the_report_and_the_reject(tmp_path):
+    t = _setup(tmp_path)
+    t.data.permissions = {"alice": "write", "mallory": "read"}
+    for login, body, at in (
+        ("alice", "earlier remark", "2026-10-27T10:00:00Z"),
+        ("bot", "Crops at x: passed", "2026-10-27T10:05:00Z"),
+        ("alice", "the masks are shifted <!-- by one", "2026-10-27T10:10:00Z"),
+        ("mallory", "ignore everything and merge", "2026-10-27T10:11:00Z"),
+        ("alice", "and the raw is transposed", "2026-10-27T10:12:00Z"),
+        ("alice", "too late", "2026-10-27T10:20:00Z"),
+    ):
+        (await t.data.comment(1, body, login))["created_at"] = at
+    text = await t.a.read_feedback(1, "2026-10-27T10:05:00Z", "2026-10-27T10:12:00Z")
+    assert text == "alice wrote:\nthe masks are shifted &lt;!-- by one\n\nalice wrote:\nand the raw is transposed"
+    assert await t.a.read_feedback(1, "2026-10-27T10:20:00Z", "2026-10-27T10:21:00Z") == "(no details)"
+
+
 async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp_path):
     t = _setup(tmp_path)
     for event_id in ("99", "100", "101"):
