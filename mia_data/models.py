@@ -63,6 +63,8 @@ class Test:
     finished_at: str | None = None
     gallery_prefix: str | None = None
     tree_sha: str | None = None
+    crop_workspace: str | None = None  # the round's set (spec §13): where its crops and verify report are
+    verify_workspace: str | None = None
 
 
 @dataclass

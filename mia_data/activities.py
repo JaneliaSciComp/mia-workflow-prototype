@@ -725,9 +725,9 @@ class Activities:
         self, issue: int, round_id: str, kind: str, crop_workspace: str, verify_workspace: str, verified: list[dict]
     ) -> GalleryResult:
         """Publish raw.png + overlay.png of the verified crops, with the binding and verify report, under
-        galleries/<record>/<round>/<kind> (kind = the tested SHA, or production) on the galleries branch; a
-        test-pr round's go under galleries/_test-pr/<record>/<pr>/<kind>. Returns the URLs and a crops table."""
-        if not (kind == "production" or SHA_RE.fullmatch(kind)):
+        galleries/<record>/<round>/<kind> (kind = the tested SHA) on the galleries branch; a test-pr round's go
+        under galleries/_test-pr/<record>/<pr>/<kind>. Returns the URLs and a crops table."""
+        if not SHA_RE.fullmatch(kind):
             raise ValueError(f"bad gallery kind {kind!r}")
         crop_dir = self._job_workspace(issue, round_id, crop_workspace)
         verify_dir = self._job_workspace(issue, round_id, verify_workspace)

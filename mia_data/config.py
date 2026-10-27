@@ -33,10 +33,9 @@ STAGES = {
     "new": ("ededed", "mia-data: dataset issue seen"),
     "matching": ("fbca04", "mia-data: matching the dataset to a snippet"),
     "developing": ("fbca04", "mia-data: agent writing a snippet"),
-    "testing": ("fbca04", "mia-data: testing the snippet"),
+    "testing": ("fbca04", "mia-data: making the crops to review"),
     "pr-ready": ("1d76db", "mia-data: snippet PR ready for review"),
     "review": ("1d76db", "mia-data: waiting for review"),
-    "cropping": ("fbca04", "mia-data: producing crops"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
 }

@@ -72,8 +72,9 @@ def _parse_time(iso: str | None) -> datetime | None:
 
 @workflow.defn(name="MiaDataDataset")
 class MiaDataDataset:
-    """One workflow per dataset issue, forever: each new `go` runs a round (match → test → review → approve →
-    crop → publish) that ends in a dataset stage (done or needs-human), then waits for the next `go`. Size is no
+    """One workflow per dataset issue, forever: each new `go` runs a round (match → smoke → crops → review →
+    approve → publish those crops) that ends in a dataset stage (done or needs-human), then waits for the next
+    `go`. One set of crops per round (spec §13): the crops a human validated are the crops published. Size is no
     verdict of this pipeline: a small raw is cropped whole, and a buffer plan decides what fits it (spec §12)."""
 
     @workflow.init
@@ -307,7 +308,14 @@ class MiaDataDataset:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _crop(
-        self, tag: str, sha: str, n_crops: int, seed: str, batch: int, trusted: bool = True
+        self,
+        tag: str,
+        sha: str,
+        n_crops: int,
+        seed: str,
+        batch: int,
+        trusted: bool = True,
+        existing: bool | None = None,
     ) -> tuple[str, str, VerifyResult, JobDone, JobDone]:
         """Run crop → verify (+ preview) → read_verify. Returns (crop workspace, verify workspace, verify
         result, crop job, verify job).
@@ -315,8 +323,10 @@ class MiaDataDataset:
         The workspaces are crop-<tag> and verify-<tag>; `tag` is the tested SHA, or "production". The jobs are
         returned so the caller can judge their exit codes; a job whose state is uncertain fails the round.
         `trusted=False` (a PR head: unreviewed code) mounts the dataset cache read-only. A trusted crop job writes the
-        cache, so it holds the record's raw lock from before the crop job until after read_verify."""
+        cache, so it holds the record's raw lock from before the crop job until after read_verify. `existing`
+        (default: batch > 0) points the jobs at the dataset's published manifest so a later round adds crops."""
         assert self.state.pins  # a round is admitted before any job runs
+        existing = batch > 0 if existing is None else existing
         lock = await self._hold_raw("crop") if trusted and workflow.patched("c-raw-lock") else None
         try:
             crop_workspace = await self._prepare(f"crop-{tag}")
@@ -330,13 +340,13 @@ class MiaDataDataset:
                 seed=seed,
                 batch=batch,
                 trusted=trusted,
-                existing=batch > 0,
+                existing=existing,
             )
             if crop_job.state not in ("DONE", "EXIT"):
                 raise RoundFailed(describe_failure("crop", crop_job))
             verify_workspace = await self._prepare(f"verify-{tag}")
             verify_job = await self._job(  # mounts no cache; the wait keeps the lock alive until it is released
-                "verify", verify_workspace, f"verify-{tag}", lock, crop_workspace=crop_workspace, existing=batch > 0
+                "verify", verify_workspace, f"verify-{tag}", lock, crop_workspace=crop_workspace, existing=existing
             )
             if verify_job.state not in ("DONE", "EXIT"):
                 raise RoundFailed(describe_failure("verify", verify_job))
@@ -367,22 +377,41 @@ class MiaDataDataset:
             result_type=GalleryResult,
         )
 
-    async def _test(self, sha: str, seed: str, trusted: bool = True, notes: tuple = ()) -> tuple[Test, list[str], str]:
-        """Make the test crops at `sha`, judge them and publish their gallery.
+    async def _test(
+        self, sha: str, seed: str, trusted: bool = True, notes: tuple = (), n_crops: int | None = None
+    ) -> tuple[Test, list[str], str]:
+        """Make crops at `sha`, judge them and publish their gallery. With `n_crops` this is the dataset's own set
+        (spec §13: the crops a human validates and the round publishes; at least half must verify, and the jobs
+        dedup against a published manifest); without, a PR head's test crops (`test_n`, every one must verify).
 
         Returns (the Test record, descriptions of failed jobs, the markdown report for the issue)."""
         state = self.state
+        n = n_crops or (await self._limits()).test_n
         crop_workspace, verify_workspace, verify, crop_job, verify_job = await self._crop(
-            sha, sha, (await self._limits()).test_n, seed, 0, trusted
+            sha, sha, n, seed, 0, trusted, existing=bool(n_crops)
         )
-        passed, failed_jobs = judge(verify, [crop_job, verify_job])
+        if n_crops:
+            n_effective = n if verify.n_effective is None else min(n, verify.n_effective)
+            needed = max(1, math.ceil(n_effective / 2))
+            passed, failed_jobs = judge(verify, [crop_job], needed=needed)
+        else:
+            needed = None
+            passed, failed_jobs = judge(verify, [crop_job, verify_job])
         gallery = await self._gallery(sha, crop_workspace, verify_workspace, verify) if verify.crops else None
         test = Test(
-            sha, f"{state.round_id}-{sha[:12]}", passed, workflow.now().isoformat(), gallery.prefix if gallery else None
+            sha,
+            f"{state.round_id}-{sha[:12]}",
+            passed,
+            workflow.now().isoformat(),
+            gallery.prefix if gallery else None,
+            crop_workspace=crop_workspace,
+            verify_workspace=verify_workspace,
         )
         lines = [
-            f"Test crops at `{sha}`: **{'passed' if passed else 'failed'}**, {verify.ok_count} of "
-            f"{verify.n} verified; the crop job fetched {verify.bytes_fetched} bytes.",
+            f"{'Crops' if n_crops else 'Test crops'} at `{sha}`: **{'passed' if passed else 'failed'}**, "
+            f"{verify.ok_count} of {verify.n} verified"
+            + (f" (at least {needed} needed)" if needed else "")
+            + f"; the crop job fetched {verify.bytes_fetched} bytes.",
             *failed_jobs,
             *(f"- {error}" for error in verify.errors),
             *notes,
@@ -458,11 +487,14 @@ class MiaDataDataset:
             if not smoke.eligible:
                 return await self._finish("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
 
-        # Test crops at the matched snippets commit, shown on the issue for review.
+        # The round's crops at the matched snippets commit, shown on the issue for review; approved, they are published.
         sha = state.pins.snippets_commit
         await self._stage("testing")
         test, failed_jobs, report = await self._test(
-            sha, state.seed + "-t", notes=("", "Binding reasons:", *(f"- {reason}" for reason in match.reasons))
+            sha,
+            state.seed + "-t",
+            notes=("", "Binding reasons:", *(f"- {reason}" for reason in match.reasons)),
+            n_crops=(await self._limits()).per_round,
         )
         state.tests.append(test)
         await self._act(
@@ -470,7 +502,7 @@ class MiaDataDataset:
         )
         if not test.ok:
             return await self._finish(
-                "needs-human", "; ".join(["the test crops failed; nothing was produced", *failed_jobs])
+                "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
             )
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; approves are judged below
@@ -478,11 +510,37 @@ class MiaDataDataset:
 
     async def _from_review(self) -> None:
         if await self._review():
-            await self._produce()  # else a new go came during review: the next round starts from matching
+            await self._publish_set()  # else a new go came during review: the next round starts from matching
+
+    async def _publish_set(self) -> None:
+        """Publish the set that was validated: the round's own crops (spec §13), read back from their workspaces.
+        A run from before `one-crop-set`, or a Test record without workspaces (a round that reached review before
+        I and was approved after), takes the old production path instead."""
+        state = self.state
+        test = state.tests[-1]
+        if not (workflow.patched("one-crop-set") and test.crop_workspace and test.verify_workspace):
+            return await self._produce()
+        verify = await self._act("read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult)
+        published = await self._act(
+            "publish_crops",
+            state.issue,
+            state.round_id,
+            test.crop_workspace,
+            verify.crops,
+            test.sha,
+            state.binding,
+            seconds=300,
+            result_type=dict,
+        )
+        extra = (
+            f"**Totals:** {len(published['published'])} crops published this round ({verify.ok_count} verified); "
+            f"{published['total']} in the dataset\n"
+        )
+        await self._finish("done", extra=extra)
 
     async def _produce(self) -> None:
-        """Make and publish the full set of crops. Passing crops stay published even when the round ends in
-        needs-human."""
+        """Pre-I (spec §13): a second, production set after the approve. Replayed by histories that hold one; no
+        new round takes this path. Passing crops stay published even when the round ends in needs-human."""
         state = self.state
         assert state.pins and state.seed  # set at admission; carried in the durable state across rollovers
         sha = state.pins.snippets_commit
@@ -694,10 +752,16 @@ class MiaDataDataset:
                 "needs-human", "; ".join(["the merged example binding was not adopted", *binding["errors"]])
             )
         state.binding, state.binding_hash, state.snippet_name = binding["path"], binding["hash"], binding["name"]
-        if not (tree and any(test.ok and test.sha == pr.head_sha and test.tree_sha == tree for test in state.tests)):
+        # The dataset's set is made at the merge commit, reviewed code, whatever the PR head's test showed: a PR
+        # head's crops came from a private cache and are never published (spec §13). Pre-I histories skipped this
+        # when the merged tree was the tested one.
+        carried = tree and any(test.ok and test.sha == pr.head_sha and test.tree_sha == tree for test in state.tests)
+        if workflow.patched("one-crop-set") or not carried:
             if state.stage != "testing":
                 await self._stage("testing")
-            test, failed_jobs, report = await self._test(merge_sha, f"{state.seed}-t{merge_sha[:7]}")
+            test, failed_jobs, report = await self._test(
+                merge_sha, f"{state.seed}-t{merge_sha[:7]}", n_crops=(await self._limits()).per_round
+            )
             test.tree_sha = await self._act("tree_sha", merge_sha, binding["name"])
             state.tests.append(test)
             await self._act(
@@ -712,10 +776,10 @@ class MiaDataDataset:
             if not test.ok:
                 return await self._finish(
                     "needs-human",
-                    "; ".join(["the merge commit's test crops failed; nothing was produced", *failed_jobs]),
+                    "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs]),
                 )
         state.pins = dataclasses.replace(state.pins, snippets_commit=merge_sha)
-        await self._produce()
+        await self._publish_set()
 
 
 @workflow.defn(name="MiaDataPoll")

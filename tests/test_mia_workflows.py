@@ -61,7 +61,7 @@ class Mocks:
         smoke=None,
         states=None,
         test_ok=4,
-        prod_ok=16,
+        set_ok=16,
         n_effective=16,
         await_failures=0,
         gate=None,
@@ -76,7 +76,8 @@ class Mocks:
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
-        self.test_ok, self.prod_ok, self.n_effective = test_ok, prod_ok, n_effective
+        self.test_ok, self.set_ok, self.n_effective = test_ok, set_ok, n_effective
+        self.crop_jobs: dict[str, JobArgs] = {}  # crop workspace -> its args (trusted = the dataset's set)
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
         self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
@@ -131,6 +132,8 @@ class Mocks:
         @activity.defn(name="submit")
         async def submit(key: str, kind: str, a: JobArgs) -> str:
             rec("submit", key, kind, a)
+            if kind == "crop":
+                self.crop_jobs[a.workspace] = a
             return f"job-{key}"
 
         @activity.defn(name="read_match")
@@ -164,15 +167,17 @@ class Mocks:
         @activity.defn(name="read_verify")
         async def read_verify(ws: str, crop_ws: str | None = None, record: str | None = None) -> VerifyResult:
             rec("read_verify", ws, crop_ws, *([record] if record else []))
-            prod = "production" in ws
-            test_ok = next((v for s, v in self.test_ok_by.items() if s in ws), self.test_ok)  # by tested SHA
-            k, n = (self.prod_ok, 16) if prod else (test_ok, 4)
+            job = self.crop_jobs.get(crop_ws or "")
+            the_set = bool(job and job.trusted)  # the dataset's own set (16); a PR head's test crops (4)
+            by_sha = next((v for s, v in self.test_ok_by.items() if s in ws), None)  # by tested SHA
+            k = by_sha if by_sha is not None else (self.set_ok if the_set else self.test_ok)
+            n = job.n_crops if job else (16 if the_set else 4)
             return VerifyResult(
                 k,
                 n,
                 [] if k == n else ["c9: overlaps c1"],
                 [{"crop_id": f"c{i}", "files": {}} for i in range(k)],
-                self.n_effective if prod else 4,
+                self.n_effective if the_set else 4,
                 bytes_fetched=1234,
             )
 
@@ -326,39 +331,35 @@ async def test_a_stage_write_does_not_hold_the_round(env):
     assert m.stages == ["matching", "needs-human"]
 
 
-async def test_match_test_review_approve_crop_done(env):
+async def test_match_crops_review_approve_publishes_that_set(env):
+    """spec §13: one set per round; the crops a human validated are the crops published, no second job."""
     m = Mocks()
     async with started(env, m) as h:
         await idle(h, m, "review")
-        assert [a.batch for a in m.jobs() if a.n_crops] == [0]  # no production crop before approve
+        assert "publish_crops" not in m.names()  # nothing is published before the approve
         await approve_review(h, m)
         await idle(h, m, "done")
-    assert m.stages == ["matching", "testing", "review", "cropping", "done"]
-    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify", "crop", "verify"]
-    test, prod = [a for a in m.jobs() if a.n_crops]
-    assert (
-        test.n_crops,
-        test.batch,
-        test.trusted,
-        test.sha,
-        prod.n_crops,
-        prod.batch,
-        prod.trusted,
-        prod.existing,
-    ) == (4, 0, True, SHA, 16, 1, True, True)
-    assert [a[0] for a in m.of("publish_gallery")] == [SHA, "production"]
-    assert m.of("publish_crops") == [("/w/i7-e11/crop-production-1", 16, SHA, "/s/binding-1.yaml")]
+    assert m.stages == ["matching", "testing", "review", "done"]
+    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify"]
+    (the_set,) = [a for a in m.jobs() if a.n_crops]
+    assert (the_set.n_crops, the_set.batch, the_set.trusted, the_set.sha, the_set.existing) == (16, 0, True, SHA, True)
+    assert [a[0] for a in m.of("publish_gallery")] == [SHA]
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
-    assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops", "publish_gallery"]
-    assert m.of("read_verify")[1] == ("/w/i7-e11/verify-production-1", "/w/i7-e11/crop-production-1", "rec-1")
-    owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop", "mia-data i7-e11 crop"]
+    assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops"]
+    assert m.of("read_verify")[1] == (
+        f"/w/i7-e11/verify-{SHA}-1",
+        f"/w/i7-e11/crop-{SHA}-1",
+    )  # read back for publishing
+    assert "16 crops published" in m.of("set_stage")[-1][2]
+    owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop"]
     assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
     smoke_lock, crop_lock = ["raw", "rec-1", owners[0]], ["raw", "rec-1", owners[1]]
-    assert [a[2] for a in m.of("await")] == [None, smoke_lock, *[crop_lock] * 4]  # match: none; crop and verify jobs
+    assert [a[2] for a in m.of("await")] == [None, smoke_lock, *[crop_lock] * 2]  # match: none; crop and verify jobs
     report = m.of("comment")[0][0]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
-    assert done[0] == "done" and "table" in done[2] and "**Totals:** 16 new" in done[2]
+    assert done[0] == "done" and "**Totals:** 16 crops published" in done[2]  # the gallery table went up at review
     assert m.of("comment")[0][3] == "/s/binding-1.yaml"  # the test report carries the matched binding
     assert not m.of("refuse_label")
 
@@ -370,7 +371,7 @@ async def test_seed_is_recorded(env):
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
     assert st.round_id == "i7-e11" and st.handled == ["11", "12"] and int(st.seed) >= 0
-    assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t", st.seed + "-p"]
+    assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t"]
 
 
 async def test_approve_outside_review_is_refused(env):
@@ -423,13 +424,21 @@ async def test_go_while_busy_is_rejected_with_comment(env):
     assert m.of("admit") == [("11",), ("13",)]
 
 
-async def test_partial_production(env):
-    m = Mocks(prod_ok=5)
+async def test_a_set_with_fewer_than_half_verified_never_reaches_review(env):
+    m = Mocks(set_ok=5)
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.stages == ["matching", "testing", "needs-human"] and "publish_crops" not in m.names()
+    assert "5 of 16 verified (at least 8 needed)" in m.of("comment")[0][0]
+
+
+async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
+    """harness verify exits 1 whenever a crop fails; the set is judged by its report, not that exit."""
+    m = Mocks(states={f"verify-{SHA}": ("EXIT", 1)}, set_ok=12)
     async with started(env, m) as h:
         await approve_review(h, m)
-        await idle(h, m, "needs-human")
-    assert m.of("publish_crops")[0][1] == 5 and m.stages[-2:] == ["cropping", "needs-human"]
-    assert "5 of 16" in m.of("set_stage")[-1][1] and m.of("publish_gallery")[-1] == ("production", 5)
+        await idle(h, m, "done")
+    assert m.of("publish_crops")[0][1] == 12 and "12 crops published" in m.of("set_stage")[-1][2]
 
 
 async def test_a_small_raw_is_cropped_not_judged(env):
@@ -460,29 +469,18 @@ async def test_blocked_goes_needs_human(env):
     [
         ({"match": ("EXIT", 1)}, ["matching", "needs-human"], []),
         ({"smoke": ("EXIT", 1)}, ["matching", "needs-human"], []),  # even though smoke.json says ok
-        ({f"verify-{SHA}": ("EXIT", 1)}, ["matching", "testing", "needs-human"], []),
-        ({"crop-production": ("EXIT", 1)}, ["matching", "testing", "review", "cropping", "needs-human"], [16]),
+        ({f"crop-{SHA}": ("EXIT", 1)}, ["matching", "testing", "needs-human"], []),
+        ({f"verify-{SHA}": ("UNKNOWN", None)}, ["matching", "testing", "needs-human"], []),
     ],
 )
 async def test_failed_job_needs_human_no_retry(env, states, stages, published):
     m = Mocks(states=states)
     async with started(env, m) as h:
-        if "review" in stages:
-            await approve_review(h, m)
         await idle(h, m, "needs-human")
     keys = [a[0] for a in m.of("submit")]
-    assert m.stages == stages and len(keys) == len(set(keys)) and "EXIT" in m.of("set_stage")[-1][1]
-    assert [a[1] for a in m.of("publish_crops")] == published  # what passed stays published (§7.5)
+    assert m.stages == stages and len(keys) == len(set(keys))
+    assert [a[1] for a in m.of("publish_crops")] == published  # nothing is published before a review
     assert ("read_match" in m.names()) == ("match" not in states)
-
-
-async def test_production_verify_exit_is_judged_by_its_report(env):
-    """harness verify exits 1 whenever a crop fails; production still needs only half of n (§7.5)."""
-    m = Mocks(states={"verify-production": ("EXIT", 1)}, prod_ok=12)
-    async with started(env, m) as h:
-        await approve_review(h, m)
-        await idle(h, m, "done")
-    assert m.of("publish_crops")[0][1] == 12
 
 
 async def test_rollover_in_review_then_approve(env, monkeypatch):
@@ -500,14 +498,13 @@ async def test_rollover_in_review_then_approve(env, monkeypatch):
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
     assert (await h.describe()).run_id != h.first_run_id
-    assert m.stages == ["matching", "testing", "review", "cropping", "done"] and len(m.of("admit")) == 1
-    assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t", st.seed + "-p"] and "16 new" in m.of(
-        "set_stage"
-    )[-1][2]
+    assert m.stages == ["matching", "testing", "review", "done"] and len(m.of("admit")) == 1
+    assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t"]
+    assert "16 crops published" in m.of("set_stage")[-1][2]  # the workspaces outlive the rollover
 
 
 async def test_test_crop_failure_never_produces(env):
-    m = Mocks(test_ok=0)
+    m = Mocks(set_ok=0)
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.approve, ev("approve", "12", "2030-01-01T00:00:00Z"))
@@ -522,7 +519,7 @@ async def test_worker_death_mid_await_reattaches(env):
         await approve_review(h, m)
         await idle(h, m, "done")
     keys = [a[0] for a in m.of("submit")]
-    assert len(keys) == len(set(keys)) == 6 and len(m.of("await")) == 7
+    assert len(keys) == len(set(keys)) == 4 and len(m.of("await")) == 5  # one await retried, no job resubmitted
 
 
 async def test_continue_as_new_keeps_handled(env, monkeypatch):
@@ -611,19 +608,19 @@ async def test_develop_happy_path(env):
     async with started(env, m) as h:
         await happy(h, m)
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "pr-ready", "cropping", "done"]
+    assert m.stages == ["matching", "developing", "testing", "pr-ready", "testing", "done"]  # the set at the merge
     assert statuses(m) == [(H1, "pending"), (H1, "success")]
     assert m.of("set_crop_status")[1][2] == f"https://github.com/o/snippets/issues/5#test i7-e11 {H1}"  # the PR comment
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no smoke: tested
     assert [a[2] for a in m.of("take_lock")] == ["mia-data i7-e11 crop"]  # the PR head's test crops take no lock
-    test, prod = [a for a in m.jobs() if a.n_crops]
+    test, the_set = [a for a in m.jobs() if a.n_crops]
     assert (test.sha, test.trusted, test.n_crops, test.batch) == (H1, False, 4, 0)  # PR head: read-only dataset cache
-    assert (prod.sha, prod.trusted, prod.n_crops, prod.batch) == (MC, True, 16, 1)
+    assert (the_set.sha, the_set.trusted, the_set.n_crops, the_set.batch) == (MC, True, 16, 0)  # the merge: the set
     assert m.of("adopt_pr_binding") == [(5, H1), (5, MC)]  # the merge commit's binding is pinned to the merge
-    assert m.of("prepare_job")[-1] == ("verify-production", f"/s/binding-pr-{MC[:7]}.yaml")
+    assert m.of("prepare_job")[-1] == (f"verify-{MC}", f"/s/binding-pr-{MC[:7]}.yaml")
     assert m.of("publish_crops")[0][2] == MC and m.of("publish_gallery")[0] == (H1, 4)
     assert st.snippet_issue == 100 and st.pr == 5 and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
-    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T")]
+    assert [(t.sha, t.ok, t.tree_sha) for t in st.tests] == [(H1, True, "T"), (MC, True, "T")]  # head test, the set
     assert [a[2] for a in m.of("set_stage") if a[0] == "pr-ready"] == [f"**Snippet PR:** {PR_URL}\n"]
     assert {a[2] for a in m.of("comment")} == {"snippets", "data"}
 
@@ -665,7 +662,7 @@ async def test_merge_with_different_tree_retests_merge_commit(env, merge_ok):
     tests = [a for a in m.jobs() if a.n_crops and not a.batch]
     assert [(a.sha, a.trusted) for a in tests] == [(H1, False), (MC, True)]  # the merge commit is reviewed code
     assert statuses(m) == [(H1, "pending"), (H1, "success")]  # no status on the merge commit
-    assert bool(m.of("publish_crops")) == merge_ok and ("cropping" in m.stages) == merge_ok
+    assert bool(m.of("publish_crops")) == merge_ok and (m.stages[-1] == "done") == merge_ok
 
 
 async def test_head_test_that_cannot_run_posts_error(env):
@@ -713,7 +710,7 @@ async def test_merge_signal_before_test_finishes(env):
         await wake(h, m, head(H1, "merged", MC))
         m.gate.set()
         await idle(h, m, "done")
-    assert m.stages == ["matching", "developing", "testing", "cropping", "done"]
+    assert m.stages == ["matching", "developing", "testing", "done"]
     assert statuses(m) == [(H1, "pending"), (H1, "success")]
     assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [
         (H1, False),
@@ -741,7 +738,7 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
         await wake(h, m, head(H1, "merged", MC))
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "pr-ready", "cropping", "done"]
+    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "pr-ready", "testing", "done"]
     assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify", "crop", "verify"]  # no second match
     keys = [a[0] for a in m.of("submit")]
@@ -750,7 +747,7 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
     resumed = m.of("set_stage")[4]
     assert resumed[0] == "testing" and "resuming" in resumed[1] and PR_URL in resumed[1]
     assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, 5) and not m.of("refuse_label")
-    assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}"]
+    assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}", f"i7-e12-{MC[:12]}"]
 
 
 @pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])

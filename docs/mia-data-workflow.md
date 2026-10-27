@@ -14,7 +14,7 @@ flowchart TD
         issue["dataset issue<br/>data:new"]
         go{{"human adds data:go"}}
         approve{{"human adds data:approve"}}
-        gallery[("galleries branch<br/>test + production PNGs")]
+        gallery[("galleries branch<br/>the round's PNGs")]
     end
 
     issue --> go
@@ -24,20 +24,17 @@ flowchart TD
     subgraph cluster["LSF via csub, each job in its own sandbox"]
         match["match: Claude agent<br/>picks a snippet, writes the binding"]
         smoke["smoke: harness smoke<br/>checks the agent's claim"]
-        tcrop["test crops: harness crop --n 4<br/>+ harness verify"]
-        pcrop["production: harness crop --n 16<br/>+ harness verify"]
+        tcrop["crops: harness crop --n 16<br/>+ harness verify"]
     end
 
     wf -->|data:matching| match --> smoke
     smoke -->|matched| tcrop
     smoke -->|no snippet fits| dev
-    tcrop -->|passed, crops shown in the issue| review["data:review"]
+    tcrop -->|at least half verified, shown in the issue| review["data:review"]
     tcrop --> gallery
     review --> approve
-    approve -->|data:cropping| pcrop
-    pcrop --> publish["publish: copy verified crops<br/>to paths.storage_root"]
-    pcrop --> gallery
-    publish -->|data:done| done["issue comment:<br/>crop table, totals, folder links"]
+    approve --> publish["publish those crops<br/>to paths.storage_root"]
+    publish -->|data:done| done["issue comment:<br/>totals, folder links"]
 
     subgraph snippets["GitHub: mia-snippets"]
         dev["mia-snippets issue<br/>snippets:go"]
@@ -46,9 +43,9 @@ flowchart TD
     end
 
     dev --> pr
-    pr -->|each new head| tcrop
+    pr -->|each new head: 4 test crops, private cache| tcrop
     pr --> merge
-    merge -->|tree matches the tested head| pcrop
+    merge -->|tree matches the tested head| tcrop
 ```
 
 ## Overview
@@ -126,35 +123,35 @@ is tested again under a new round, and no second snippets issue is opened. A PR 
 new match. Components: autodev (its own namespace; the two workflows interact only through GitHub), mia-snippets
 CI, the GitHub client.
 
-### 5. Test crops and review
+### 5. Crops, review and publication
 
-Two plain jobs at the pinned snippets commit: `harness crop --n 4` with the round's test seed, then
-`harness verify` and `harness preview` in a separate workspace that loads no snippet code. Verify checks each
-crop is a square 16-bit PNG of the crop edge (256, or the image's own extent when it is smaller: a small
-dataset is cropped whole, never refused) with matching labels and writes overlay PNGs. The passing crops' `raw.png` and
-`overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a comment on the issue shows
-them inline with the binding and the agent's reasons. The issue moves to `data:review`.
+One set of crops per round (prep-and-buffering spec §13). Two plain jobs at the pinned snippets commit:
+`harness crop --n 16` (`crops.per_round`) with the round's seed and `--existing` pointing at the dataset's
+current manifest, so a later round adds crops rather than duplicating them; then `harness verify` and
+`harness preview` in a separate workspace that loads no snippet code. Verify checks each crop is a square 16-bit
+PNG of the crop edge (256, or the image's own extent when it is smaller: a small dataset is cropped whole, never
+refused) with matching labels and writes overlay PNGs. At least half of the set must verify (verify exits 1
+whenever one crop fails, so its report is the judge); fewer ends the round `data:needs-human` with nothing
+published. The passing crops' `raw.png` and `overlay.png` are committed to the `galleries` branch of
+mia-workflow-data, and a comment on the issue shows them inline with the binding and the agent's reasons. The
+issue moves to `data:review`.
 
-**A human approves every binding before production.** For a matched binding that is `data:approve` on the
-data issue; for a new snippet it is the PR review. A `data:approve` counts only while the issue is in review
-and only if it is newer than the round's test result. Components: the harness, csub, the gallery publisher,
-the status comments.
+**Validation.** A human approves the set with `data:approve` on the data issue (for a new snippet the PR review
+is the approval, and the set made at the merge commit is published without a second review). A `data:approve`
+counts only while the issue is in review and only if it is newer than the round's crops. The gate is one event;
+when the evaluation step exists, a VLM's `ok` verdict can stand in for the label.
 
-### 6. Production and publication
+**Publication.** The approve publishes the very crops that were reviewed: the worker reads the round's verify
+report back from its workspaces and copies every crop that passed into `paths.storage_root/<dataset>/<crop_id>/`
+by an idempotent publication activity (a retry never duplicates or overwrites), beside `binding.yaml`, and
+rebuilds the dataset's `manifest.json`. The final comment carries the totals and links to the crops folder, its
+gallery and the round's workspace. The issue is `data:done` and the registry row `prepared`; a new `data:go`
+later starts another round and adds more crops. There is no production phase and no `data:cropping` stage: a
+history from before this change replays the old path behind the `one-crop-set` marker.
 
-On approval the issue goes to `data:cropping` and one plain `harness crop` job extracts the production set
-(default 16, lowered when the dataset is small) with the round's production seed and `--existing` pointing at
-the dataset's current manifest, so repeated rounds add crops rather than duplicate them. A verify job judges
-them. Every crop that passes is copied into `paths.storage_root/<dataset>/<crop_id>/` by an idempotent
-publication activity (a retry never duplicates or overwrites), the dataset's `manifest.json` is rebuilt, and
-the PNGs go to the `galleries` branch. The final comment carries the crop table, the totals, and links to the
-crops folder, its gallery and the round's workspace. The issue is `data:done`; a new `data:go` later starts
-another round and adds more crops. If fewer than half pass, the passing ones are still published and the issue
-is `data:needs-human` with the reason.
-
-Every trusted crop job (the test crops at a reviewed commit, the production crops) holds the record's raw lock
-as in step 3, owner `mia-data <round> crop`, from before the crop job until its verify report is read, and puts
-the `raw` asset row afterwards; a PR head's test crops mount the cache read-only and take no lock.
+The trusted crop job holds the record's raw lock as in step 3, owner `mia-data <round> crop`, from before the
+crop job until its verify report is read, and puts the `raw` asset row afterwards; a PR head's test crops
+(`crops.test_per_round`, 4) mount the cache read-only and take no lock.
 
 ## How the issue reads
 

@@ -100,8 +100,8 @@ services:                                 # per service: app + the sections that
       trusted_bots: []                    # GitHub App slugs whose data:go counts without write access, e.g. [mia-autodev]
     crops:
       size: 256
-      per_round: 16
-      test_per_round: 4
+      per_round: 16                       # the round's set: reviewed and, approved, published (one set per round)
+      test_per_round: 4                   # a snippet PR head's test crops; never published
       per_plane: 4
       per_file: 8
     gallery: {branch: galleries}

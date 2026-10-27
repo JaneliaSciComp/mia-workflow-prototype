@@ -24,14 +24,18 @@ def describe_failure(kind: str, job: JobDone) -> str:
     return f"{kind} job {job.job_id} ended {job.state} (exit {job.exit_code})"
 
 
-def judge(verify: VerifyResult, jobs: list[JobDone]) -> tuple[bool, list[str]]:
-    """(passed, descriptions of failed jobs): passed when both jobs succeeded and every test crop verified."""
+def judge(verify: VerifyResult, jobs: list[JobDone], needed: int | None = None) -> tuple[bool, list[str]]:
+    """(passed, descriptions of failed jobs). A PR head's test crops (`needed` None) pass when both jobs succeeded
+    and every crop verified. The dataset's own set (spec §13) passes when the crop job succeeded and at least
+    `needed` crops verified: verify exits 1 whenever one crop fails, so its report is the judge, not its exit."""
     failed = [
         describe_failure(kind, job)
         for kind, job in zip(("crop", "verify"), jobs, strict=False)
         if not job_succeeded(job)
     ]
-    return not failed and verify.ok_count > 0 and not verify.errors, failed
+    if needed is None:
+        return not failed and verify.ok_count > 0 and not verify.errors, failed
+    return not failed and verify.ok_count >= max(1, needed), failed
 
 
 async def run_crop_test(
