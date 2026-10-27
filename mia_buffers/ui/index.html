@@ -625,6 +625,9 @@ async function viewDatasets() {
 // ---- buffers
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
+// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS
+const STAGE_OF = { created: "planning", planned: "plan-review", approved: "sourcing", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
+const stageOf = ev => ev ? STAGE_OF[ev.kind] || ev.kind : "";
 async function viewBuffers(id, refresh) {
   const root = $("buffersBody"), hash = location.hash;
   if (id) return viewBuffer(root, id, refresh);
@@ -632,11 +635,13 @@ async function viewBuffers(id, refresh) {
   const out = await load("/buffers");
   if (location.hash !== hash) return;  // the reader moved on while this loaded
   const buffers = out?.buffers || [];
-  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer; open one for its events, status board, volumes, consumers and usage."),
+  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its issue and stage; open one for its events, status board, volumes, consumers and usage."),
     table([
       { label: "buffer", cell: b => bufferLink(b.id) },
+      { label: "issue", cell: b => ghIssue(S.meta.buffers_repo, issueOf(b.id)) },
       { label: "spec", cell: b => b.config?.spec_name || "" },
-      { label: "latest event", cell: b => b.latest_event ? el("span", {}, statePill(b.latest_event.kind), " ", when(b.latest_event.at)) : "" },
+      { label: "state", cell: b => b.latest_event ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at))
+        : el("span", { class: "small", title: "registered before buffers recorded lifecycle events; the issue has the stage" }, "no events") },
       { label: "volumes", num: true, cell: b => num(b.volumes) },
       { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn") : "0" },
       { label: "servable", cell: b => servableText(b.servable) },
@@ -684,7 +689,7 @@ async function viewBuffer(root, id, refresh) {
   const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
   root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
     el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
-    el("h2", {}, id, " ", evs[0] ? statePill(evs[0].kind) : null),
+    el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
     el("div", { class: "links" },
       n && meta.buffers_repo ? link(`https://github.com/${meta.buffers_repo}/issues/${n}`, `issue #${n}`) : null,
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),

@@ -395,7 +395,9 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
 - **Datasets** reads `/meta`, `/catalogs`, `/records?ref=`, `/datasets`, `/assets/raw|staged` and runs the controls'
   spec through `POST /plan` (debounced 300 ms): fit funnel, charts, records table.
 - **Buffers** reads `/buffers`, then per buffer `/buffers/<id>/status`, `/events`, `/datasets` and `/usage/<id>`
-  (config, health line, daily draws, board, consumers).
+  (config, health line, daily draws, board, consumers). The list shows each buffer's issue (from its id) and its
+  stage: the latest lifecycle event read back as the stage label; a buffer registered before those events shows
+  "no events".
 - **Cache** reads `/assets/*`, `/locks`, `/keeper` and the quotas from `/meta`: meters, tables, the keeper card
   (the last pass the worker stored with `PUT /keeper`, or "has not reported a pass yet").
 - **Preparation** reads `/datasets`: in-progress and needs-human rows with issue links, plus a GitHub search for
