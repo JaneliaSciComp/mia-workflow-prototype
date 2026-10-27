@@ -831,9 +831,9 @@ Milestones A, B and C are independent of each other; D needs B and C; E needs B;
 
 - The approve step does not re-derive the workspaces: `Test` carries `crop_workspace` and `verify_workspace`
   (wire format, defaults `None`), set by `_test`; `_publish_set` reads the verify report back from them. A `Test`
-  without them (a round that reached review before I, mia-workflow-data#214 and #215) takes the old production
-  path on approve, so those two publish 16 production crops rather than their 4; the spec's "publish those 4" was
-  not kept, the pre-I record has no workspaces to publish from.
+  without them would take the old production path on approve; in practice none did: a worker restart replays a
+  round's history through the new `_test`, which fills the fields from the recorded `prepare_job` results, so
+  mia-workflow-data#214 (at review since before I) published its 4 reviewed crops on approve, as §13 says.
 - On the develop path the set is always made at the merge commit, even when the merged tree is the tested head's
   (pre-I skipped that test and produced): a PR head's crops come from a private cache and are never published.
   The stage therefore shows `testing` again after `pr-ready`.
