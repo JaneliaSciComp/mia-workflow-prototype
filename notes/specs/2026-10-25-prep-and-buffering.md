@@ -1,6 +1,7 @@
 # MIA: data preparation and buffering as two pipelines around one registry — Spec
 
-**Status:** draft v0.3 · 2026-10-27 · milestones A–F built on branch `training-buffers`. v0.3 is the amendment in
+**Status:** draft v0.4 · 2026-10-27 · milestones A–F and H built on branch `training-buffers`. v0.4 is the amendment
+in §13: one crop set per round, validated, then prepared (no production phase). v0.3 is the amendment in
 §12: the data pipeline stops judging eligibility (no `ineligible` state, no size or licence verdict; §1.14), after
 the first live preparation request declared a dataset unusable for everyone by one consumer's patch size. v0.2 took the architecture review of
 `ae37969` (`mia-client-test/notes/2026-10-25-training-buffers-architecture-review.md`): immutable staged
@@ -36,8 +37,8 @@ Two pipelines, one registry, one web page.
 ```mermaid
 flowchart LR
   subgraph prep["data preparation · mia-data (agents)"]
-    DI[dataset issue] --> M[match agent] --> S[smoke] --> T[test crops] --> R{human approve} --> P[production crops]
-    P --> E[evaluate: voxel size, channels, recipes, VLM later]
+    DI[dataset issue] --> M[match agent] --> S[smoke] --> C[crops] --> R{validate: human today, VLM later} --> P[publish: prepared]
+    P --> E[evaluate: voxel size, channels, recipes]
   end
   subgraph reg["buffer-api · registry + page"]
     REC[(records @ catalog ref)]
@@ -246,8 +247,8 @@ page and in `ready`, not as client read errors.*
 
 ## 4. Data preparation
 
-mia-data's round is unchanged in shape: seed, `data:go`, match agent, smoke, test crops, `data:review`,
-`data:approve`, production crops, publication. Four additions.
+mia-data's round (v0.4, §13): seed, `data:go`, match agent, smoke, crops, `data:review`, `data:approve`,
+publication. Four additions.
 
 ### 4.1 The registry hears every stage
 
@@ -663,6 +664,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 | E | `MiaPrep` and the `prep:go` issue; the poller's binding watch removed | a preparation request for an unprepared record opens its dataset issue, adds `data:go`, and the registry shows `in-progress` then `prepared` |
 | F | the page: datasets with YAML and issue links, buffers, cache, preparation views | the lead composes a 2D gray buffer on the page, opens the issue from it, and follows it to `ready` without opening the issue again |
 | G | evaluation step | its own spec and plan; the row schema in §4.3 is the contract |
+| I | one crop set per round (§13): the round's crops are reviewed and, approved, published; no production phase, no `data:cropping`; the approve gate is pluggable | a `go` on a prepared-looking record runs one crop job of `crops.per_round`, shows them at `data:review`, and `data:approve` publishes exactly those crops with the binding and manifest, the registry row turning `prepared`; no `data:cropping` label is set; a second `go` adds crops without duplicating; the replay fixtures pass unchanged; mia-workflow-data#215, at review from before the deploy, publishes its set on approve |
 | H | eligibility leaves the data pipeline (§12): no `ineligible` state, no size or licence verdict, crops capped by the image, the harness's crop size a parameter | issue 213 (60×59 yeast traps) reaches `data:review` with whole-image test crops and, approved, `prepared`; `POST /plan` with the 2D gray spec lists it under the footprint reason while a 32-pixel-patch spec admits it; `GET /datasets` knows no `ineligible`; `mia-data init-labels` creates neither `data:ineligible`, `maybe-small` nor `licence-excluded`; the replay fixtures pass unchanged |
 
 **Built in C (2026-10-26).** Deviations from this spec and rulings made during the build:
@@ -874,3 +876,58 @@ and 256 is a fine default when the image allows it. `has-labels` stays as inform
 nothing to them. Whether mia-data should refuse records on any ground other than "cannot read it" or "a human
 must decide" is answered **no**; if a policy stop is ever wanted (an embargoed source, say), it is a new, named
 state with its own spec paragraph, not `ineligible`.
+
+## 13. Amendment v0.4: one crop set, validated, then prepared
+
+**What the user asked for (2026-10-27).** Data preparation creates a binding, tests it by downloading a subset
+of the raw data (as much as testing needs) and producing crops from it, then asks for validation: a human on
+GitHub today, possibly a VLM later. There is no second set of crops. When a buffer later runs, it reuses whatever
+raw data the data pipeline downloaded.
+
+**What already holds.** The match agent writes the binding. Smoke and the crop job read through the shared raw
+cache, so each downloads only the files its reads touch, under the record's lock, and a buffer's fetch of the
+same record finds them in place and downloads the rest (§5.2 step 2). The validation gate is `data:approve`,
+judged against the gallery of the round's crops. The only thing the round does that the description does not
+is the **production phase**: after the approve it runs a second crop job (`crops.per_round`, 16) with a second
+seed, verifies and publishes *that* set, and the reviewed test set (`crops.test_per_round`, 4) is never
+published. Two sets, two seeds, one extra job and a `data:cropping` stage, for no reason that survives the
+description above: a human approves a binding by looking at crops, and the crops they looked at are the crops.
+
+**The round, after.** match → smoke → **crops** (`crops.per_round` of them, the trusted job under the record's
+lock) → verify + preview → gallery → `data:review` → **validate** → **publish** the very crops that were
+reviewed, with the binding and the manifest → `data:done`, registry row `prepared`. No `data:cropping`, no
+production seed, no second job. `_produce` goes; the approve step re-reads the round's verify report from the
+`crop-<sha>` and `verify-<sha>` workspaces (`read_verify`, an activity; the durable state holds no crop list,
+and the workspaces outlive a rollover) and calls `publish_crops` on it. `--existing` stays: a later `go` on a
+prepared dataset makes a new set that dedups against the published manifest, so rounds add crops. The halving
+rule ("at least half must pass or needs-human") applies to the one set, before review: a set that fails it never
+reaches a human.
+
+**The gate is pluggable.** `data:approve` is one implementation of "validate". The evaluation step of §4.3
+(milestone G) is the other: when it exists, a config switch (`evaluate.approve: true`) lets an `ok` verdict
+stand in for the human's label, while `suspect` and `bad` leave the issue at `data:review` for a person. The
+gate's input is the gallery and the verify report; its output is one approve event. Nothing in this amendment
+builds the VLM; it keeps the seam where it plugs in.
+
+**The develop path.** A new snippet's PR heads still get test crops: an unreviewed snippet runs with a private
+cache and its crops are the PR's check, never the dataset's. After the merge, the crop set made at the merged
+commit is the dataset's set and goes to review like a matched binding's. `crops.test_per_round` therefore
+survives for PR heads only; `crops.per_round` is the size of the set a human (or a VLM) validates.
+
+**Changes.**
+
+| where | change |
+|---|---|
+| `mia_data/workflows.py` | `_round`: the trusted crop step uses `per_round`; on approve, `_publish_reviewed()` (read_verify on the round's workspaces, `publish_crops`, totals comment, `done`) replaces `_produce`; PR-head tests unchanged. Behind `workflow.patched("one-crop-set")`: a run whose history holds a production phase (every dataset at `done` today) replays the old branch |
+| `mia_data/config.py`, `models.py` | `STAGES` loses `cropping`; `RoundLimits.test_n` stays for PR heads, `per_round` is the set size; no new fields |
+| `mia_data/activities.py` | `publish_gallery` accepts no `production` kind; `publish_crops` unchanged |
+| docs | `mia-data-workflow.md` steps 5 and 6 become one step; the crops spec (`notes/mia-crops-spec.md`, v0.9) gets a status line saying steps 3–4 and §7.5 are superseded by this section |
+| GitHub | the `data:cropping` label is deleted by hand after the deploy, like §12's |
+
+**Live rounds.** mia-workflow-data#214 and #215 sit at `data:review` with a 4-crop set from before the deploy.
+On approve they take the new path and publish those 4; a later `go` adds a full set. The datasets at `done`
+(#50–#56) keep their histories replaying through the old branch.
+
+**Not changed.** The raw cache rule stays as it is: only original files are written under `raw/<record>/`,
+by whichever job downloads them, and only the keeper deletes there. Crops, the binding and the manifest live
+under `crops/<dataset folder>/`; pyramids under `staged/`.

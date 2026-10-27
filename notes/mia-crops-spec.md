@@ -1,6 +1,9 @@
 # MIA crops: snippets, development and production cropping — Spec
 
 **Status:** draft v0.9 · 2026-10-12 · not yet approved. A proof of concept: 2D PNG crops only.
+**2026-10-27:** the prep-and-buffering spec supersedes parts of this one: its §12 removes the size and licence
+verdicts (`ineligible`, "planes smaller than 256×256 are rejected"), and its §13 removes the production phase
+(steps 3–4 below, §7.5): one crop set per round is reviewed and, approved, published.
 v0.9: test crops stay in their job workspaces (§7.4); jobs run the harness environment's entry point directly (§6).
 **Repos:** this repo (orchestration, new package `mia_data/`), [JaneliaSciComp/mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) (issues and crop galleries),
 [JaneliaSciComp/mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) (conversion snippets + their harness), [AI-HHMI/mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) (read-only input)
