@@ -1,6 +1,8 @@
 # MIA: data preparation and buffering as two pipelines around one registry — Spec
 
-**Status:** draft v0.4 · 2026-10-27 · milestones A–F and H built on branch `training-buffers`. v0.4 is the amendment
+**Status:** draft v0.5 · 2026-10-27 · milestones A–F, H and I built on branch `training-buffers`. v0.5 is the amendment
+in §14: every set is reviewed, `data:reject` sends the reviewer's comments to the agent, and the loop runs until
+`data:approve`, which merges the snippet PR. v0.4 is the amendment
 in §13: one crop set per round, validated, then prepared (no production phase). v0.3 is the amendment in
 §12: the data pipeline stops judging eligibility (no `ineligible` state, no size or licence verdict; §1.14), after
 the first live preparation request declared a dataset unusable for everyone by one consumer's patch size. v0.2 took the architecture review of
@@ -949,3 +951,64 @@ On approve they take the new path and publish those 4; a later `go` adds a full 
 **Not changed.** The raw cache rule stays as it is: only original files are written under `raw/<record>/`,
 by whichever job downloads them, and only the keeper deletes there. Crops, the binding and the manifest live
 under `crops/<dataset folder>/`; pyramids under `staged/`.
+
+## 14. Amendment v0.5: the review loop
+
+**What the user asked for (2026-10-27).** Every change goes through `data:review`; a snippet PR is not merged
+until the user approves its output. The user can give feedback and iterate the PR before accepting: a
+`data:reject` label, with plain comments on the data issue saying what is wrong. On reject, the comments
+posted after the review began and before the reject go to the agent fixing the snippet; it makes or updates
+the PR, the crops are made again, and the issue waits in `data:review` again. The loop runs until
+`data:approve`; then the PR is merged.
+
+**What was wrong.** §13 kept two exceptions to "the crops a human validated are the crops published": a PR
+head's crops were a check (`crops.test_per_round`, 4, never published), and after the merge the set made at
+the merge commit was published *without* a review, the PR review standing in for it. With `github.auto_merge`
+(added the same day) the PR merged on a green `mia-data/crops` status alone, so a new snippet's output reached
+`prepared` without anyone looking at it; verify checks structure, not content. And a reviewer who disliked a
+set had no signal to give: no reject, no path from a bad gallery to a fix.
+
+**The loop.** One rule: **a set is published only after a human approved that set, and a snippet PR is merged
+only after a human approved a set made by its head.**
+
+- *Matched round:* match → smoke → crops → gallery → `data:review`. `data:approve` publishes those crops
+  (`data:done`). `data:reject` opens a mia-snippets issue asking autodev to **supersede** the snippet(s) the
+  binding uses (SPEC §1: a new directory, `supersedes: <name>`; the old one is never edited and is hidden from
+  later matches), with the reviewer's comments, the binding and the verify report; the round continues on the
+  develop path below.
+- *Develop round:* every PR head gets the dataset's set (`crops.per_round`, the half rule, `--existing`), made
+  by the untrusted job as before (private cache, read-only shared cache, no lock), its gallery and the
+  `mia-data/crops` status on that head. A head whose set passes goes to `data:review`; a head whose set fails
+  gets the report as a `/revise` on the PR, so autodev fixes a snippet that crashes without a human. At review,
+  `data:approve` posts `/approve <head>` on the PR and the stage is `merging`; autodev merges (the status is
+  green, by construction) and the merge wakes the round: if the merged snippet tree is the approved head's, the
+  **approved crops are published**, the same files the reviewer looked at; otherwise the merge commit gets its
+  own set and comes back to `data:review`. `data:reject` posts `/revise` with the reviewer's comments on the PR
+  and the stage is `developing`; the next head's set comes back to `data:review`. A PR that changes head during
+  review is tested again; one closed, or escalated by autodev to `snippets:needs-human`, ends the round in
+  `data:needs-human`, as does autodev's revision limit or `limits.max_pr_revisions` heads tested in one round.
+- *Feedback* is the comments on the data issue by people with write access, posted after the set's report and
+  before the reject (the bot's own excluded), neutralized and capped; a reject with no comments is sent as
+  "(no details)". The `go` label during a develop round stays busy, as now; during a matched round's review it
+  starts a new round as now.
+
+**Trust.** The crops published from a PR head are PNGs the trusted verify job (no snippet code) checked and a
+human looked at, the same evidence a matched round publishes on; the head's code is merged only after that.
+The merge itself is autodev's (branch protection, the required status, conflict handling): mia-data speaks to
+it with `/approve` and `/revise`, and autodev accepts those commands from a login in `github.trusted_bots`
+**only as the first line of the comment**, since the worker's other PR comments quote agent-written text.
+`github.auto_merge` is removed: `data:approve` is the acceptance.
+
+**Changes.**
+
+| where | change |
+|---|---|
+| `mia_data/workflows.py` | signal `reject`; `_follow_pr` is the develop round's one wait (PR updates and labels); `_test_head` makes the set and ends in `review` (pass, extra: the PR link) or posts `/revise` (fail); verdicts at review: approve → `/approve`, `merging`; reject → `read_feedback`, `/revise`, `developing`; `_merged` publishes the approved head's crops when the tree matches, else makes the merge commit's set for review; matched reject → `_develop` with the binding (`open_snippet_issue(..., binding=)`). Marker `review-loop`; the recorded develop fixture replays the old branches |
+| `mia_data/models.py`, `config.py` | `Test.approved_at` (wire, default `None`); `LabelEvent.kind` adds `reject`; `HUMAN_LABELS` gains `reject`; `STAGES`: `merging` in, `pr-ready` out (its label deleted by hand); `RoundLimits.test_n` stays as a field, unused; `crops.test_per_round` serves the `test-pr` CLI only |
+| `mia_data/activities.py` | `read_feedback(issue, since, until)`; `open_snippet_issue(..., binding=)` writes the supersede request (title "Fix the crops of <record>", the snippets the binding names, the comments, the binding) |
+| `mia_data/poll.py` | delivers `data:reject` like the other two labels (write access, event id and time) |
+| `autodev/review.py`, `activities.py`, `config.py` | `Reviewers.trusted`; `/approve` and `/revise` count from a trusted bot at line 1 of the comment; `auto_merge` and its check are deleted, the PR body names the data-issue approve |
+| docs | `mia-data-workflow.md` steps 4–5 and the diagram; README; runbook label line; `mia.yaml.example` |
+
+**Live rounds.** No develop round is live (mia-workflow-data#213 is done). mia-workflow-data#215 waits at
+`data:review` on the matched path: its approve publishes as before, and a reject now takes it to the loop.
