@@ -304,5 +304,6 @@ def test_every_builder_refuses_a_moved_harness(tmp_path):
 def test_match_prompt_names_pins_and_outcomes(tmp_path):
     p = match_prompt(_pins(_cfg(tmp_path)))
     assert "rec-1" in p and "c" * 40 in p and "$" not in p
-    for o in ("matched", "needs_snippet", "ineligible", "blocked", "host_not_allowed", "outcome.json"):
+    for o in ("matched", "needs_snippet", "blocked", "host_not_allowed", "outcome.json"):
         assert o in p
+    assert "ineligible" not in p and "256" not in p  # size is the buffer plan's call (spec §12)

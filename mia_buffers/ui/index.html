@@ -241,7 +241,7 @@ const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w
 const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
 const pill = (text, kind) => el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
 const GOOD = new Set(["prepared","ready","servable","pool"]);
-const BAD = new Set(["failed","needs-human","missing","blocked","evicted","ineligible","stale"]);
+const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale"]);
 const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
 
 // ---- times: the ledger stores epoch seconds; keep ISO strings working too
@@ -592,7 +592,7 @@ function renderDatasets() {
     tile("Datasets that fit", plan ? num(fitting.length) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
     tile("Prepared", num(prepared), "the buffer's pool today"),
     tile("In progress", num(inProgress), "mia-data is preparing them"),
-    tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human · ${num(count("ineligible"))} ineligible`),
+    tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human`),
     tile("Raw bytes", `${fmtBytes(poolBytes)} / ${fmtBytes(bytes)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(toFetch)} not in the raw cache`),
     tile("Dimensionalities", dimsIn.length ? dimsIn.join(" · ") : "none", dimsIn.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
     tile("Capacity", fmt(fitting.reduce((a, x) => a + (x.positions || 0), 0)), "non-overlapping coarsest crops in the fitting datasets"),

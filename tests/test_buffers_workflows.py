@@ -537,30 +537,6 @@ async def test_job_exit_failure_fails_dataset(env):
     assert not m.of("read_stage")
 
 
-@pytest.fixture
-def pre_e(monkeypatch):
-    """The run takes the path from before `e-prep`: a record without a binding is handed to mia-data and waited
-    for. Pass the runner it returns to `started`, so the workflow sees the patched module."""
-    monkeypatch.setattr(workflows, "_prep_requests", lambda: False)
-    return UnsandboxedWorkflowRunner()
-
-
-async def test_binding_still_missing_after_update_fails_dataset(env, pre_e):
-    """A `binding` update whose file then cannot be read (gone again, or naming another record) fails the dataset
-    rather than waiting forever; a plain missing binding goes to mia-data instead (milestone 4 tests below)."""
-    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
-    m = Mocks(plan=only, unbound={"u937"})
-    async with started(env, m, runner=pre_e) as h:
-        await approve(h, m)
-        await until(lambda: m.of("nudge_dataset"), m=m)
-        await h.signal(MiaBuffer.dataset_update, args=["u937", "binding"])  # the mock still has no binding
-        await idle(h, m, "needs-human")
-        state = await h.query(MiaBuffer.status)
-    assert dataset(state, "u937").status == "failed" and "not data:done" in dataset(state, "u937").reason
-    assert [a[0] for a in m.of("read_binding")] == ["u937", "u937"] and not m.of("prepare_stage")
-    assert len([a for a in m.of("comment") if "u937" in a[0] and "failed" in a[0]]) == 1
-
-
 async def test_drop_with_missing_files_keeps_waiting(env):
     only = PlanResult(True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64)
     m = Mocks(plan=only, drops={"bcss": [DropResult(False, [], ["a.zip"]), DropResult(True, ["a.zip"])]})
@@ -838,63 +814,15 @@ async def test_poll_signals_only_a_stable_listing(tmp_path):
 # --- milestone 4: datasets without a binding -----------------------------------------------------
 
 
-async def test_unmatched_dataset_waits_for_binding_then_stages(env, pre_e):
-    m = Mocks(unbound={"bcss"})
-    async with started(env, m, runner=pre_e) as h:
-        await approve(h, m)
-        await until(lambda: m.of("nudge_dataset") and m.of("register_dataset"), m=m)
-        await until(lambda: any("data:go" in a[0] for a in m.of("comment")), m=m)
-        state = await h.query(MiaBuffer.status)
-        bcss = dataset(state, "bcss")
-        assert (bcss.status, bcss.issue, bcss.folder) == ("waiting-dataset", 5, "lm-bcss")
-        assert dataset(state, "u937").status == "servable" and m.stages[-1] == "sourcing"
-        m.bound.add("bcss")
-        await h.signal(MiaBuffer.dataset_update, args=["bcss", "binding"])
-        await until(lambda: m.of("comment_drop"), m=m)  # bcss is manual: the binding found, the drop path follows
-        await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
-        state = await h.query(MiaBuffer.status)
-    # unbound, after the update, and again under the raw-cache lock (c-cache)
-    assert m.of("nudge_dataset") == [("bcss",)] and [a[0] for a in m.of("read_binding")].count("bcss") == 3
-    assert dataset(state, "bcss").status == "servable" and state.ready
-
-
-async def test_ineligible_dataset_is_dropped_and_plan_reposted(env, pre_e):
-    m = Mocks(unbound={"bcss"}, nudges={"bcss": DatasetIssue(5, "ineligible", False, folder="lm-bcss")})
-    async with started(env, m, runner=pre_e) as h:
-        await approve(h, m)
-        await idle(h, m, "ready")  # u937 alone: bcss's group is gone from the denominator
-        state = await h.query(MiaBuffer.status)
-    bcss = dataset(state, "bcss")
-    assert bcss.status == "dropped" and "ineligible" in bcss.reason and "#5" in bcss.reason
-    assert [a[1] for a in m.of("comment_plan")] == [None, {"bcss": bcss.reason}]
-    assert any("dropped" in a[0] and "bcss" in a[0] for a in m.of("comment"))
-    assert not m.of("comment_drop") and not m.of("verify_drop") and state.ready
-
-
-async def test_late_dataset_update_is_ignored(env):
-    only = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
-    m = Mocks(plan=only)
+async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
+    m = Mocks(plan=replace(PLAN, timeout_days=SHORT_DAYS))  # bcss waits for a manual drop that never comes
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
-        calls = len(m.calls)
-        await h.signal(MiaBuffer.dataset_update, args=["u937", "binding"])
-        await h.signal(MiaBuffer.dataset_update, args=["nobody", "ineligible"])
-        await asyncio.sleep(0.5)
-        state = await h.query(MiaBuffer.status)
-    assert dataset(state, "u937").status == "servable" and len(m.calls) == calls and state.ready
-
-
-async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env, pre_e):
-    m = Mocks(plan=replace(PLAN, timeout_days=SHORT_DAYS), unbound={"bcss"})  # bcss waits for mia-data forever
-    async with started(env, m, runner=pre_e) as h:
-        await approve(h, m)
-        await until(lambda: m.of("register_dataset") and m.of("nudge_dataset"), m=m)
+        await until(lambda: m.of("register_dataset") and m.of("comment_drop"), m=m)
         await idle(h, m, "ready")
         state = await h.query(MiaBuffer.status)
     bcss = dataset(state, "bcss")
-    assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-dataset" in bcss.reason
+    assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-drop" in bcss.reason
     assert m.of("comment_plan")[-1][1] == {"bcss": bcss.reason} and "needs-human" not in m.stages
     assert state.ready and dataset(state, "u937").status == "servable"
 
@@ -939,15 +867,15 @@ async def test_poll_starts_a_prep_workflow_on_prep_go(tmp_path):
     assert gh.removed == [(8, "prep:go"), (9, "prep:go")] and "does not have write access" in gh.comments[9][0]["body"]
 
 
-async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env, pre_e):
+async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
     """Review Focus 5: at the timeout the waiters are dropped, a stage job still running finishes, and ready
     follows from the groups that remain."""
     # a real-time timeout of ~5 s: the test server cannot skip time while await_job is blocked on the gate
     short = PlanResult(True, [], PLAN.pool, 10, levels=[1, 2, 4], patch=256, timeout_days=6e-5)
-    m = Mocks(plan=short, unbound={"bcss"}, gate=asyncio.Event(), gate_on="stage-u937")
-    async with started(env, m, runner=pre_e) as h:
+    m = Mocks(plan=short, gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m) as h:
         await approve(h, m)
-        await until(lambda: m.of("nudge_dataset") and m.of("await"), m=m)  # bcss waits on mia-data, u937's job runs
+        await until(lambda: m.of("comment_drop") and m.of("await"), m=m)  # bcss waits on a drop, u937's job runs
         for _ in range(400):
             state = await h.query(MiaBuffer.status)
             if dataset(state, "bcss").status == "dropped":
@@ -1838,14 +1766,14 @@ async def polled(env, m, count):
 
 
 def prep_round():
-    """a opened, b already prepared, c in progress; a turns prepared and c ineligible on the second poll."""
+    """a opened, b already prepared, c in progress; a and c turn prepared on the second poll."""
     return PrepMocks(
         outcomes={
             "a": PrepOutcome("a", "opened", 4),
             "b": PrepOutcome("b", "prepared"),
             "c": PrepOutcome("c", "in-progress", 6),
         },
-        statuses={"a": ["unprepared", "prepared"], "c": ["in-progress", "ineligible"]},
+        statuses={"a": ["unprepared", "prepared"], "c": ["in-progress", "prepared"]},
     )
 
 
@@ -1865,7 +1793,7 @@ async def test_prep_round_opens_nudges_and_closes_done(env):
     assert m.of("prep_status") == [(["a", "c"],), (["a", "c"],)]  # b settled at the nudge
     assert "`a`" in m.of("set_prep_stage")[-1][1] and "`b`" in m.of("set_prep_stage")[-1][1]
     assert m.of("refuse_label") == [("prep:go", workflows.BUSY, "22")]
-    assert state.settled == {"a": "prepared", "b": "prepared", "c": "ineligible"} and state.stage == "done"
+    assert state.settled == {"a": "prepared", "b": "prepared", "c": "prepared"} and state.stage == "done"
 
 
 async def test_prep_needs_human_on_timeout(env):
@@ -1976,27 +1904,4 @@ async def test_replay_buffer_history_e(env):
             await idle(h, m, "ready")
             PREP_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-e-prep", PREP_E_HISTORY.read_text())
-    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
-
-
-PRE_E_HISTORY = HISTORY.with_name("buffer_history_pre_e.json")
-
-
-async def test_replay_buffer_history_pre_e(env, monkeypatch):
-    """A run from before `e-prep`, recorded with `_prep_requests` patched off: b has no binding, so mia-data is
-    nudged and b sits in `waiting-dataset` while a alone makes the buffer ready. It replays on today's MiaBuffer with
-    the real `_prep_requests` (no e-prep marker in the history: the old branch). Re-record this one alone:
-    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_pre_e"""
-    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
-        monkeypatch.setattr(workflows, "_prep_requests", lambda: False)
-        m = Mocks(plan=ONE_GROUP, unbound={"b"})
-        async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
-            await approve(h, m)
-            await until(lambda: any("Waiting for mia-data" in a[0] for a in m.of("comment")), m=m)
-            await idle(h, m, "ready")
-            assert dataset(await h.query(MiaBuffer.status), "b").status == "waiting-dataset"
-            PRE_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
-        monkeypatch.undo()
-    assert workflows._prep_requests.__name__ == "_prep_requests"  # the real one replays
-    history = WorkflowHistory.from_json("buffers-pre-e", PRE_E_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)

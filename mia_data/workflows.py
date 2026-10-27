@@ -73,7 +73,8 @@ def _parse_time(iso: str | None) -> datetime | None:
 @workflow.defn(name="MiaDataDataset")
 class MiaDataDataset:
     """One workflow per dataset issue, forever: each new `go` runs a round (match → test → review → approve →
-    crop → publish) that ends in a dataset stage (done, needs-human, ineligible), then waits for the next `go`."""
+    crop → publish) that ends in a dataset stage (done or needs-human), then waits for the next `go`. Size is no
+    verdict of this pipeline: a small raw is cropped whole, and a buffer plan decides what fits it (spec §12)."""
 
     @workflow.init
     def __init__(self, state: DatasetState) -> None:
@@ -417,9 +418,10 @@ class MiaDataDataset:
         if not job_succeeded(job := await self._job("match", workspace)):
             return await self._finish("needs-human", describe_failure("match", job))
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
+        no_size_verdict = workflow.patched("h-no-eligibility")  # pre-H histories carry an `ineligible` outcome
         if match.outcome == "needs_snippet":
             return await self._develop(match, snippet_issue)
-        if match.outcome not in ("matched", "ineligible"):
+        if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
             return await self._finish("needs-human", f"match blocked: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
         if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
@@ -446,14 +448,15 @@ class MiaDataDataset:
                 f"smoke failed: {why}"
                 + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
             )
-        if smoke.eligible != (match.outcome == "matched"):
-            return await self._finish(
-                "needs-human",
-                f"the match agent says {match.outcome}, but smoke found the data "
-                f"{'eligible' if smoke.eligible else 'ineligible'}",
-            )
-        if not smoke.eligible:
-            return await self._finish("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
+        if not no_size_verdict:  # replay of a pre-H round only; smoke.json no longer says `eligible`
+            if smoke.eligible != (match.outcome == "matched"):
+                return await self._finish(
+                    "needs-human",
+                    f"the match agent says {match.outcome}, but smoke found the data "
+                    f"{'eligible' if smoke.eligible else 'ineligible'}",
+                )
+            if not smoke.eligible:
+                return await self._finish("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
 
         # Test crops at the matched snippets commit, shown on the issue for review.
         sha = state.pins.snippets_commit

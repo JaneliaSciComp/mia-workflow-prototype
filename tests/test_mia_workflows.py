@@ -374,9 +374,9 @@ async def test_seed_is_recorded(env):
 
 
 async def test_approve_outside_review_is_refused(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.approve, ev("approve", "12", "2030-01-01T00:00:00Z"))
         await until(lambda: m.of("refuse_label"))
     assert m.of("refuse_label")[0][0] == "data:approve" and m.of("refuse_label")[0][2] == "12"
@@ -396,28 +396,28 @@ async def test_stale_approve_is_refused(env):
 
 
 async def test_redelivered_go_is_ignored(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.go, ev("go", "11"))
         await h.signal(MiaDataDataset.go, ev("go", "12"))
         await until(lambda: len(m.stages) == 4)
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
     assert m.of("admit") == [("11",), ("12",)] and not m.of("refuse_label")
 
 
 async def test_go_while_busy_is_rejected_with_comment(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False), gate=asyncio.Event())
+    m = Mocks(outcome="blocked", gate=asyncio.Event())
     async with started(env, m) as h:
         await until(lambda: m.of("await"))
         await h.signal(MiaDataDataset.go, ev("go", "12"))  # in history before the job ends
         m.gate.set()
         await until(lambda: m.of("refuse_label"))
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.go, ev("go", "13"))  # arrives while idle: a new round
         await until(lambda: len(m.of("admit")) == 2)
-        await until(lambda: m.stages.count("ineligible") == 2)  # no activity in flight at shutdown: one would hold
-        await idle(h, m, "ineligible")  # up the test server's time skipping (env.sleep) in later tests
+        await until(lambda: m.stages.count("needs-human") == 2)  # no activity in flight at shutdown: one would hold
+        await idle(h, m, "needs-human")  # up the test server's time skipping (env.sleep) in later tests
     ((label, reason, eid),) = m.of("refuse_label")
     assert (label, eid) == ("data:go", "12") and "busy" in reason
     assert m.of("admit") == [("11",), ("13",)]
@@ -432,11 +432,19 @@ async def test_partial_production(env):
     assert "5 of 16" in m.of("set_stage")[-1][1] and m.of("publish_gallery")[-1] == ("production", 5)
 
 
-async def test_ineligible(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False, shapes={"raw": [[10, 10]]}))
+async def test_a_small_raw_is_cropped_not_judged(env):
+    """Size is the buffer plan's decision (spec §12): smoke's old `eligible` flag changes nothing in the round."""
+    m = Mocks(smoke=SmokeResult(True, False, shapes={"raw": [[10, 10]]}))
     async with started(env, m) as h:
-        await idle(h, m, "ineligible")
-    assert m.stages == ["matching", "ineligible"] and m.jobs() and not [a for a in m.jobs() if a.n_crops]
+        await idle(h, m, "review")
+    assert "ineligible" not in m.stages and [a for a in m.jobs() if a.n_crops]
+
+
+async def test_an_ineligible_outcome_is_an_unknown_one_now(env):
+    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.stages == ["matching", "needs-human"] and not [a for a in m.jobs() if a.n_crops]
 
 
 async def test_blocked_goes_needs_human(env):
@@ -519,14 +527,14 @@ async def test_worker_death_mid_await_reattaches(env):
 
 async def test_continue_as_new_keeps_handled(env, monkeypatch):
     monkeypatch.setattr(workflows, "MAX_ROUNDS_PER_EXECUTION", 1)
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    m = Mocks(outcome="blocked")
     async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
         assert (await h.describe()).run_id != h.first_run_id  # rolled over
         await h.signal(MiaDataDataset.go, ev("go", "11"))  # redelivered into the new run
         await h.signal(MiaDataDataset.go, ev("go", "12"))
         await until(lambda: len(m.of("admit")) == 2)
-        await idle(h, m, "ineligible")
+        await idle(h, m, "needs-human")
         assert (await h.query(MiaDataDataset.status)).handled == ["11", "12"]
     assert m.of("admit") == [("11",), ("12",)]
 
@@ -829,7 +837,7 @@ def _poll(tmp_path, data, snip):
     return Activities(make_cfg(tmp_path), data, snip, None, None, bot="bot", client=fc), fc
 
 
-async def test_poll_refuses_go_on_licence_excluded(tmp_path):
+async def test_poll_starts_a_round_per_go_and_refuses_an_unprivileged_label(tmp_path):
     at = "2026-10-12T10:00:00Z"
     data = PollGH(
         "o/data",
@@ -843,18 +851,13 @@ async def test_poll_refuses_go_on_licence_excluded(tmp_path):
     )
     a, fc = _poll(tmp_path, data, PollGH("o/snippets"))
     await a.poll()
-    ((wf, arg, kw),) = fc.started
-    assert (wf, arg, kw["id"], kw["task_queue"], kw["start_signal"]) == (
-        "MiaDataDataset",
-        DatasetState(2),
-        "mia-data/o/data/issue-2",
-        "mia-data",
-        "go",
-    )
+    started_ids = sorted(kw["id"] for _, _, kw in fc.started)  # a stale `licence-excluded` label refuses nothing
+    assert started_ids == ["mia-data/o/data/issue-1", "mia-data/o/data/issue-2"]
+    (_, arg, kw) = next(s for s in fc.started if s[2]["id"].endswith("issue-2"))
+    assert (arg, kw["task_queue"], kw["start_signal"]) == (DatasetState(2), "mia-data", "go")
     assert kw["start_signal_args"] == [LabelEvent("go", "52", "alice", at)]
     assert sorted(data.removed) == [(1, "data:go"), (2, "data:go"), (3, "data:approve")]
-    assert "licence" in data.comments[1][0]["body"] and "mallory" in data.comments[3][0]["body"]
-    assert 2 not in data.comments
+    assert "mallory" in data.comments[3][0]["body"] and 1 not in data.comments and 2 not in data.comments
 
 
 async def test_poll_sets_status_for_non_snippet_pr(tmp_path):

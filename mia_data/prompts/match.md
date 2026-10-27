@@ -42,7 +42,7 @@ All in the current directory:
    several snippets and params.
 4. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
 
-   - The binding passes smoke and at least one raw array is eligible:
+   - The binding passes smoke:
 
          {"outcome": "matched", "binding": <binding.yaml as JSON>}
 
@@ -51,11 +51,6 @@ All in the current directory:
          {"outcome": "needs_snippet", "draft_binding": <the closest binding as JSON>,
           "what_fails": "<what a new snippet must handle, with the smoke errors>",
           "tried": [{"snippet": "<name>", "params": {}, "error": "<smoke error>"}]}
-
-   - The binding passes smoke, but no raw array has Y >= 256 and X >= 256 (`"eligible": false` in
-     `smoke.json`). Stop here; there is nothing to crop. Keep the passing `binding.yaml`:
-
-         {"outcome": "ineligible", "shapes": <the "shapes" object from smoke.json>}
 
    - You can't decide, or something outside your control stops you (an undecidable label class, a dependency
      missing from the allowlist, a host the job may not reach):

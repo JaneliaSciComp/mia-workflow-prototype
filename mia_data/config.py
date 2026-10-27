@@ -39,7 +39,6 @@ STAGES = {
     "cropping": ("fbca04", "mia-data: producing crops"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
-    "ineligible": ("cccccc", "mia-data: dataset not eligible"),
 }
 HUMAN_LABELS = {  # set by humans
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
@@ -47,8 +46,6 @@ HUMAN_LABELS = {  # set by humans
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
-    "maybe-small": ("c5def5", "Dataset may be too small for crops"),
-    "licence-excluded": ("cccccc", "Licence not in crops.licences"),
 }
 
 
@@ -111,7 +108,6 @@ class CropsCfg(BaseModel):
     test_per_round: int = 4
     per_plane: int = 4
     per_file: int = 8
-    licences: list[str] = ["CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "MIT"]
 
 
 class LimitsCfg(BaseModel):
@@ -165,8 +161,6 @@ class Config(BaseModel):
         self._resolve_paths()
         self._check_limits()
         self._check_agent()
-        if not self.crops.licences:
-            raise ValueError("crops.licences must not be empty")
         self._check_network()
         return self
 

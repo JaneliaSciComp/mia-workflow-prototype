@@ -7,7 +7,7 @@ from mia_data.config import PROJECT_DIR, load_config
 
 def test_defaults(tmp_path):
     c = make_cfg(tmp_path)
-    assert c.crops.licences[0] == "CC0-1.0" and c.gallery.branch == "galleries"
+    assert c.crops.size == 256 and c.gallery.branch == "galleries"
 
 
 @pytest.mark.parametrize(
@@ -18,7 +18,6 @@ def test_defaults(tmp_path):
         {"network": {"redirect_hosts": {"a.example": ["*.b.example"]}}},
         {"limits": {"max_pr_revisions": 0}},
         {"limits": {"max_stage_attempts": 2}},  # retries aren't implemented
-        {"crops": {"licences": []}},
     ],
 )
 def test_rejected(tmp_path, override):

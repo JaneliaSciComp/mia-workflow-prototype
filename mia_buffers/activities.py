@@ -478,7 +478,8 @@ class Activities:
     async def nudge_dataset(self, round_id: str, record: str) -> DatasetIssue:
         """Hand a dataset without a binding to mia-data (spec §3 step 1): find its issue in the datasets repo by
         the record marker, open one if there is none (mia-data's own issue body, pinned to the round's catalog
-        ref), and add `data:go` unless mia-data is already working on it, has finished, or found it ineligible."""
+        ref), and add `data:go` unless mia-data is already working on it or has finished. A stale `data:ineligible`
+        (a verdict mia-data no longer gives, spec §12) is nudged like `new`: mia-data's first stage replaces it."""
         return (await self._nudge(round_id, record))[0]
 
     async def _nudge(self, round_id: str, record: str) -> tuple[DatasetIssue, bool]:
@@ -491,7 +492,6 @@ class Activities:
             title, body, labels = render_issue(
                 record_yaml,
                 {"record_commit": self._pins(round_id).catalog_ref},
-                self.cfg.crops.licences,
                 self.cfg.github.catalog_repo,
                 self._row(round_id, record)["path"],
                 record,
@@ -502,8 +502,6 @@ class Activities:
         stages = [name[len("data:") :] for name in names if name.startswith("data:")]
         stages = [stage for stage in stages if stage not in ("go", "approve")]  # human labels are not stages
         stage = stages[0] if stages else "new"
-        if stage == "ineligible" or "licence-excluded" in names:
-            return DatasetIssue(number, "ineligible", False, folder=folder), created
         if stage == "done":
             path = self.cfg.paths.storage_root / folder
             note = (
@@ -576,20 +574,18 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared, ineligible or
-        needs-human: GitHub is not touched); otherwise nudge_dataset, its result named for the request's comment."""
+        """Hand one requested record to mia-data unless the registry already settled it (prepared or needs-human:
+        GitHub is not touched); otherwise nudge_dataset, its result named for the request's comment."""
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        if (state := (row or {}).get("state")) in ("prepared", "ineligible", "needs-human"):
+        if (state := (row or {}).get("state")) in ("prepared", "needs-human"):
             issue = (row or {}).get("issue")
             return PrepOutcome(record, state, issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record)
-        if found.stage == "ineligible":
-            outcome = "ineligible"
-        elif found.stage == "done":
+        if found.stage == "done":
             outcome = "done-unpublished"
         elif found.nudged:
             outcome = "opened" if created else "nudged"

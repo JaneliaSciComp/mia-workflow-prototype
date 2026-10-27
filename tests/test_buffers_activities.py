@@ -311,12 +311,13 @@ async def test_nudge_dataset_in_progress_does_not_relabel(acts):
     assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:testing"}
 
 
-async def test_nudge_dataset_ineligible(acts):
+async def test_nudge_dataset_with_a_stale_ineligible_label_gets_go(acts):
+    """`data:ineligible` is a verdict mia-data no longer gives (spec §12): the issue is nudged like a new one."""
     await acts.plan(7, ROUND, await admitted(acts))
     gh = with_datasets(acts, {5: (U937, ["data:ineligible", "licence-excluded"])})
     info = await acts.nudge_dataset(ROUND, U937)
-    assert (info.number, info.stage, info.nudged) == (5, "ineligible", False)
-    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:ineligible", "licence-excluded"}
+    assert (info.number, info.stage, info.nudged) == (5, "ineligible", True)
+    assert "data:go" in {x["name"] for x in gh.issues[5]["labels"]}
 
 
 async def test_nudge_dataset_done_without_binding_reports_it(acts):
@@ -1433,8 +1434,8 @@ async def test_prep_nudge_maps_the_dataset_issue(acts):
     done = await acts.prep_nudge(PREP_ROUND, U937)
     assert (done.outcome, done.issue) == ("done-unpublished", 5) and "binding.yaml" in done.note
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    acts.registry.put_dataset(BCSS, state="ineligible", issue=6)  # settled in the registry: its row names the issue
-    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "ineligible", 6)
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)  # settled in the registry: its row names the issue
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
 
 
 async def test_prep_status_reads_the_registry(acts):

@@ -146,7 +146,7 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
 
 ## The registry (milestone B)
 
-The ledger now also holds one row per dataset (state `in-progress`, `ineligible`, `needs-human` or `prepared`, with the
+The ledger now also holds one row per dataset (state `in-progress`, `needs-human` or `prepared`, with the
 folder, binding hash and crop count of a prepared one) and the catalog records of each synced commit. It lives in
 `<local_root>/service/buffers.sqlite` with backups under `<state_dir>/backups/`. mia-data writes the dataset rows as
 its stages change (`mia_core.registry.Registry`, best effort).
@@ -348,19 +348,19 @@ nothing. Cancelling the workflow (`temporal workflow cancel`) stops it between t
 yours to reset.
 
 **Labels.** `prep:go` (human) starts `MiaPrep`; the workflow owns the rest. `prep:requested`: the records are admitted
-and handed to mia-data. `prep:done`: every record is `prepared` or `ineligible`. `prep:needs-human`: the request
+and handed to mia-data. `prep:done`: every record is `prepared`. `prep:needs-human`: the request
 stopped, and the comment names the records that did not settle, each with its last registry state. `init-labels`
 creates all four.
 
-**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared`, `ineligible` or
+**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or
 `needs-human` settles the record without touching GitHub. Otherwise it opens the mia-data issue with `data:go` (or
 nudges the open one; two requests for one record share one issue). One comment lists `record | outcome | issue` with
-the outcomes `opened`, `nudged`, `in-progress`, `done-unpublished`, `ineligible`, `prepared` and
+the outcomes `opened`, `nudged`, `in-progress`, `done-unpublished`, `prepared` and
 `needs-human`, and `unknown` for a nudge that failed (its error is the note); the issue column is
 `<datasets repo>#<n>`, from the registry row for a record settled there. A failed nudge and a `done-unpublished`
 record settle as `needs-human` at once (a human must act either way); the others are still followed, and a failed
 comment is only logged (the outcomes stay in the workflow's state). The workflow then polls
-`GET /datasets` on a backoff (`poll_minutes` doubling to 30 minutes). A record settles when its row is `prepared`, `ineligible` or `needs-human`. The request ends `prep:done` when
+`GET /datasets` on a backoff (`poll_minutes` doubling to 30 minutes). A record settles when its row is `prepared` or `needs-human`. The request ends `prep:done` when
 all records are settled and none is `needs-human`. Otherwise it ends `prep:needs-human`, but only once every record
 has settled or `timeout_days` have passed: a `needs-human` record is reported then, not when it turns so.
 
@@ -467,9 +467,11 @@ Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are 
 
 ## Datasets without a binding, and normalisation statistics (milestone 4)
 
-**Superseded by milestone E.** For rounds planned after E, the nudge-and-wait path below is gone: `MiaBuffer` fails
-an unprepared record, and a `prep:go` issue (see "Preparation requests") is what asks mia-data to prepare it. This
-section describes the path that runs only for rounds recorded before E.
+**Gone since milestone H (spec §12).** The nudge-and-wait path this section once described, where `MiaBuffer`
+itself added `data:go` on a dataset issue and sat in `waiting-dataset` until the poller signalled a binding or a
+`data:ineligible` label, no longer exists in code: `MiaBuffer` fails an unprepared record, and a `prep:go` issue
+(see "Preparation requests") is what asks mia-data to prepare it. The `e-prep` marker stays as
+`workflow.deprecate_patch`, so a history that carries it still replays; no run from before E is live.
 
 **Operator setup.** the `mia-buffers` block names mia-data's issue repo as `github.datasets_repo`. mia-data's own
 `mia-data` block lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments
@@ -477,22 +479,6 @@ run as the same GitHub App, so it is mia-data's own login) so its poller accepts
 no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
 `record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.
 
-**The hand-off.** When `read_binding` finds no prepared `<storage_root>/<dataset folder>/` (a bare `binding.yaml`
-placed by hand does not count), the worker's
-`nudge_dataset` looks the record up in the datasets repo by mia-data's marker (`<!-- mia-data:record=<id> -->`),
-opens the issue if there is none (mia-data's usual body, pinned to the buffer's catalog ref) and adds `data:go`
-unless the issue is already in progress (`data:matching … cropping`), `data:done` or `data:ineligible`. The dataset
-sits in `waiting-dataset` with a comment on the buffer issue naming the dataset issue. mia-data runs its normal
-round there: match, smoke, test crops, a human's `data:approve`, production crops, and at `publish_crops` it now
-also copies the approved binding to `<dataset folder>/binding.yaml` and records its sha256 in `manifest.json`
-(`"binding": {"sha256": …}`, `null` when none). The buffer poller watches that file and the dataset issue's
-labels and signals `dataset_update(record, "binding" | "ineligible")`; a binding resumes the normal path (drop or
-stage job), an ineligible dataset is **dropped**: it leaves the plan and the ready denominator, the buffer issue
-gets a comment and the plan is re-posted with a **Dropped** list. The same happens to every dataset still
-`waiting-dataset` or `waiting-drop` when `sourcing.dataset_timeout_days` fires; if the remaining groups then meet
-`ready.min_fraction` the issue goes `buffer:ready`, else `buffer:needs-human` naming the groups that were below.
-A dataset issue that is `data:done` without a published binding (a run from before this change) is not relabelled:
-the comment says to add `data:go` on it by hand, and the timeout drops it otherwise.
 
 **Statistics.** `harness stage` records, per raw volume and channel, a sorted sample of up to 4,096 level-0
 values from 8 random patch boxes (`stage.json` → `volumes[].intensity_sample`). At registration, for

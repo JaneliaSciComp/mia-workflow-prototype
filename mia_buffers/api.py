@@ -40,7 +40,7 @@ from .sync import scan_assets, scan_storage
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
-DATASET_STATES = ("in-progress", "prepared", "ineligible", "needs-human")  # no row = unprepared
+DATASET_STATES = ("in-progress", "prepared", "needs-human")  # no row = unprepared; `ineligible` ended with spec §12
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
 UI_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")  # a file of the page by basename; no dotfile, no "/"

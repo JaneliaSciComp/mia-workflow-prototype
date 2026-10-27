@@ -113,21 +113,21 @@ class JobArgs:
 class MatchResult:
     """What the match agent concluded about the dataset, after the worker checked its binding."""
 
-    outcome: str  # matched | needs_snippet | ineligible | blocked (blocked = needs-human, with the reason)
+    outcome: str  # matched | needs_snippet | blocked (blocked = needs-human, with the reason)
     reason: str = ""
-    binding_path: str | None = None  # matched/ineligible: the checked binding, under state_dir
+    binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None
-    shapes: dict | None = None  # ineligible
+    shapes: dict | None = None  # wire format: the `ineligible` outcome's shapes until spec §12; unused now
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
-    reasons: list[str] = field(default_factory=list)  # matched/ineligible: the binding's reasons
+    reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
 
 
 @dataclass
 class SmokeResult:
-    """The worker's own quick check of a binding: can the data be opened, and is it big enough to crop?"""
+    """The worker's own quick check of a binding: can the data be opened and read as the record says?"""
 
     ok: bool
-    eligible: bool = False
+    eligible: bool = True  # wire format: smoke's size verdict until spec §12; smoke.json no longer sends it
     shapes: dict | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

@@ -204,7 +204,7 @@ class SourcingLimits:
 @dataclass
 class DatasetIssue:
     """What `nudge_dataset` found or did on the dataset's mia-data issue: its number, its `data:<stage>` (or
-    `ineligible`, `new`), whether `data:go` was added now, and a note for the issue comment."""
+    `new`), whether `data:go` was added now, and a note for the issue comment."""
 
     number: int
     stage: str
@@ -220,7 +220,7 @@ class DatasetStatus:
     dropped.
     `waiting-dataset`: no approved binding yet, mia-data is working on `issue` (spec §3 step 1); `waiting-lock`:
     another job holds the record's raw-cache lock; `blocked`: the raw cache is over its quota, the fetch waits;
-    `dropped`: left out of the plan (ineligible, or still waiting at the timeout) and of the ready denominator."""
+    `dropped`: left out of the plan (still waiting at the timeout) and of the ready denominator."""
 
     record: str
     group: str
@@ -274,7 +274,7 @@ class PrepPins:
 
 @dataclass
 class PrepOutcome:
-    """What `prep_nudge` found or did for one record: opened | nudged | in-progress | prepared | ineligible |
+    """What `prep_nudge` found or did for one record: opened | nudged | in-progress | prepared |
     needs-human | done-unpublished | unknown; `issue` is its dataset issue in the datasets repo, when looked up."""
 
     record: str

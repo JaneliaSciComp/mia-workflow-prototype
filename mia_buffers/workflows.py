@@ -4,9 +4,10 @@
 against the catalog, a human approves the plan, then every dataset of the pool is sourced in parallel (a stage
 job, or a manual drop first) and registered with buffer-api as it becomes servable; the issue is `ready` once
 every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining. A dataset with no
-approved binding fails (`e-prep`): `MiaPrep` follows a `prep:go` preparation request, which hands its records to
-mia-data (`data:go` on their dataset issues) and polls the registry until each is prepared. A run from before
-`e-prep` still hands such a dataset to mia-data itself and waits for the poller's `dataset_update`.
+approved binding fails: `MiaPrep` follows a `prep:go` preparation request, which hands its records to
+mia-data (`data:go` on their dataset issues) and polls the registry until each is prepared. The path from before
+`e-prep`, where the buffer itself waited for mia-data, is gone (spec §12); its marker is kept deprecated so a
+history that carries it still replays.
 
 Workflow code does no I/O: every GitHub, filesystem, cluster and service interaction is an activity called by
 name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
@@ -32,7 +33,6 @@ with workflow.unsafe.imports_passed_through():
         BindingInfo,
         BufferPins,
         BufferState,
-        DatasetIssue,
         DatasetStatus,
         DegradedSignal,
         DropResult,
@@ -74,7 +74,7 @@ RETIRED = "Retired: refs released; draws archived to {path}"
 RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
 PREP_GO = "prep:go"
-PREP_SETTLED = ("prepared", "ineligible", "needs-human")  # registry states a preparation request stops following
+PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
 
@@ -111,12 +111,6 @@ def _rollover_due() -> bool:
     return workflow.info().is_continue_as_new_suggested()
 
 
-def _prep_requests() -> bool:
-    """e-prep: a record without a binding fails its dataset, for a `prep:go` issue prepares it; a run from before
-    hands it to mia-data and waits."""
-    return workflow.patched("e-prep")
-
-
 def _parse_time(iso: str | None) -> datetime | None:
     if not iso:
         return None
@@ -137,7 +131,6 @@ class MiaBuffer:
         self.go_events: list[LabelEvent] = []
         self.approve_events: list[LabelEvent] = []
         self.drops: set[str] = set()  # records whose files a human dropped since we last looked
-        self.dataset_updates: dict[str, str] = {}  # record -> "binding" | "ineligible", from the poller
         self.limits: SourcingLimits | None = None
         self.timed_out = False  # the round's day limit fired: a dataset that turns blocked now is dropped (c-cache)
         self.held: set[str] = set()  # owners of the raw-cache locks this run holds (c-cache)
@@ -164,11 +157,6 @@ class MiaBuffer:
     @workflow.signal
     def dropped(self, record: str) -> None:
         self.drops.add(record)
-
-    @workflow.signal
-    def dataset_update(self, record: str, outcome: str) -> None:
-        """The poller saw the dataset's binding published (`binding`) or its issue go `data:ineligible`."""
-        self.dataset_updates[record] = outcome
 
     # lifecycle signals queue as (kind, label event or DegradedSignal, the buffer the keeper meant or "")
 
@@ -776,13 +764,8 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            if _prep_requests():
-                return await self._fail(dataset, NOT_PREPARED)
-            if not await self._await_dataset(dataset):
-                return  # dropped
-            binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
-            if not binding.found:
-                return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
+            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            return await self._fail(dataset, NOT_PREPARED)
         if binding.manual:
             await self._await_drop(dataset)
         async with semaphore:
@@ -827,13 +810,8 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            if _prep_requests():
-                return await self._fail(dataset, NOT_PREPARED)
-            if not await self._await_dataset(dataset):
-                return  # dropped
-            binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
-            if not binding.found:
-                return await self._fail(dataset, "; ".join(binding.errors) or "binding not found")
+            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            return await self._fail(dataset, NOT_PREPARED)
         if binding.manual and not dataset.rebuilds:  # a rebuild found the dropped files in the raw cache
             await self._await_drop(dataset, mark=True)
             self._set(dataset, "pending")  # no longer waiting on a human: not dropped at the timeout, nor abandoned
@@ -1074,33 +1052,6 @@ class MiaBuffer:
         await self._fail(dataset, f"fetch still partial after {limits.fetch_attempts} attempts ({last})")
         return None
 
-    async def _await_dataset(self, dataset: DatasetStatus) -> bool:
-        """No approved binding: hand the dataset to mia-data (spec §3 step 1) and wait for the poller's
-        `dataset_update`. True once a binding was published; False when the dataset was dropped."""
-        state = self.state
-        assert state.round_id
-        info = await self._act("nudge_dataset", state.round_id, dataset.record, seconds=300, result_type=DatasetIssue)
-        dataset.issue, dataset.folder = info.number, info.folder
-        where = f"the dataset issue #{info.number}"
-        if info.stage == "ineligible":
-            await self._drop(dataset, f"data:ineligible on {where}")
-            return False
-        self._set(dataset, "waiting-dataset")
-        what = (
-            f"`data:go` added on {where}"
-            if info.nudged
-            else f"{where} is already `data:{info.stage}`" + (f": {info.note}" if info.note else "")
-        )
-        await self._comment(
-            f"`{dataset.record}` has no approved binding yet: {what}. Waiting for mia-data to publish it.",
-            f"dataset {state.round_id} {dataset.record} waiting",
-        )
-        await workflow.wait_condition(lambda: dataset.record in self.dataset_updates)
-        if self.dataset_updates.pop(dataset.record) == "ineligible":
-            await self._drop(dataset, f"data:ineligible on {where}")
-            return False
-        return True
-
     async def _drop(self, dataset: DatasetStatus, reason: str) -> None:
         """Take the dataset out of the plan and the ready denominator; say so and re-post the plan."""
         state = self.state
@@ -1221,7 +1172,7 @@ class MiaBuffer:
 @workflow.defn(name="MiaPrep")
 class MiaPrep:
     """One preparation request issue: each `prep:go` hands the records it names to mia-data and follows them in
-    the registry to `prep:done` (each prepared or ineligible) or `prep:needs-human`. One round at a time."""
+    the registry to `prep:done` (each prepared) or `prep:needs-human`. One round at a time."""
 
     @workflow.init
     def __init__(self, state: PrepState) -> None:
@@ -1303,6 +1254,8 @@ class MiaPrep:
         state.round_id = f"p{state.issue}-e{event.event_id}"
         state.pins, state.outcomes, state.settled = None, [], {}
         started = workflow.now()
+        # a pre-H registry had a third settled state; a round recorded then (and the fixture) still treats it as one
+        legacy = () if workflow.patched("h-no-ineligible") else ("ineligible",)
         pins = state.pins = await self._act(
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )
@@ -1316,7 +1269,7 @@ class MiaPrep:
                     raise
                 outcome = PrepOutcome(record, "unknown", note=error_message(error))
             state.outcomes.append(outcome)
-            if outcome.outcome in PREP_SETTLED:
+            if outcome.outcome in (*PREP_SETTLED, *legacy):
                 state.settled[record] = outcome.outcome
             elif outcome.outcome in PREP_HUMAN:  # mia-data will not get to it without a human
                 state.settled[record] = "needs-human"
@@ -1335,9 +1288,9 @@ class MiaPrep:
             tries += 1
             await self._refuse_queued()  # ponytail: a busy go waits for the next poll (MAX_POLL_MINUTES at most)
             last = await self._act("prep_status", unsettled, result_type=dict[str, str])
-            state.settled |= {record: value for record, value in last.items() if value in PREP_SETTLED}
+            state.settled |= {record: value for record, value in last.items() if value in (*PREP_SETTLED, *legacy)}
         prepared = [record for record in pins.records if state.settled.get(record) == "prepared"]
-        stuck = [record for record in pins.records if state.settled.get(record, "") not in ("prepared", "ineligible")]
+        stuck = [record for record in pins.records if state.settled.get(record) not in ("prepared", *legacy)]
         if not stuck:
             return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
         humans = [

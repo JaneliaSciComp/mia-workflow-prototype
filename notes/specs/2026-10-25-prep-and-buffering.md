@@ -807,6 +807,24 @@ Milestones A, B and C are independent of each other; D needs B and C; E needs B;
   written by a round, and a preparation request could not see its records settle. Every worker whose
   configuration names the service is allowed its host now.
 
+**Built in H (2026-10-27).** Deviations from §12 and rulings made during the build:
+
+- mia-data does not pass `--size`: a round carries the harness source admitted with it, so a new flag would have
+  failed the crop jobs of the rounds already at `data:review`. The harness default (256) is the review crop edge;
+  `crops.size` stays in the config, unused, until a round-pinned way to pass it is wanted.
+- `MatchResult.shapes` and `SmokeResult.eligible` stay as wire fields (the latter now defaults to `True`); the
+  harness no longer writes `eligible`. Markers: `h-no-eligibility` in `MiaDataDataset` (a pre-H history that
+  carries an `ineligible` match outcome, mia-workflow-data#213's, still replays) and `h-no-ineligible` in `MiaPrep`
+  (a pre-H round and the recorded fixture still settle an `ineligible` row). `e-prep` is `deprecate_patch`.
+- The pre-E path (`_await_dataset`, the `dataset_update` signal, `_prep_requests`) and its replay fixture
+  `buffer_history_pre_e.json` are deleted; no `MiaBuffer` run was live (checked with `list_workflows`). The two
+  timeout tests that used a `waiting-dataset` record now use a `waiting-drop` one.
+- `harness verify` and `read_png` take the crop edge too (verify from `--size`, preview from the crop's box);
+  `effective_n` yields one crop at a capacity of one or two, so a whole-image raw produces a crop at all.
+- The poller's `guard` hook stays (default `None`); its only user was the licence refusal.
+- `datasets sync` rebuilds prepared rows only, so the in-flight datasets get their registry rows at their next
+  stage write, not from the sync.
+
 ## 12. Amendment v0.3: eligibility leaves the data pipeline
 
 **What happened.** The first live preparation request (mia-buffers#3, 2026-10-27) named four records. One,

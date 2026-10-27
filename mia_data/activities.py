@@ -300,7 +300,7 @@ class Activities:
 
     def dataset_fields(self, issue: int, round_id: str, stage: str) -> dict:
         """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
-        binding and a manifest that matches it, else in-progress, or ineligible / needs-human at those stages."""
+        binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
         try:
             row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
         except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
@@ -310,7 +310,7 @@ class Activities:
             row.pop("record")
             fields = row
         else:
-            fields = {"state": {"ineligible": "ineligible", "needs-human": "needs-human"}.get(stage, "in-progress")}
+            fields = {"state": "needs-human" if stage == "needs-human" else "in-progress"}
         return {**fields, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
@@ -558,7 +558,7 @@ class Activities:
     @activity.defn(name="read_match")
     @mia_permanent_errors
     async def read_match(self, workspace: str) -> MatchResult:
-        """Read the match agent's outcome.json and, for matched/ineligible, check its binding.yaml.
+        """Read the match agent's outcome.json and, for matched, check its binding.yaml.
 
         A checked binding is stored (with the round's snippets_commit) as
         state_dir/rounds/<round>/binding-<attempt>.yaml. Anything we can't trust is `blocked` with the reason."""
@@ -578,7 +578,7 @@ class Activities:
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
-        if kind not in ("matched", "ineligible"):
+        if kind != "matched":  # `ineligible` was an outcome until spec §12: size is the buffer plan's call, not ours
             return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
         binding, errors = await self._check_binding(
             read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
@@ -592,7 +592,6 @@ class Activities:
             kind,
             binding_path=binding_path,
             binding_hash=digest,
-            shapes=_small_dict(outcome.get("shapes")) if kind == "ineligible" else None,
             reasons=_texts(binding.get("reasons")),
         )
 

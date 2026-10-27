@@ -213,8 +213,8 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     await t.a.set_stage(1, "matching", state)
     assert seen[-1] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
-    await t.a.set_stage(1, "ineligible", state)
-    assert seen[-1][1]["state"] == "ineligible"
+    await t.a.set_stage(1, "needs-human", state)
+    assert seen[-1][1]["state"] == "needs-human"
     dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
     dataset_dir.mkdir(parents=True)
     binding_bytes = yaml.safe_dump(BINDING).encode()

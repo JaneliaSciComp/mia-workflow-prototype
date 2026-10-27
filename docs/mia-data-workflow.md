@@ -79,9 +79,9 @@ The pieces, and where they live:
 ### 1. Seed
 
 `pixi run mia exec mia-data seed` reads the downloads state from mia-agentic-search and creates one issue per downloaded
-dataset in mia-workflow-data, labelled `data:new` plus `modality:<family>`, `has-labels` and `maybe-small` as
-hints. A dataset whose licence is not in `crops.licences` is created as `data:ineligible` and
-`licence-excluded`. Re-running only adds what is new. Components: the `mia-data` CLI and the GitHub client, no
+dataset in mia-workflow-data, labelled `data:new` plus `modality:<family>` and `has-labels`. The seed judges
+nothing: licence and size are a buffer spec's filters (prep-and-buffering spec §12), so a GPL dataset or one of
+60-pixel images is seeded like any other. Re-running only adds what is new. Components: the `mia-data` CLI and the GitHub client, no
 Temporal, no cluster.
 
 ### 2. Trigger
@@ -97,7 +97,7 @@ The workflow sets `data:matching` and submits the **match job**: a Claude agent,
 with the record, the downloads entry, a read-only snapshot of mia-snippets at a pinned commit and the harness
 CLI. It picks a snippet for each raw and label array and writes a **binding**, a small YAML saying which files
 to read with which snippet and parameters, with reasons. It may run `harness smoke` to try bindings, but may
-not change snippet code. Its outcome is `matched`, `needs_snippet`, `ineligible` or `blocked`.
+not change snippet code. Its outcome is `matched`, `needs_snippet` or `blocked`.
 
 The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
 record, https only, snippets exist) and runs its own **smoke job**, a plain `harness smoke` with no agent. Only
@@ -130,7 +130,8 @@ CI, the GitHub client.
 
 Two plain jobs at the pinned snippets commit: `harness crop --n 4` with the round's test seed, then
 `harness verify` and `harness preview` in a separate workspace that loads no snippet code. Verify checks each
-crop is a 256×256 16-bit PNG with matching labels and writes overlay PNGs. The passing crops' `raw.png` and
+crop is a square 16-bit PNG of the crop edge (256, or the image's own extent when it is smaller: a small
+dataset is cropped whole, never refused) with matching labels and writes overlay PNGs. The passing crops' `raw.png` and
 `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a comment on the issue shows
 them inline with the binding and the agent's reasons. The issue moves to `data:review`.
 
@@ -167,7 +168,7 @@ that PR up again.
 
 `set_stage` sends the dataset's state to buffer-api (`PUT /datasets/<record>`, best effort: a down service is logged
 and never fails the round). `prepared` means `binding.yaml` plus a `manifest.json` whose binding hash matches it;
-before that a dataset is `in-progress`, `ineligible` or `needs-human`. `mia-buffers datasets sync` rebuilds the
+before that a dataset is `in-progress` or `needs-human`. `mia-buffers datasets sync` rebuilds the
 prepared rows from `storage_root` when the service missed a write.
 
 ## Trust boundaries in one paragraph

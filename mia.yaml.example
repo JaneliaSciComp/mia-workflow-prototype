@@ -104,7 +104,6 @@ services:                                 # per service: app + the sections that
       test_per_round: 4
       per_plane: 4
       per_file: 8
-      licences: [CC0-1.0, CC-BY-4.0, CC-BY-3.0, MIT]
     gallery: {branch: galleries}
     agent:                                # its walltime is limits.job_walltime_min; autodev's agent.allow_hosts,
       model: sonnet                       # extra_mounts and api_key_env are not used by mia-data (config rejects them)

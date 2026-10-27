@@ -57,13 +57,6 @@ async def run_poll(activities: Activities) -> list[str]:
     return done
 
 
-def _licence_guard(kind: str, issue: dict) -> str | None:
-    """mia-data's refusal: `go` on a licence-excluded dataset."""
-    if kind == "go" and "licence-excluded" in {entry["name"] for entry in issue.get("labels", [])}:
-        return "the dataset's licence is not in `crops.licences` (`licence-excluded`)"
-    return None
-
-
 async def deliver_label(
     activities: Any,
     kind: str,
@@ -72,7 +65,7 @@ async def deliver_label(
     *,
     workflow: str = "MiaDataDataset",
     make_state: Callable[[int], Any] = DatasetState,
-    guard: Callable[[str, dict], str | None] | None = _licence_guard,
+    guard: Callable[[str, dict], str | None] | None = None,
     workflow_id: Callable[[int], str] | None = None,
 ) -> bool:
     """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
