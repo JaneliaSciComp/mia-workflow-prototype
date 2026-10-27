@@ -71,7 +71,9 @@ class Mocks:
         trees=None,
         revisions=5,
         lock_busy=0,
+        slow_stages=(),
     ):
+        self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
         self.test_ok, self.prod_ok, self.n_effective = test_ok, prod_ok, n_effective
@@ -96,6 +98,8 @@ class Mocks:
         async def set_stage(
             issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
         ) -> None:
+            if stage in self.slow_stages:
+                await self.stage_gate.wait()
             rec("set_stage", stage, detail, extra)
 
         @activity.defn(name="comment")
@@ -308,6 +312,18 @@ async def approve_review(h, m, eid="12", dt=1):
     await idle(h, m, "review")
     fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
     await h.signal(MiaDataDataset.approve, ev("approve", eid, shift(fin, dt)))
+
+
+async def test_a_stage_write_does_not_hold_the_round(env):
+    """stage-write-async: the match job is submitted while GitHub still owes the `matching` label; a final stage
+    (needs-human here, from the failed match) waits for its write."""
+    m = Mocks(outcome="blocked", slow_stages={"matching", "needs-human"})
+    async with started(env, m) as h:
+        await until(lambda: m.of("submit"))
+        assert m.stages == [] and m.of("submit")[0][1] == "match"
+        m.stage_gate.set()
+        await idle(h, m, "needs-human")
+    assert m.stages == ["matching", "needs-human"]
 
 
 async def test_match_test_review_approve_crop_done(env):

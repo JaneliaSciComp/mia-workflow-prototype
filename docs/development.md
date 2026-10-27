@@ -85,6 +85,12 @@ posting it to GitHub.
 **Shared helpers take a `Deployment`, not a `Config`.** autodev's auth, Temporal connection, logging and ops
 helpers are annotated with the `Deployment` protocol in `autodev/config.py`, which both packages' configs satisfy.
 If a helper needs a new config field, add it to the protocol and to both configs.
+- **A stage write never holds a round.** `MiaDataDataset._stage` writes the registry row first, then the GitHub
+  label and comment. Inside a round the write runs beside the round (`workflow.patched("stage-write-async")`): the
+  job starts at once, the next stage write cancels one still pending, and a final stage, the end of a round and
+  every continue-as-new wait for it. The GitHub client's own write budget (400 creating writes an hour per process,
+  under GitHub's secondary limit) once held three rounds 25 minutes before their first job; the registry row is the
+  state machines read, the label is for people.
 
 ## Style
 

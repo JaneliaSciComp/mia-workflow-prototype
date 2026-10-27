@@ -20,7 +20,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
@@ -81,6 +81,7 @@ class MiaDataDataset:
         self.go_events: list[LabelEvent] = []  # signals not yet acted on
         self.approve_events: list[LabelEvent] = []
         self.limits: RoundLimits | None = None  # read from config at the start of a round
+        self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -110,7 +111,7 @@ class MiaDataDataset:
         while True:
             await workflow.wait_condition(lambda: bool(self.go_events or self.approve_events) or _rollover_due())
             if not (self.go_events or self.approve_events):
-                workflow.continue_as_new(self.state)  # idle, nothing queued
+                await self._rollover()  # idle, nothing queued
             await self._refuse_queued(gos=False)  # idle: an approve has no round under review to apply to
             if not self.go_events:
                 continue
@@ -120,7 +121,7 @@ class MiaDataDataset:
             rounds += 1
             await self._guard(self._round(event))
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not (self.go_events or self.approve_events):
-                workflow.continue_as_new(self.state)
+                await self._rollover()
 
     # --- helpers ---------------------------------------------------------------------------
 
@@ -152,6 +153,7 @@ class MiaDataDataset:
             await step
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
+        await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
 
     def _seen(self, event: LabelEvent) -> bool:
         """True if this label event was handled before; otherwise record it as handled now."""
@@ -161,11 +163,49 @@ class MiaDataDataset:
         return False
 
     async def _stage(
-        self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = ""
+        self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = "", wait: bool = False
     ) -> None:
-        """Move the issue to `stage`: swap its label and post the stage comment."""
+        """Move the issue to `stage`: `set_stage` writes the registry row, swaps the label and posts the comment.
+        Behind `stage-write-async`, a stage inside a round does not wait for GitHub (its hourly write budget once
+        held three rounds 25 minutes before their first job): the write runs beside the round, and the next stage
+        write or the round's end cancels what is still pending. A final stage (`wait`) is awaited as before."""
         self.state.stage = stage
-        await self._act("set_stage", self.state.issue, stage, self.state, detail, extra, budget=budget)
+        args = [self.state.issue, stage, self.state, detail, extra]
+        if not workflow.patched("stage-write-async"):
+            return await self._act("set_stage", *args, budget=budget)
+        await self._drop_stage_write()
+        if wait:
+            return await self._act("set_stage", *args, budget=budget)
+        self.stage_write = workflow.start_activity(
+            "set_stage",
+            args=args,
+            start_to_close_timeout=timedelta(seconds=60),
+            schedule_to_close_timeout=budget,
+            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+        )
+
+    async def _rollover(self) -> None:
+        """Continue as new with the durable state, once the pending stage write has landed (a new run has no handle)."""
+        await self._settle_stage_write(cancel=False)
+        workflow.continue_as_new(self.state)
+
+    async def _drop_stage_write(self) -> None:
+        """Cancel the stage write still pending, so a late retry cannot swap the label back; a write that failed
+        meanwhile is logged (the registry row and the next write carry the stage)."""
+        # ponytail: an attempt already inside its GitHub call finishes it; a label can lag one stage for a moment.
+        await self._settle_stage_write(cancel=True)
+
+    async def _settle_stage_write(self, cancel: bool) -> None:
+        handle, self.stage_write = self.stage_write, None
+        if handle is None:
+            return
+        if cancel:
+            handle.cancel()
+        try:
+            await handle
+        except ActivityError as error:
+            if not isinstance(error.cause, CancelledError):
+                workflow.logger.warning("issue #%d: stage write failed: %s", self.state.issue, error_message(error))
 
     async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
         """Every label queued now arrived while it couldn't count: answer each new one with refuse_label."""
@@ -189,7 +229,7 @@ class MiaDataDataset:
     async def _finish(self, stage: str, detail: str = "", extra: str = "") -> None:
         """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises."""
         try:
-            await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra)
+            await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra, wait=True)
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
         await self._refuse_queued()
@@ -492,7 +532,7 @@ class MiaDataDataset:
         while True:
             await workflow.wait_condition(lambda: bool(self.approve_events or self.go_events) or _rollover_due())
             if not (self.approve_events or self.go_events):
-                workflow.continue_as_new(self.state)  # stage review: the next run resumes here
+                await self._rollover()  # stage review: the next run resumes here
             while self.approve_events:
                 event = self.approve_events.pop(0)
                 if self._seen(event):
@@ -558,7 +598,7 @@ class MiaDataDataset:
                 lambda: bool(state.pending or self.go_events or self.approve_events) or _rollover_due()
             )
             if not (state.pending or self.go_events or self.approve_events):
-                workflow.continue_as_new(state)  # the develop state is all in `state`: the next run resumes here
+                await self._rollover()  # the develop state is all in `state`: the next run resumes here
             await self._refuse_queued()
             while state.pending:
                 if await self._on_pr(state.pending.pop(0).pr):

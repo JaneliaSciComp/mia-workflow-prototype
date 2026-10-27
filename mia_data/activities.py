@@ -391,6 +391,9 @@ class Activities:
         link) and links to the folders to look at. Comments are never edited: each stage and result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
+        round_id = state.round_id if state else None
+        if round_id and (registry := self.registry):  # the registry row first: machines read it, GitHub may wait
+            await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
         gh, want = self.gh_data, self.cfg.label(stage)
         current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
         for other in STAGES:
@@ -398,11 +401,9 @@ class Activities:
                 await gh.remove_label(issue, name)
         if want not in current:
             await gh.add_labels(issue, [want])
-        if not (state and state.round_id):
+        if not round_id:
             return
-        round_id, paths = state.round_id, self.cfg.paths
-        if registry := self.registry:
-            await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
+        paths = self.cfg.paths
         links = {"Workspace": paths.link(self._round_workspace(issue, round_id))}
         if stage == "done":
             pins = self._pins(round_id)
