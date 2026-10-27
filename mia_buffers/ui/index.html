@@ -269,9 +269,9 @@ function banner(message) {
   const line = el("div", {}, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
   $("banner").append(line);
 }
-async function load(path) {
+async function load(path, quiet404) {  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
   try { return await api(path); }
-  catch (e) { banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`); return null; }
+  catch (e) { if (!(quiet404 && e.status === 404)) banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`); return null; }
 }
 
 // ---- tooltip (the explorer's)
@@ -678,7 +678,8 @@ function healthLine(usage) {
 async function viewBuffer(root, id, refresh) {
   const hash = location.hash, e = encodeURIComponent(id);
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  const [status, board, events, usage] = await Promise.all([load(`/buffers/${e}/status`), load(`/buffers/${e}/datasets`), load(`/buffers/${e}/events`), load(`/usage/${e}`)]);
+  // status, board and usage exist from sourcing on (create_buffer writes the config); a planned buffer has only events
+  const [status, board, events, usage] = await Promise.all([load(`/buffers/${e}/status`, true), load(`/buffers/${e}/datasets`, true), load(`/buffers/${e}/events`), load(`/usage/${e}`, true)]);
   if (location.hash !== hash) return;  // a slow load of a buffer the reader already left
   const meta = S.meta, cfg = status?.config || {}, evs = (events?.events || []).slice().sort((a, b) => b.seq - a.seq);
   const retired = evs.find(x => x.kind === "retired");
@@ -694,6 +695,8 @@ async function viewBuffer(root, id, refresh) {
       n && meta.buffers_repo ? link(`https://github.com/${meta.buffers_repo}/issues/${n}`, `issue #${n}`) : null,
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
     retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
+    !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: the buffer is registered when sourcing starts, after ", el("code", {}, "buffer:approve"), " on the issue. Until then it has only its events.") : null,
+    !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },
       card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", healthLine(usage), sparkline(days.slice(-60)),
         retired ? table([{ label: "day", cell: d => d.day }, { label: "draws", num: true, cell: d => num(d.draws) }, { label: "consumers", num: true, cell: d => num(d.consumers) }, { label: "empty", num: true, cell: d => num(d.empty) }], days, "no usage rows") : null),
@@ -703,7 +706,7 @@ async function viewBuffer(root, id, refresh) {
         ["recipe", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} @ ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
         ["plan hash", code(cfg.plan_hash, 12)], ["splits", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
         ["servable", servableText(status.servable)], ["volumes", num(status.volumes)], ["max empty", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
-      ]) : el("div", { class: "empty" }, "the buffer's status did not load"))),
+      ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
     card("Events", null, table([
       { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },
       { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
