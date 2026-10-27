@@ -330,12 +330,16 @@ catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
 timeout_days: 14                # optional, default 14
+max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
 
 A `select` only selects: no fit, no weights; it reads the catalog's records at `ref`, not the registry.
 `PrepSpec` in `mia_buffers/spec.py` is the model. An id that is not in the catalog at `ref`, a `select` that admits
-nothing, or more than 200 records (`MAX_PREP_RECORDS`, a `# ponytail:`: split a larger request) ends the request in
-`prep:needs-human` at once.
+nothing, more records than `max_records` (default 25: the page composes the list, a human confirms the count), or
+more than 200 (`MAX_PREP_RECORDS`, a `# ponytail:`: split a larger request) ends the request in `prep:needs-human`
+at once. Admission reads the body once, when the poller sees `prep:go`; editing the body afterwards changes
+nothing. Cancelling the workflow (`temporal workflow cancel`) stops it between two records; the `prep:` label is
+yours to reset.
 
 **Labels.** `prep:go` (human) starts `MiaPrep`; the workflow owns the rest. `prep:requested`: the records are admitted
 and handed to mia-data. `prep:done`: every record is `prepared` or `ineligible`. `prep:needs-human`: the request

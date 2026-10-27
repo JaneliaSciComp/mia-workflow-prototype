@@ -270,6 +270,9 @@ def load_spec_text(text: str) -> Spec:
         raise SpecError(str(error)) from error
 
 
+MAX_PREP_RECORDS = 200  # records one preparation request may name or select (ponytail: split a larger one)
+
+
 class PrepSpec(_Strict):
     """A preparation request's YAML: the records to hand to mia-data, named or chosen by a buffer spec's `select`."""
 
@@ -279,6 +282,8 @@ class PrepSpec(_Strict):
     records: list[str] = []
     select: Select | None = None
     timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
+    # each record costs an agent run: more than this many need the number written into the request
+    max_records: int = Field(default=25, ge=1, le=MAX_PREP_RECORDS)
 
     @model_validator(mode="after")
     def _records_or_select(self) -> PrepSpec:

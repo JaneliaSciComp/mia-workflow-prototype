@@ -106,7 +106,7 @@ def test_prep_spec_takes_records_or_select(body):
         {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, **body}
     )
     spec = load_prep_text(text)
-    assert spec.timeout_days == 14 and (spec.records == ["a", "b"]) == ("records" in body)
+    assert spec.timeout_days == 14 and spec.max_records == 25 and (spec.records == ["a", "b"]) == ("records" in body)
     assert (spec.select is not None) == ("select" in body)
 
 
@@ -118,6 +118,8 @@ def test_prep_spec_takes_records_or_select(body):
         ({"records": []}, "exactly one"),
         ({"records": ["a"], "kind": "buffer"}, "kind"),
         ({"records": ["a"], "timeout_days": 0}, "timeout_days"),
+        ({"records": ["a"], "max_records": 0}, "max_records"),
+        ({"records": ["a"], "max_records": 201}, "max_records"),
         ({"records": ["a"], "name": "x"}, "name"),
     ],
 )

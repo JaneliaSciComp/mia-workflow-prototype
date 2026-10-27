@@ -1250,6 +1250,8 @@ class MiaPrep:
             try:
                 await self._round(event)
             except ActivityError as error:  # an activity gave up (a bad request, the registry down too long)
+                if isinstance(error.cause, CancelledError):
+                    raise
                 await self._stage("needs-human", error_message(error))
             await self._refuse_queued()
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self.go_events:
@@ -1310,6 +1312,8 @@ class MiaPrep:
             try:
                 outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
             except ActivityError as error:  # this record alone: an unclear catalog record, a refused issue
+                if isinstance(error.cause, CancelledError):  # the request was cancelled: stop opening issues
+                    raise
                 outcome = PrepOutcome(record, "unknown", note=error_message(error))
             state.outcomes.append(outcome)
             if outcome.outcome in PREP_SETTLED:

@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import WorkflowHistory
-from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowFailureError, WorkflowHistory
+from temporalio.exceptions import ApplicationError, CancelledError
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from test_buffers_config import make_cfg
@@ -1734,7 +1735,9 @@ class PrepMocks:
         days=1,
         nudge_errors=None,
         comment_error="",
+        slow=(),
     ):
+        self.slow, self.gate = set(slow), asyncio.Event()  # records whose nudge waits for the gate
         self.calls: list[tuple[str, tuple]] = []
         self.days = days  # the request's timeout_days
         self.records, self.outcomes, self.statuses = list(records), outcomes or {}, statuses or {}
@@ -1762,6 +1765,8 @@ class PrepMocks:
         @activity.defn(name="prep_nudge")
         async def prep_nudge(round_id: str, record: str) -> PrepOutcome:
             rec("prep_nudge", round_id, record)
+            if record in self.slow:
+                await self.gate.wait()
             if record in self.nudge_errors:
                 raise ApplicationError(self.nudge_errors[record], non_retryable=True)
             return self.outcomes.get(record, PrepOutcome(record, "nudged", 5))
@@ -1808,7 +1813,8 @@ async def prep_started(env, m):
         try:
             yield h
         finally:
-            await h.terminate()
+            with contextlib.suppress(RPCError):  # a test may have cancelled it already
+                await h.terminate()
 
 
 async def prep_settled(h, m, stage):
@@ -1909,6 +1915,20 @@ async def test_prep_a_failed_nudge_settles_that_record_alone(env):
     detail = m.of("set_prep_stage")[-1][1]
     assert "`b` (unknown: ValueError: record b: unclear modality)" in detail and "`c` (done-unpublished" in detail
     assert "`a`" not in detail and state.settled == {"a": "prepared", "b": "needs-human", "c": "needs-human"}
+
+
+async def test_prep_cancel_stops_opening_issues(env):
+    """A cancel during the nudges ends the workflow cancelled: no further record is nudged, no stage is set."""
+    m = PrepMocks(slow={"b"})
+    # its own server: a cancelled workflow leaves the shared time-skipping server unable to skip time afterwards
+    async with await WorkflowEnvironment.start_time_skipping() as own, prep_started(own, m) as h:
+        await until(lambda: len(m.of("prep_nudge")) == 2, m=m)
+        await h.cancel()
+        with pytest.raises(WorkflowFailureError) as error:
+            await h.result()
+        m.gate.set()  # the nudge in flight completes against the finished workflow
+    assert isinstance(error.value.cause, CancelledError)
+    assert [a[1] for a in m.of("prep_nudge")] == ["a", "b"] and m.stages == ["requested"] and not m.of("comment_prep")
 
 
 async def test_prep_a_failed_outcomes_comment_keeps_polling(env):

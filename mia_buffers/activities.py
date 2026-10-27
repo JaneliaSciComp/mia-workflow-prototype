@@ -90,7 +90,6 @@ if TYPE_CHECKING:
     from .config import Config
 
 log = logging.getLogger(__name__)
-MAX_PREP_RECORDS = 200  # records one preparation request may name or select
 ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
@@ -558,10 +557,11 @@ class Activities:
             records = [decision.id for decision in decisions if decision.admitted]
             if not records:
                 raise ValueError(f"the select block admits no record at {ref}")
-        # ponytail: at most MAX_PREP_RECORDS per request, for the outcomes comment's size and MiaPrep's history (one
-        # nudge per record); the page in F composes requests. Upgrade: split a larger request into several.
-        if len(records) > MAX_PREP_RECORDS:
-            raise ValueError(f"the request names {len(records)} records, more than {MAX_PREP_RECORDS}: split it")
+        if len(records) > spec.max_records:  # a human wrote (or left) the number; each record is an agent run
+            raise ValueError(
+                f"the request names {len(records)} records, more than max_records {spec.max_records}: "
+                f"set max_records: {len(records)} in the request to confirm, or split it"
+            )
         round_dir.mkdir(parents=True, exist_ok=True)
         write_atomic(round_dir / "spec.yaml", fences[0])
         write_atomic(

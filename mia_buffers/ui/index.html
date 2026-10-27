@@ -563,7 +563,8 @@ function renderActions() {
   const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records"
     : C.rawCached || C.stagedGeom ? "no unprepared record passes the registry toggles" : "every fitting record is prepared or in progress";
   issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
-    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Add the \`prep:go\` label to hand them to mia-data.`,
+    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Add the \`prep:go\` label to hand them to mia-data.`
+    + (todo.length > 25 ? ` Each record is an agent run: add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
     toPrepYaml(todo, S.ref, S.meta.catalog_repo), "prep:go", !S.plan ? "no plan yet" : todo.length ? null : none);
 }
 function renderPlanMessages() {
