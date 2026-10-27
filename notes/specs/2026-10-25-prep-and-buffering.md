@@ -764,6 +764,25 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 
 Milestones A, B and C are independent of each other; D needs B and C; E needs B; F needs B, C and D.
 
+**Built in J (2026-10-27).** Deviations from §14 and rulings made during the build:
+
+- The worker speaks to autodev as the same GitHub App login (`mia-autodev[bot]`), so autodev's `Reviewers`
+  takes `github.trusted_bots` and honours `/approve` and `/revise` from them only at the first line of a comment;
+  a failing head's `/revise` therefore starts the comment, with the report below it.
+- `/approve` names the tested head; autodev squash-merges, so the approved crops are published under the merge
+  commit (`publish_crops` reads mia-snippets' withdrawn list there) with the merge commit's adopted binding.
+- A PR merged by hand while its head's set was still being made (or never approved) takes the merge-commit path:
+  its own set, `data:review`, like a matched binding's; `state.pr` is cleared at the merge, so that review is
+  the matched kind (a reject there opens a supersede issue).
+- `_follow_pr` is the develop round's one wait; a `go` during a PR head's review is still busy. `_verdict` takes
+  the oldest approve or reject newer than the set, refuses older ones as stale and any queued behind it as
+  not-in-review. `Test.approved_at` records the approve.
+- `read_feedback` keeps comments by people with write access only (the same bar as the labels), caps each at
+  8000 characters and the whole at 16000, and says "(no details)" for a bare reject.
+- Marker `review-loop` in `_follow_pr`, `_test_head` and `_merged`; `develop_history.json` replays unchanged. The
+  test helper that waits for an idle workflow now skips the patch marker events a fresh run records.
+- Labels `data:reject` and `data:merging` were created with `init-labels`; `data:pr-ready` is deleted by hand.
+
 ## 11. Open questions (defaults in bold)
 
 1. **Starting a buffer from the page without GitHub.** **No, until buffer-api has an identity layer** (§1.3,
