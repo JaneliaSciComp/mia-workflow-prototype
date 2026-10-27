@@ -72,6 +72,7 @@ services:                                 # per service: app + the sections that
       base_branch: main
       protected_paths: [".github/"]
       # required_checks: ["mia-data/crops"]   # status contexts / check-run names that must be present and green
+      # auto_merge: false                     # true: merge once the required checks are green, no human approval
       # trusted_bots: [some-app]              # GitHub App slugs whose `go` label starts work (no permission lookup)
     agent:
       model: sonnet

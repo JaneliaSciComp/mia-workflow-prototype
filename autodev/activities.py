@@ -96,13 +96,19 @@ def issue_lead(body: str | None) -> str:
 
 
 def render_pr_body(cfg: Config, issue: int, lead: str = "") -> str:
+    merge_line = (
+        f"{cfg.deployment} merges this PR by itself once the required checks ({', '.join(cfg.github.required_checks)}) "
+        "are green on its current head (`github.auto_merge`); a *Request changes* review still holds it."
+        if cfg.github.auto_merge
+        else f"approve this PR, or comment `/approve <head sha>` (needed when running under a personal token).\n"
+        f"  {cfg.deployment} merges once an approval matches the current head and checks are not failing."
+    )
     return f"""Closes #{issue}{": " + lead if lead else ""}
 
 Implemented by **{cfg.deployment}**: Claude Code running in a sandboxed job on the cluster. The agent's own
 summary is the first comment.
 
-- **Merge:** approve this PR, or comment `/approve <head sha>` (needed when running under a personal token).
-  {cfg.deployment} merges once an approval matches the current head and checks are not failing.
+- **Merge:** {merge_line}
 - **Request changes:** submit a review with *Request changes*, or comment `/revise <what to change>`.
   Up to {cfg.agent.max_revisions} revision rounds.
 - **Stop:** close this PR.
@@ -315,6 +321,8 @@ class Activities:
         pending = [item for item in feedback(reviews, inline_comments, comments, reviewers) if item.id not in handled]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
+        if self.cfg.github.auto_merge and checks == "success":  # green required checks stand in for the approval
+            is_approved = True  # pending change requests still win in decide()
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
 
     @activity.defn(name="merge_pr")
