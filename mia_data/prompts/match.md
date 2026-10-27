@@ -22,8 +22,18 @@ All in the current directory:
    `record_commit: ${record_commit}` and `snippets_commit: ${snippets_commit}`. List every raw array under
    `raw` and every label array under `labels`, each with a `snippet` from `catalog/`, its `urls` (https, from
    `record.yaml`) and its `params`. Labels also need `pairs_with`, `label_key` and `segmentation_type`.
-   `label_key` is the catalog's label name exactly as `downloads.json` lists it (e.g. `unknown-cell-labels`);
-   it becomes a file name, so never rename it.
+   `label_key` becomes the label's file name, so it is fixed by rule, never free text. When `downloads.json` has a
+   `labels` list, use those names exactly: a downloader already converted this dataset under them. Otherwise
+   compose it from the record the way the catalog's own tools do: `<provenance>-<class>-<kind>`.
+   `provenance` is `annotations.source` mapped manual → `manual_gt`, proofread → `proofread`, automatic →
+   `auto_pred`, anything else (unknown, mixed, missing) → `unknown`. `class` is what the mask marks, taken from
+   the array's `classes`, the record's text or the file names, as a lowercase slug with `_` between words; use
+   `cell`, `nucleus`, `mitochondria`, `synapse`, `vesicle`, `neurite`, `myelin` or `blood_vessel` when one fits.
+   `kind` is the array's `encoding` mapped instance-ids → `instance`, semantic-ids or binary → `semantic`,
+   points-table → `points` (the binding's own `segmentation_type` still says `binary` for a binary mask; only
+   the key folds it into `semantic`). So manually drawn cell instance masks are `manual_gt-cell-instance`, and a
+   binary nuclear mask of unknown provenance is `unknown-nucleus-semantic`. A class you cannot tell from the
+   inputs is `blocked`; an unlisted provenance is not, it is `unknown`.
 3. Test it:
 
        harness smoke binding.yaml --snippets ./snapshot --record record.yaml --out smoke.json
@@ -54,8 +64,8 @@ All in the current directory:
 
 # Rules
 
-- Never invent values. Every axis, shape, dtype, voxel size, URL, label key and class comes from
-  `record.yaml`, the downloader's files or what the harness reports. If you would have to guess, report
+- Never invent values. Every axis, shape, dtype, voxel size, URL and label class comes from `record.yaml`,
+  the downloader's files or what the harness reports, and every label key from the rule above. If you would have to guess, report
   `blocked` and say what is unknown.
 - Give a reason in `reasons` for every non-default decision, and evidence for any axis override or transform
   (which metadata says so).
