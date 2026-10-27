@@ -391,8 +391,9 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     broker_log = svc.host / "logs/broker.log"
     new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
     allow = ["github.com", "api.github.com", temporal.host]
+    if (service := getattr(cfg, "service", None)) and (host := urlparse(service.url).hostname):
+        allow.append(host)  # every worker with a `service` block writes the registry (mia-data's dataset rows too)
     if endpoint:  # buffer-api: on the host, unsandboxed like the broker
-        allow.append(endpoint[0])
         env_pairs = [f"{name}={value}" for name, value in svc.env().items()]
         api = shell("env", *env_pairs, PY, "-m", svc.app.module, "serve")
         new_window(svc.name, "api", f"{api} 2>&1 | tee -a {shell(svc.host / 'logs/api.log')}")

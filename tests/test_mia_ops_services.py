@@ -465,6 +465,7 @@ def test_up_passes_the_service_name_and_mounts_locks_and_token(tmp_path, fake):
         f"--ro {tmp_path}/mia.yaml",
         f"--rw {tmp_path}/local/locks",
         f"--ro {tmp_path}/token",
+        "--allow localhost --allow buffer-host.example.org",  # its stage writes reach the registry
         "-m mia_data.cli worker",
     ):
         assert piece in worker, piece
