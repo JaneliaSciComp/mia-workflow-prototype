@@ -396,8 +396,9 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
   `prep:` labels (the service cannot list issues).
 
 Actions: Download spec YAML (a file), Open buffer issue and Request preparation (prefilled
-`https://github.com/<buffers_repo>/issues/new?labels=&title=&body=` links carrying `buffer:go` / `prep:go`; GitHub
-applies a label only for people with triage rights, so the body also asks for it). Open buffer issue is disabled
+`https://github.com/<buffers_repo>/issues/new?title=&body=` links). The links set no label: nothing runs until the
+human adds `buffer:go` / `prep:go`, and the body says so (a prefilled label once started a 186-record preparation
+request its author thought was still a draft). Open buffer issue is disabled
 while the plan has errors (with them as the reason; "request preparation first" when only unprepared records fit),
 and a record's landing link is shown only for an `http(s)` URL. A link
 over 8 KB falls back to a "copy YAML" button and a notice. With an empty registry the views say so ("No catalog

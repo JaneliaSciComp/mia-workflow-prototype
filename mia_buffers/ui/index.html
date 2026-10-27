@@ -414,13 +414,13 @@ async function copyText(text) {
     let ok = false; try { ok = document.execCommand("copy"); } catch { ok = false; } area.remove(); return ok;
   }
 }
-function issueAction(container, label, repo, title, intro, yaml, labels, disabledReason) {
+function issueAction(container, label, repo, title, intro, yaml, disabledReason) {
   const disabled = reason => container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: reason }, label), el("span", { class: "small" }, reason));
   if (disabledReason) return disabled(disabledReason);
   if (!repo) return disabled("GET /meta names no repo");
   const body = `${intro}\n\n\`\`\`yaml\n${yaml}\`\`\`\n`;
-  // the label is applied only for people with triage rights on the repo; the body sentence covers everyone else
-  const base = `https://github.com/${repo}/issues/new?labels=${encodeURIComponent(labels)}&title=${encodeURIComponent(title)}`;
+  // no label is prefilled: nothing runs until the human adds the go label, after reading what the issue says
+  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}`;
   const url = `${base}&body=${encodeURIComponent(body)}`;
   if (url.length <= MAX_URL) { container.replaceChildren(el("a", { class: "btn", href: url, target: "_blank", rel: "noopener" }, label)); return; }
   const status = el("span", { class: "small" });
@@ -557,15 +557,15 @@ function bufferBlocker() {
 function renderActions() {
   const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
   issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
-    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Add the \`buffer:go\` label to plan it.`, yaml, "buffer:go", bufferBlocker());
+    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Nothing runs until you add the \`buffer:go\` label.`, yaml, bufferBlocker());
   // the Unprepared tile's rows: in progress is already on its way
   const todo = viewRows().filter(x => x.fits && x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
   const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records"
     : C.rawCached || C.stagedGeom ? "no unprepared record passes the registry toggles" : "every fitting record is prepared or in progress";
   issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
-    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Add the \`prep:go\` label to hand them to mia-data.`
-    + (todo.length > 25 ? ` Each record is an agent run: add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
-    toPrepYaml(todo, S.ref, S.meta.catalog_repo), "prep:go", !S.plan ? "no plan yet" : todo.length ? null : none);
+    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Nothing runs until you add the \`prep:go\` label; each record then costs an agent run.`
+    + (todo.length > 25 ? ` Before that, add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
+    toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : none);
 }
 function renderPlanMessages() {
   const box = $("planMsgs"); box.replaceChildren();
