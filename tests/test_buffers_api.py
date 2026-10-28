@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import threading
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -690,6 +691,7 @@ def test_meta_route(tmp_path):
         "datasets_repo": None,
         "catalog_repo": None,
         "service_url": None,
+        "datasets_workflow_url": None,
         "roots": {},
         "quota": {},
         "keeper": {},
@@ -701,6 +703,12 @@ def test_meta_route(tmp_path):
     assert set(meta) == set(empty) and meta["buffers_repo"] == cfg.github.buffers_repo
     assert (meta["datasets_repo"], meta["catalog_repo"]) == (cfg.github.datasets_repo, cfg.github.catalog_repo)
     assert meta["service_url"] == cfg.service.url
+    assert meta["datasets_workflow_url"] is None
+    cfg.temporal.ui_url = "https://temporal.example.org:8443/"
+    repo = quote(cfg.github.datasets_repo, safe="")
+    assert page_meta(cfg)["datasets_workflow_url"] == (
+        f"https://temporal.example.org:8443/namespaces/mia-data/workflows/mia-data%2F{repo}%2Fissue-"
+    )
     assert meta["roots"] == {
         "work_root": None,
         "storage_root": None,

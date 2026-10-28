@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Literal
-from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
@@ -554,7 +554,7 @@ class BufferService:
     def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.meta is not None:
             return 200, self.meta, {}
-        names = ("buffers_repo", "datasets_repo", "catalog_repo", "service_url")
+        names = ("buffers_repo", "datasets_repo", "catalog_repo", "service_url", "datasets_workflow_url")
         return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}}, {}
 
     def _usage(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
@@ -690,14 +690,20 @@ def backup_forever(ledger: Ledger, directory: Path, minutes: int, stop: threadin
 
 
 def page_meta(cfg: Config) -> dict:
-    """What the page reads from mia.yaml (`GET /meta`): the repos, the service URL, each root's browser URL (None when
+    """What the page reads from mia.yaml (`GET /meta`): the repos, the service URL, the Temporal UI prefix of a
+    dataset's workflow (append the issue number; None without `temporal.ui_url`), each root's browser URL (None when
     unset), the quota and the keeper's cadence."""
-    github, paths = cfg.github, cfg.paths
+    github, paths, ui_url = cfg.github, cfg.paths, cfg.temporal.ui_url
+    # ponytail: mia-data's namespace is its default; read services.mia-data.temporal.namespace when a deployment renames it
+    workflow_prefix = quote(f"mia-data/{github.datasets_repo}/issue-", safe="")
     return {
         "buffers_repo": github.buffers_repo,
         "datasets_repo": github.datasets_repo,
         "catalog_repo": github.catalog_repo,
         "service_url": cfg.service.url,
+        "datasets_workflow_url": f"{ui_url.rstrip('/')}/namespaces/mia-data/workflows/{workflow_prefix}"
+        if ui_url
+        else None,
         "roots": {root: getattr(paths, f"{root}_url") for root in paths.ROOTS},
         "quota": cfg.quota.model_dump(),
         "keeper": cfg.keeper.model_dump(),

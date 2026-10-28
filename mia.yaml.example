@@ -10,6 +10,7 @@ temporal:
                                           # fs), logs/, and bin/temporal if downloaded
   address: localhost:7233                 # $TEMPORAL_ADDRESS overrides
   poll_minutes: 2                         # namespace is per service, below
+  # ui_url: https://host.example.org:8443  # the Temporal web UI: the buffers page links each dataset's workflow
 github:                                   # shared: who the services act as, and the repos every service reads
   auth: token                             # token: $GITHUB_TOKEN (run as yourself) | app: GitHub App (service account)
   token_env: GITHUB_TOKEN
