@@ -680,6 +680,7 @@ class FakeClient:
         self.states, self.started, self.signals, self.terminated = states, [], [], []
         self.starts = starts or {}  # workflow id -> start time of its running run
         self.describe_run = lambda wid: f"run-{wid}"
+        self.statuses = {}  # workflow id -> status of its latest run, RUNNING when absent
 
     async def start_workflow(self, wf, arg, **kw):
         self.started.append((wf, arg, kw))
@@ -704,7 +705,7 @@ class FakeClient:
                     raise RPCError("not found", RPCStatusCode.NOT_FOUND, b"")
                 return SimpleNamespace(
                     start_time=client.starts.get(wid),
-                    status=WorkflowExecutionStatus.RUNNING,
+                    status=client.statuses.get(wid, WorkflowExecutionStatus.RUNNING),
                     run_id=client.describe_run(wid),
                 )
 
@@ -808,6 +809,7 @@ async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp
     }
     starts = {cfg.workflow_id(n): datetime(2026, 10, 27, 19, 52, tzinfo=UTC) for n in (5, 6)}
     client = FakeClient(states, starts)
+    client.statuses[cfg.workflow_id(5)] = WorkflowExecutionStatus.TERMINATED  # a pass that stopped half-way
     acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
 
     class Reg:

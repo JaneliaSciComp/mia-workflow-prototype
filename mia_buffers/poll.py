@@ -9,8 +9,9 @@
 - a closed issue that still carries a live stage label is over: its workflow is terminated (a terminate needs no
   replay, so it reaches a run that nondeterminism froze), its registered buffers are retired, and the stage label
   becomes `buffer:retired` (`prep:done` for a request), with a comment. An issue closed and reopened between two
-  passes counts too: an open live issue whose latest `closed` event is newer than its running workflow's start is
-  retired the same way (the label swap keeps it from repeating; the next `buffer:go` starts a fresh run).
+  passes counts too: an open live issue whose latest `closed` event is newer than its workflow's latest start is
+  retired the same way, whether or not that run still runs (the label swap keeps it from repeating; the next
+  `buffer:go` starts a fresh run).
 
 A buffer no longer waits on mia-data (milestone E), so nothing watches for bindings: a pre-E round still waiting on
 a dataset is planned again (`buffer:go`) once the dataset is prepared.
@@ -111,16 +112,16 @@ async def run_poll(activities: Activities) -> list[str]:
 
 
 async def _closed_since_start(activities: Activities, number: int, workflow_id: str) -> bool:
-    """True when the issue's latest close is newer than the start of its running workflow: a close the poller
-    missed because the issue was reopened before the next pass."""
-    from temporalio.client import WorkflowExecutionStatus
+    """True when the issue's latest close is newer than the start of its workflow's latest run: a close the poller
+    missed because the issue was reopened before the next pass (the run's status does not matter: a pass that
+    terminated it and then failed leaves the label to swap)."""
     from temporalio.service import RPCError
 
     try:
         description = await activities.temporal.get_workflow_handle(workflow_id).describe()
     except RPCError:  # no workflow
         return False
-    if description.status != WorkflowExecutionStatus.RUNNING or description.start_time is None:
+    if description.start_time is None:
         return False
     closed_at = await activities.gh_issues.last_closed_at(number)
     return closed_at is not None and datetime.fromisoformat(closed_at.replace("Z", "+00:00")) > description.start_time
