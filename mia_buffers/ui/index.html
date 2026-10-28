@@ -287,7 +287,7 @@ tr.click:hover td{background:var(--accent-soft)}
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
-  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file: which datasets qualify, the patch size and pyramid levels, how datasets are weighted, how volumes are split. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process. Starting a buffer and approving it are done with labels on a GitHub issue, and the system reports back in that issue's comments. This web UI is read-only: it shows the catalog, the buffers and the cache, and needs no login.</p>
+  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalization, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process. Starting a buffer and approving it are done with labels on a GitHub issue, and the system reports back in that issue's comments. This web UI is read-only: it shows the catalog, the buffers and the cache, and needs no login.</p>
 </header>
 
 <h2>The whole loop</h2>
@@ -434,11 +434,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <header>
   <div class="eyebrow">prep &amp; buffering spec v0.6 · milestones A–F and H–K built · branch training-buffers</div>
   <h1>MIA Training Buffers</h1>
-  <p>Two pipelines share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset: an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops: it plans over prepared datasets only, fetches the raw files once into a shared cache, stages each volume as an immutable OME-Zarr pyramid, and registers it with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors and read the pyramids themselves. GitHub issues and labels remain the way a human starts or approves anything; a read-only <b>web UI</b>, served by buffer-api at its own address, shows the whole state in four views: datasets, buffers, cache and preparation, and carries these documents as a fifth.</p>
+  <p>The system is two pipelines that share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset, which means an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops. It plans over prepared datasets only, fetches the raw files once into a shared cache, stages each volume as an immutable OME-Zarr pyramid, and registers each pyramid with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors from the service and read the pyramids themselves. GitHub issues and labels remain the way a human starts or approves anything. A read-only <b>web UI</b>, served by buffer-api at its own address, shows the whole state in four views (datasets, buffers, cache and preparation) and carries these documents as a fifth.</p>
 </header>
 
 <h2>1. System layout</h2>
-<p>One host runs everything that holds a credential: Temporal, two workers and buffer-api. Jobs run on the cluster and see only files. Lines run in the gutters between columns; each later figure drills into one part of this one.</p>
+<p>One host runs everything that holds a credential: Temporal, the two workers and buffer-api. Jobs run on the cluster and see only files. In the figure, lines run in the gutters between columns, and each later figure drills into one part of this one.</p>
 <figure>
 <svg viewBox="0 0 960 540" role="img" aria-label="Components of the system: GitHub repositories on the left, one host with the two workers and buffer-api in the middle, cluster jobs and shared storage below, the web UI and the training job on the right. Lines run in the gutters between columns.">
 <defs><marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -540,11 +540,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <path class="ea" d="M837 195 V437 H650" marker-end="url(#f1)"/>
 <text class="l" x="745" y="430" text-anchor="middle">reads pyramids</text>
 </svg>
-<figcaption><b>Figure 1.</b> The workers are the only components that talk to GitHub, submit jobs and write to the registry. Jobs see files and nothing else: no token, no lock directory, no service. buffer-api is an index that can be rebuilt from the files by its sync commands; it holds no credentials and deletes nothing. The training job and the web UI read from it; only the training job touches the pyramids.</figcaption>
+<figcaption><b>Figure 1.</b> The workers are the only components that talk to GitHub, submit jobs and write to the registry. Jobs see files and nothing else: they hold no token, see no lock directory and call no service. buffer-api is an index that its sync commands can rebuild from the files. It holds no credentials and deletes nothing. The training job and the web UI both read from it, but only the training job touches the pyramids.</figcaption>
 </figure>
 
 <h2>2. Two workflows around shared resources</h2>
-<p>Data preparation runs on top, buffering below. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the published crops and the lock directory. Solid arrows are the workflow, left to right; dashed arrows say which resource a step reads or writes. Columns line up so each dashed arrow stays in its own lane.</p>
+<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the published crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
 <figure>
 <svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, published crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset issue.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -677,11 +677,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
 <text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">prep:go opens dataset issues, adds data:go</text>
 </svg>
-<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round, a human validates it (a VLM may later): approved, that very set is published with the dataset's registry row; rejected, the reviewer's comments go to the agent and the next set comes back for review (figure 3b); buffering reads the row to plan and the binding to stage. Both write the same raw cache, because every job fetches through it: smoke and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files in place. Both take the same lock first. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a human validates it (a vision-language model may take this over later). If the set is approved, that very set is published together with the dataset's registry row. If it is rejected, the reviewer's comments go to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
-<p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only. Asking for more to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset: licence, modality, organism, annotations and fit at a patch and levels are a buffer spec's filters, evaluated by the planner per spec, so a dataset of 60-pixel images is prepared like any other and simply fails the fit rule of a 256-pixel buffer (spec §12). The only stops in preparation are <code>needs-human</code> ones.</p>
+<p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer (spec §12). The only place preparation stops is a <code>needs-human</code> state.</p>
 <figure>
 <svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: the dataset issue in mia-data moves data labels to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a prep request issue bridges unprepared records to mia-data.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -721,11 +721,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="410" y="262" text-anchor="middle">"not prepared": out of the pool,</text>
 <text class="l" x="410" y="276" text-anchor="middle">listed under its own heading</text>
 </svg>
-<figcaption><b>Figure 3.</b> The registry row is derived state: mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the published files. A buffer never asks mia-data for a dataset; a <code>prep:go</code> issue does, follows the rows until each record is <code>prepared</code> or <code>needs-human</code>, and closes itself. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state: a size or licence verdict taken here would bind every buffer that ever asks, so each buffer's plan takes it instead.</figcaption>
+<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the published files. A buffer never asks mia-data for a dataset. A <code>prep:go</code> issue does that instead: it follows the rows until each record is <code>prepared</code> or <code>needs-human</code>, then closes itself. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
 </figure>
 
 <h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
-<p>Every set of crops waits at <code>data:review</code>, a snippet PR's too. <code>data:approve</code> publishes the set you looked at; for a PR head it first makes autodev merge that head, and the same files are published under the merge commit. <code>data:reject</code> sends every comment you wrote on the issue since the crops report to the agent: as <code>/revise</code> on the PR when the round is following one, else as a new mia-snippets issue asking for a snippet that supersedes the one at fault (a merged snippet is never edited). The next crops come back to review, until you approve (spec §14).</p>
+<p>Every set of crops waits at <code>data:review</code>, including a set made from a snippet PR. <code>data:approve</code> publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <code>data:reject</code> sends every comment the reviewer wrote on the issue since the crops report to the agent. When the round is following a PR, the comments go as <code>/revise</code> on that PR. Otherwise they go as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves (spec §14).</p>
 <figure>
 <svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset issue's stages: data:go, match and smoke, crops and verify, data:review, data:merging, data:done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published; a merge whose snippet differs from the approved head is caught in the caption.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -757,11 +757,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="570" y="248" text-anchor="middle">no PR yet: an issue to supersede the snippet</text>
 <line class="ed" x1="650" y1="212" x2="800" y2="212" marker-end="url(#f3b)"/><text class="l" x="725" y="206" text-anchor="middle">revision limit,</text><text class="l" x="725" y="228" text-anchor="middle">PR closed</text>
 </svg>
-<figcaption><b>Figure 3b.</b> Two loops, both ending in your approve. The inner one is autodev's: a head whose crops fail verification gets the report as <code>/revise</code> and the next head is tested again, with no human in it. The outer one is yours: reject with comments, the agent revises, new crops, review. A matched binding's reject starts a PR where there was none, by an issue asking autodev to supersede the binding's snippet; from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops you approved, and the published crops are those files, under the merge commit. The rare case not drawn: a merge whose snippet tree is not the approved head's (someone pushed more) makes its own set and goes back through review. The stops are autodev's revision limit, five heads in one round, or a closed PR.</figcaption>
+<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no human in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with comments, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the published crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed.</figcaption>
 </figure>
 
 <h2>4. Lifecycle of a buffer issue</h2>
-<p>One <code>buffer:*</code> label at a time. Humans add five labels; the worker and the keeper set every other transition. Since v0.6 a round is staged before it asks: <code>buffer:go</code> asks once, at <code>staged</code>; <code>buffer:plan</code> asks after the plan as well.</p>
+<p>A buffer issue carries one <code>buffer:*</code> label at a time. Humans add five of the labels, and the worker and the keeper set every other transition. Since v0.6 a round is staged before it asks for approval. <code>buffer:go</code> asks once, at <code>staged</code>, and <code>buffer:plan</code> asks after the plan as well.</p>
 <figure>
 <svg viewBox="0 0 1040 330" role="img" aria-label="State machine of a buffer issue: new, planning, plan-review, sourcing, staged, ready, idle, retired, with needs-human as the recovery state; buffer:go skips plan-review; approve at staged serves the buffer, partial or not; the keeper signals degraded, idle and retire, and retires a staged buffer nobody approves.">
 <defs><marker id="f3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -825,11 +825,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="1030" y="100" text-anchor="end">degraded: a pyramid went</text>
 <text class="l" x="1030" y="114" text-anchor="end">missing → rebuilt in place</text>
 </svg>
-<figcaption><b>Figure 4.</b> Human labels: <code>buffer:go</code>, <code>buffer:plan</code>, <code>buffer:approve</code>, <code>buffer:keep</code>, <code>buffer:retire</code>. The round stages before it asks: the staged comment is the board, a failed dataset with its error, each weighting group against <code>ready.min_fraction</code>; the approve accepts it as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the <code>ready</code> event. The keeper, a scheduled pass every thirty minutes, watches ready buffers as before and retires a staged one nobody approves. Every way out of a dead end is a new <code>buffer:go</code>.</figcaption>
+<figcaption><b>Figure 4.</b> The human labels are <code>buffer:go</code>, <code>buffer:plan</code>, <code>buffer:approve</code>, <code>buffer:keep</code> and <code>buffer:retire</code>. The round stages before it asks. The staged comment is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the <code>ready</code> event. The keeper, a scheduled pass every thirty minutes, watches ready buffers as before and retires a staged buffer that nobody approves. Every way out of a dead end is a new <code>buffer:go</code>.</figcaption>
 </figure>
 
 <h2>5. Sourcing one dataset</h2>
-<p>For every dataset in the pool, heaviest first. The record's raw cache is written by one job at a time, across both pipelines and any number of buffers; a lock file on the host's local disk enforces that.</p>
+<p>Once a round is planned, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 5, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
 <figure>
 <svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, publish by rename, register the volumes, release the lock.">
 <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -888,11 +888,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
 <text class="l" x="775" y="298" text-anchor="middle">release</text>
 </svg>
-<figcaption><b>Figure 5.</b> Fetch and stage are two phases per dataset, so one slow download never holds the others. The stage job runs with the cache read-only; a URL the fetch could not get as a whole file is the one exception that keeps a stage online. A published pyramid is never written again: a new binding, harness or voxel size is a new id beside the old one. The plan row decides the split (a holdout record registers all-test) and the buffer config pins the recipe, so a sample is fully determined by buffer and sequence number.</figcaption>
+<figcaption><b>Figure 5.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only. The one exception is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A published pyramid is never written again. A new binding, harness or voxel size produces a new artifact id beside the old one. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
 </figure>
 
 <h2>6. The cache and its keeper</h2>
-<p>Two shared roots, reference-counted through the registry. Nothing in the service deletes; only the keeper, running inside the buffers worker, removes a directory.</p>
+<p>The cache is two shared roots, the raw root and the staged root, and both are reference-counted through the registry. Nothing in the service deletes. Only the keeper, which runs inside the buffers worker, removes a directory.</p>
 <figure>
 <svg viewBox="0 0 960 280" role="img" aria-label="The keeper's pass: sync the registry with the files, reset rows whose job died, sweep abandoned build directories, then evict free assets under the quota; an asset is free when it has no references, is ready, has not been used for the hold period, and its record is neither in a mia-data round nor locked.">
 <defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -917,11 +917,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="32" y="226">quota 0 = unlimited (the default); a blocked fetch records its demand so the keeper frees enough room for it;</text>
 <text class="s" x="32" y="242">when nothing is evictable and a root is still over, one comment on the newest buffer issue</text>
 </svg>
-<figcaption><b>Figure 6.</b> Sizes come from the keeper's scan and are reused until a directory's mtime changes. A raw asset shared by several buffers keeps one reference per buffer; a retire drops a buffer's references, so its pyramids become evictable and its raw files stay until the space is needed. <code>mia-buffers assets sync --dry-run</code> is the same pass by hand, reporting only.</figcaption>
+<figcaption><b>Figure 6.</b> Sizes come from the keeper's scan and are reused until a directory's mtime changes. A raw asset shared by several buffers keeps one reference per buffer. A retire drops that buffer's references, so its pyramids become evictable and its raw files stay until the space is needed. <code>mia-buffers assets sync --dry-run</code> runs the same pass by hand and only reports.</figcaption>
 </figure>
 
 <h2>7. Serving</h2>
-<p>Train consumers get a stream; val and test consumers get a frozen list. Both read pixels from shared storage themselves.</p>
+<p>Train consumers get a stream of crops, and val and test consumers get a frozen list. Both kinds read the pixels from shared storage themselves.</p>
 <figure>
 <svg viewBox="0 0 940 440" role="img" aria-label="Sequence of calls between the worker, the buffer service, a train consumer and a val consumer: volumes registered, train descriptors streamed by weight, val descriptors served from a frozen list, a late dataset renormalising train weights only.">
 <defs><marker id="f6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -963,11 +963,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="388" y="418">train weights renormalise on the next draw;</text>
 <text class="s" x="388" y="430">the val list does not change for this run</text>
 </svg>
-<figcaption><b>Figure 7.</b> The service is the only sampler, so every consumer of a buffer sees one distribution. <code>next</code> records before it returns, which makes the ledger a complete record of a run; a retire archives the draws to shared storage and answers 410 from then on. The daily usage rows and the empty-response rate are what the web UI's health line shows.</figcaption>
+<figcaption><b>Figure 7.</b> The service is the only sampler, so every consumer of a buffer sees one distribution. <code>next</code> records a draw before it returns it, which makes the ledger a complete record of a run. A retire archives the draws to shared storage, and the service answers 410 from then on. The daily usage rows and the empty-response rate are what the web UI's health line shows.</figcaption>
 </figure>
 
 <h2>8. What a crop is</h2>
-<p>The service hands out descriptors, not pixels. Whoever tensorises derives one pixel box per level from the descriptor and reads it from the pyramid. The example uses the U937 confocal record: 45 nm pixels, 256-pixel patches, levels 1, 2 and 4.</p>
+<p>The service hands out descriptors, not pixels. Whoever tensorises a crop derives one pixel box per level from the descriptor and reads it from the pyramid. The example in figure 8 uses the U937 confocal record, with 45 nm pixels, 256-pixel patches and levels 1, 2 and 4.</p>
 <figure>
 <svg viewBox="0 0 940 345" role="img" aria-label="One crop descriptor becomes three 256-pixel patches at pyramid levels 1, 2 and 4 around the same world point, stacked into the img tensor with a physical bounding box per level.">
 <rect class="b" x="30" y="30" width="280" height="280" rx="3"/>
@@ -1001,11 +1001,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="758" y="246">embedding, so the unit is fixed</text>
 <text class="lm" x="30" y="332">descriptor = (buffer, seq, volume, plane, centre_nm, levels=[1, 2, 4], normalize)</text>
 </svg>
-<figcaption><b>Figure 8.</b> The centre is drawn uniformly inside the region where the coarsest box still fits, so the three patches are always co-centred and never clamped. Each coarser patch covers twice the field of the one below it. The coarse footprint is 1024 level-0 pixels, which is why a 224-pixel dataset fails this spec's fit rule at plan time; a spec with a 32-pixel patch admits it, and preparation itself refuses no dataset for its size.</figcaption>
+<figcaption><b>Figure 8.</b> The centre is drawn uniformly inside the region where the coarsest box still fits, so the three patches are always co-centred and never clamped. Each coarser patch covers twice the field of the one below it. The coarsest footprint is 1024 level-0 pixels, which is why a 224-pixel dataset fails this spec's fit rule at plan time. A spec with a 32-pixel patch admits the same dataset, and preparation itself refuses no dataset for its size.</figcaption>
 </figure>
 
 <h2>9. Where things live</h2>
-<p>One configuration file for every service on the host. Host-local disk for anything that needs a working lock; shared storage for everything a job or a consumer reads.</p>
+<p>One configuration file serves every service on the host. Anything that needs a working lock lives on host-local disk, and everything a job or a consumer reads lives on shared storage.</p>
 <pre>mia.yaml                                 <span class="c">one file: shared sections, then services.&lt;name&gt; overlays</span>
 
 &lt;local_root&gt;/                            <span class="c">host-local disk (file locks and SQLite do not work on NFS)</span>
@@ -1031,11 +1031,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
   backups/ · archive/ · keeper/          <span class="c">SQLite copies · retired buffers' draws · the catalog sync mark</span></pre>
 
 <h2>10. The web UI</h2>
-<p>buffer-api serves it at <code>/</code>. It reads only the open routes, holds no token, and its three actions are prefilled GitHub links: the one click that needs an identity leaves the web UI.</p>
+<p>buffer-api serves the web UI at <code>/</code>. The page reads only the open routes and holds no token. Its three actions are prefilled GitHub links, so the one click that needs an identity leaves the web UI.</p>
 <div class="tw"><table>
 <tr><th>view</th><th>shows</th><th>reads</th></tr>
-<tr><td>Datasets</td><td>the catalog filtered by spec fields, planned by the server; preparation state, raw and staged state, which buffers use each record; download the spec, open the buffer issue, request preparation</td><td><code>POST /plan</code> · <code>/datasets</code> · <code>/assets/*</code></td></tr>
-<tr><td>Buffers</td><td>every buffer with its latest event; a buffer's board, volumes, consumers, daily usage and health line</td><td><code>/buffers</code> · <code>/status</code> · <code>/events</code> · <code>/usage</code></td></tr>
+<tr><td>Datasets</td><td>the catalog filtered by spec fields and planned by the server, with each record's preparation state, raw and staged state and the buffers that use it. Its actions download the spec, open the buffer issue and request preparation</td><td><code>POST /plan</code> · <code>/datasets</code> · <code>/assets/*</code></td></tr>
+<tr><td>Buffers</td><td>every buffer with its latest event, and for one buffer its board, volumes, consumers, daily usage and health line</td><td><code>/buffers</code> · <code>/status</code> · <code>/events</code> · <code>/usage</code></td></tr>
 <tr><td>Cache</td><td>raw by record, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/*</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Preparation</td><td>datasets in progress with their mia-data stage and issue, those needing a human, open requests</td><td><code>/datasets</code></td></tr>
 <tr><td>Docs</td><td>the user guide (the loop from spec to training, as the person training a model sees it) and this architecture overview</td><td>nothing: static</td></tr>
@@ -1044,11 +1044,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <h2>What is not built</h2>
 <ul>
   <li><b>Remote mode:</b> crop workers beside the service that tensorise and return tensors over HTTP. Local mode, where the training job reads the pyramid, is the only mode.</li>
-  <li><b>The evaluation step:</b> an agent that writes <code>evaluation.yaml</code> (voxel size, channel meanings, a quality verdict) beside the binding. The config switch exists; the job does not.</li>
+  <li><b>The evaluation step:</b> an agent that writes <code>evaluation.yaml</code> (voxel size, channel meanings, a quality verdict) beside the binding. The config switch exists, but the job does not.</li>
   <li><b>Identity on the service:</b> the web UI cannot start a buffer or a request by itself. When a proxy or token layer lands in front of buffer-api, the same buttons can call the API directly.</li>
   <li><b>Several worker hosts:</b> the lock directory assumes one host. The upgrade is a lease table in the registry with the same four calls.</li>
 </ul>
-<p>Source: <code>notes/specs/2026-10-25-prep-and-buffering.md</code> (v0.6; §12 removes the eligibility verdict, §13 the production crop phase, §15 stages a round before it asks, §14 adds the review loop) and the "Built in" notes under its build order; <code>docs/development.md</code> walks through each milestone.</p>
+<p>Source: <code>notes/specs/2026-10-25-prep-and-buffering.md</code> (v0.6, where §12 removes the eligibility verdict, §13 removes the production crop phase, §15 stages a round before it asks and §14 adds the review loop) and the "Built in" notes under its build order. <code>docs/development.md</code> walks through each milestone.</p>
   </article>
 </section>
 
