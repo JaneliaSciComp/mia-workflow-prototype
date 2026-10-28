@@ -8,7 +8,9 @@
 - a `prep:go` label on a preparation request becomes the `go` signal of its `MiaPrep` workflow, the same way;
 - a closed issue that still carries a live stage label is over: its workflow is terminated (a terminate needs no
   replay, so it reaches a run that nondeterminism froze), its registered buffers are retired, and the stage label
-  becomes `buffer:retired` (`prep:done` for a request), with a comment.
+  becomes `buffer:retired` (`prep:done` for a request), with a comment. An issue closed and reopened between two
+  passes counts too: an open live issue whose latest `closed` event is newer than its running workflow's start is
+  retired the same way (the label swap keeps it from repeating; the next `buffer:go` starts a fresh run).
 
 A buffer no longer waits on mia-data (milestone E), so nothing watches for bindings: a pre-E round still waiting on
 a dataset is planned again (`buffer:go`) once the dataset is prepared.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from mia_data.poll import deliver_label
@@ -85,17 +88,45 @@ async def run_poll(activities: Activities) -> list[str]:
                 done += await retire_closed(activities, issue["number"])
             except Exception:
                 log.exception("poll: closed issue #%s failed", issue["number"])
+        for issue in await gh.list_issues(labels=cfg.label(stage), state="open"):
+            try:
+                if await _closed_since_start(activities, issue["number"], cfg.workflow_id(issue["number"])):
+                    done += await retire_closed(activities, issue["number"], reopened=True)
+            except Exception:
+                log.exception("poll: reopened issue #%s failed", issue["number"])
     for issue in await gh.list_issues(labels=cfg.prep_label("requested"), state="closed"):
         try:
             done += await retire_closed(activities, issue["number"], prep=True)
         except Exception:
             log.exception("poll: closed request #%s failed", issue["number"])
+    for issue in await gh.list_issues(labels=cfg.prep_label("requested"), state="open"):
+        try:
+            if await _closed_since_start(activities, issue["number"], cfg.prep_workflow_id(issue["number"])):
+                done += await retire_closed(activities, issue["number"], prep=True, reopened=True)
+        except Exception:
+            log.exception("poll: reopened request #%s failed", issue["number"])
     if done:
         log.info("poll: %s", ", ".join(done))
     return done
 
 
-async def retire_closed(activities: Activities, number: int, prep: bool = False) -> list[str]:
+async def _closed_since_start(activities: Activities, number: int, workflow_id: str) -> bool:
+    """True when the issue's latest close is newer than the start of its running workflow: a close the poller
+    missed because the issue was reopened before the next pass."""
+    from temporalio.client import WorkflowExecutionStatus
+    from temporalio.service import RPCError
+
+    try:
+        description = await activities.temporal.get_workflow_handle(workflow_id).describe()
+    except RPCError:  # no workflow
+        return False
+    if description.status != WorkflowExecutionStatus.RUNNING or description.start_time is None:
+        return False
+    closed_at = await activities.gh_issues.last_closed_at(number)
+    return closed_at is not None and datetime.fromisoformat(closed_at.replace("Z", "+00:00")) > description.start_time
+
+
+async def retire_closed(activities: Activities, number: int, prep: bool = False, reopened: bool = False) -> list[str]:
     """A closed issue is a retire: terminate its workflow, retire its buffers, swap the stage label, say so."""
     import asyncio
 
@@ -105,8 +136,10 @@ async def retire_closed(activities: Activities, number: int, prep: bool = False)
 
     cfg = activities.cfg
     workflow_id = (cfg.prep_workflow_id if prep else cfg.workflow_id)(number)
+    handle, run_id = activities.temporal.get_workflow_handle(workflow_id), None
     try:
-        await activities.temporal.get_workflow_handle(workflow_id).terminate(reason="issue closed")
+        run_id = (await handle.describe()).run_id
+        await handle.terminate(reason="issue closed")
         done = [f"terminated {workflow_id}"]
     except RPCError as error:  # no workflow, or one already over
         log.info("poll: closed #%s: %s not terminated: %s", number, workflow_id, error.message)
@@ -129,8 +162,9 @@ async def retire_closed(activities: Activities, number: int, prep: bool = False)
     what = ("workflow stopped" if done else "no workflow running") + (
         f"; retired {', '.join(f'`{b}`' for b in retired)}" if retired else ""
     )
-    marker = cfg.marker("closed")
-    await activities._comment_once(activities.gh_issues, number, f"issue closed: {what}\n\n{marker}", marker)
+    marker = cfg.marker(f"closed {run_id}" if run_id else "closed")  # once per run: a reopened issue closes again
+    lead = "issue closed and reopened" if reopened else "issue closed"
+    await activities._comment_once(activities.gh_issues, number, f"{lead}: {what}\n\n{marker}", marker)
     return done + [f"retired {b}" for b in retired] + [f"closed #{number}"]
 
 

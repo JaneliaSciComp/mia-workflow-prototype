@@ -6,15 +6,16 @@ import json
 import os
 import uuid
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import WorkflowFailureError, WorkflowHistory
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError, CancelledError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from test_buffers_config import make_cfg
@@ -634,7 +635,7 @@ async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
 class PollGH:
     def __init__(self, issues, events=None, perms=None):
         self.issues, self.events, self.perms = issues, events or {}, perms or {}
-        self.comments, self.removed = {}, []
+        self.comments, self.removed, self.closed_at = {}, [], {}
 
     def tokens(self):
         return "tok"
@@ -670,10 +671,15 @@ class PollGH:
     async def get_issue(self, n):
         return self.issues[n]
 
+    async def last_closed_at(self, n):
+        return self.closed_at.get(n)
+
 
 class FakeClient:
-    def __init__(self, states):
+    def __init__(self, states, starts=None):
         self.states, self.started, self.signals, self.terminated = states, [], [], []
+        self.starts = starts or {}  # workflow id -> start time of its running run
+        self.describe_run = lambda wid: f"run-{wid}"
 
     async def start_workflow(self, wf, arg, **kw):
         self.started.append((wf, arg, kw))
@@ -692,6 +698,15 @@ class FakeClient:
                 if wid not in client.states:
                     raise RPCError("workflow execution already completed", None, None)
                 client.terminated.append((wid, reason))
+
+            async def describe(self):
+                if wid not in client.states:
+                    raise RPCError("not found", RPCStatusCode.NOT_FOUND, b"")
+                return SimpleNamespace(
+                    start_time=client.starts.get(wid),
+                    status=WorkflowExecutionStatus.RUNNING,
+                    run_id=client.describe_run(wid),
+                )
 
         return Handle()
 
@@ -780,6 +795,49 @@ async def test_poll_retires_a_closed_issue(tmp_path):
     assert "workflow stopped; retired `i2-e9`" in gh.comments[2][0]["body"]
     assert "no workflow running" in gh.comments[3][0]["body"]
     assert await run_poll(acts) == [] and len(gh.comments[2]) == 1  # the label is gone: nothing to do again
+
+
+async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp_path):
+    """A close the poller never saw (the issue was reopened before the next pass) still retires the run it was
+    aimed at: an open live issue whose latest close is newer than its running workflow's start is retired, once."""
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={5: issue(5, "buffer:plan-review"), 6: issue(6, "buffer:ready")})
+    gh.closed_at = {5: "2026-10-28T12:08:29Z", 6: "2026-10-27T09:00:00Z"}  # 6 was closed before its run began
+    states = {
+        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((5, "plan-review"), (6, "ready"))
+    }
+    starts = {cfg.workflow_id(n): datetime(2026, 10, 27, 19, 52, tzinfo=UTC) for n in (5, 6)}
+    client = FakeClient(states, starts)
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+
+    class Reg:
+        retired = []
+
+        def buffers(self):
+            return [
+                {"id": "i5-e1", "latest_event": {"kind": "planned"}},
+                {"id": "i6-e1", "latest_event": {"kind": "ready"}},
+            ]
+
+        def retire(self, buffer):
+            self.retired.append(buffer)
+            return {"refs": 0, "draws": 0, "archive": None}
+
+        def event(self, buffer, kind, **kw):
+            pass
+
+    acts.registry = Reg()
+    assert set(await run_poll(acts)) == {f"terminated {cfg.workflow_id(5)}", "retired i5-e1", "closed #5"}
+    assert client.terminated == [(cfg.workflow_id(5), "issue closed")] and acts.registry.retired == ["i5-e1"]
+    assert {x["name"] for x in gh.issues[5]["labels"]} == {"buffer:retired"}
+    assert {x["name"] for x in gh.issues[6]["labels"]} == {"buffer:ready"}  # closed before this run: untouched
+    assert "closed and reopened" in gh.comments[5][0]["body"]
+    assert await run_poll(acts) == []  # the label is gone: nothing to do again
+    # a later run of the same issue, closed again: said again (the once-guard is per run, not per issue)
+    gh.issues[5]["labels"], gh.issues[5]["state"] = [{"name": "buffer:sourcing"}], "closed"
+    client.starts[cfg.workflow_id(5)] = datetime(2026, 10, 29, tzinfo=UTC)
+    client.describe_run = lambda wid: f"run2-{wid}"
+    assert "closed #5" in await run_poll(acts) and len(gh.comments[5]) == 2
 
 
 async def test_poll_refuses_go_from_a_reader(tmp_path):

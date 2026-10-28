@@ -296,7 +296,9 @@ marks the older ones superseded. **Closing the issue is also a retire**: the
 poller finds a closed issue that still carries a live stage label (`planning` to `idle`), terminates its workflow
 (a terminate needs no replay, so it also ends a run that a nondeterministic history froze), retires its registered
 buffers, swaps the label to `buffer:retired` and comments. A closed `prep:requested` request is ended the same way
-and gets `prep:done`. No Temporal CLI is needed to stop a buffer. `GET /buffers` lists each buffer
+and gets `prep:done`. An issue closed and reopened between two passes is caught as well: the poller retires an
+open live issue whose latest close is newer than its running workflow's start, so a quick close-and-reopen ends
+the old run and the next `buffer:go` starts a fresh one. No Temporal CLI is needed to stop a buffer. `GET /buffers` lists each buffer
 with its latest event, volume and `missing` counts, servable volumes per split, the newest consumer `last_seen` and
 today's draws.
 

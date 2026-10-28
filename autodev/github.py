@@ -266,6 +266,14 @@ class GitHub:
                 )
         return found
 
+    async def last_closed_at(self, issue: int) -> str | None:
+        """`created_at` of the most recent `closed` event of the issue, or None when it was never closed."""
+        found = None
+        async for event in self._paged(f"/repos/{self.repo}/issues/{issue}/events"):
+            if event.get("event") == "closed":
+                found = event.get("created_at")
+        return found
+
     async def label_actor(self, issue: int, label: str) -> str | None:
         """Login of whoever most recently added `label` to the issue."""
         return (await self.label_event(issue, label))[0]
