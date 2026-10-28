@@ -612,7 +612,15 @@ class PollGH:
         return "tok"
 
     async def list_issues(self, labels=None, state=None, **_):
-        return [i for i in self.issues.values() if not labels or labels in {x["name"] for x in i["labels"]}]
+        return [
+            i
+            for i in self.issues.values()
+            if (not labels or labels in {x["name"] for x in i["labels"]})
+            and (state is None or i.get("state", "open") == state)
+        ]
+
+    async def add_labels(self, n, names):
+        self.issues[n]["labels"] += [{"name": x} for x in names]
 
     async def label_event(self, n, label):
         return self.events[(n, label)]
@@ -637,7 +645,7 @@ class PollGH:
 
 class FakeClient:
     def __init__(self, states):
-        self.states, self.started, self.signals = states, [], []
+        self.states, self.started, self.signals, self.terminated = states, [], [], []
 
     async def start_workflow(self, wf, arg, **kw):
         self.started.append((wf, arg, kw))
@@ -651,6 +659,11 @@ class FakeClient:
 
             async def query(self, name, result_type=None):
                 return client.states[wid]
+
+            async def terminate(self, reason=None):
+                if wid not in client.states:
+                    raise RPCError("workflow execution already completed", None, None)
+                client.terminated.append((wid, reason))
 
         return Handle()
 
@@ -690,6 +703,44 @@ async def test_poll_delivers_labels_and_drops(tmp_path):
     (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
     assert await run_poll(acts) == []  # a new file: seen, not yet stable
     assert await run_poll(acts) == ["dropped #2 bcss"]  # once more
+
+
+async def test_poll_retires_a_closed_issue(tmp_path):
+    """Closing the issue is the retire: the workflow is terminated (frozen or not), the buffer released, the
+    label swapped, once; a closed issue with no workflow and no buffer just gets its label."""
+    cfg = make_cfg(tmp_path)
+    gh = PollGH(issues={2: issue(2, "buffer:sourcing"), 3: issue(3, "buffer:plan-review"), 4: issue(4, "buffer:ready")})
+    gh.issues[2]["state"] = gh.issues[3]["state"] = "closed"
+    states = {
+        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((2, "sourcing"), (4, "ready"))
+    }
+    client = FakeClient(states)
+    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
+
+    class Reg:
+        retired, events = [], []
+
+        def buffers(self):
+            return [{"id": "i2-e9", "latest_event": {"kind": "approved"}}, {"id": "i4-e1", "latest_event": None}]
+
+        def retire(self, buffer):
+            self.retired.append(buffer)
+            return {"refs": 1, "draws": 0, "archive": None}
+
+        def event(self, buffer, kind, **kw):
+            self.events.append((buffer, kind))
+
+    acts.registry = Reg()
+    expect = {f"terminated {cfg.workflow_id(2)}", "retired i2-e9", "closed #2", "closed #3"}
+    assert set(await run_poll(acts)) == expect
+    assert client.terminated == [(cfg.workflow_id(2), "issue closed")]
+    assert acts.registry.retired == ["i2-e9"] and acts.registry.events == [("i2-e9", "retired")]
+    assert {x["name"] for x in gh.issues[2]["labels"]} == {"buffer:retired"}
+    assert {x["name"] for x in gh.issues[3]["labels"]} == {"buffer:retired"}
+    assert {x["name"] for x in gh.issues[4]["labels"]} == {"buffer:ready"}  # open: untouched
+    assert "workflow stopped; retired `i2-e9`" in gh.comments[2][0]["body"]
+    assert "no workflow running" in gh.comments[3][0]["body"]
+    assert await run_poll(acts) == [] and len(gh.comments[2]) == 1  # the label is gone: nothing to do again
 
 
 async def test_poll_refuses_go_from_a_reader(tmp_path):

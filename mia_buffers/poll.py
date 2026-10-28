@@ -5,7 +5,10 @@
 - for issues in `buffer:sourcing` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
   directory holds a file gets a `dropped` signal once that directory's listing has been stable for a whole poll
   interval (a file still being copied grows between passes), and once per change of it;
-- a `prep:go` label on a preparation request becomes the `go` signal of its `MiaPrep` workflow, the same way.
+- a `prep:go` label on a preparation request becomes the `go` signal of its `MiaPrep` workflow, the same way;
+- a closed issue that still carries a live stage label is over: its workflow is terminated (a terminate needs no
+  replay, so it reaches a run that nondeterminism froze), its registered buffers are retired, and the stage label
+  becomes `buffer:retired` (`prep:done` for a request), with a comment.
 
 A buffer no longer waits on mia-data (milestone E), so nothing watches for bindings: a pre-E round still waiting on
 a dataset is planned again (`buffer:go`) once the dataset is prepared.
@@ -23,6 +26,8 @@ from mia_data.poll import deliver_label
 
 from .config import HUMAN_LABELS, PREP_HUMAN_LABELS
 from .models import BufferState, PrepState
+
+LIVE_STAGES = ("planning", "plan-review", "sourcing", "ready", "idle")  # a closed issue in one of these is retired
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -67,9 +72,59 @@ async def run_poll(activities: Activities) -> list[str]:
                 done += await notice_drops(activities, issue["number"])
             except Exception:
                 log.exception("poll: issue #%s drop signals failed", issue["number"])
+    for stage in LIVE_STAGES:
+        for issue in await gh.list_issues(labels=cfg.label(stage), state="closed"):
+            try:
+                done += await retire_closed(activities, issue["number"])
+            except Exception:
+                log.exception("poll: closed issue #%s failed", issue["number"])
+    for issue in await gh.list_issues(labels=cfg.prep_label("requested"), state="closed"):
+        try:
+            done += await retire_closed(activities, issue["number"], prep=True)
+        except Exception:
+            log.exception("poll: closed request #%s failed", issue["number"])
     if done:
         log.info("poll: %s", ", ".join(done))
     return done
+
+
+async def retire_closed(activities: Activities, number: int, prep: bool = False) -> list[str]:
+    """A closed issue is a retire: terminate its workflow, retire its buffers, swap the stage label, say so."""
+    import asyncio
+
+    from temporalio.service import RPCError
+
+    from .activities import _issue_of
+
+    cfg = activities.cfg
+    workflow_id = (cfg.prep_workflow_id if prep else cfg.workflow_id)(number)
+    try:
+        await activities.temporal.get_workflow_handle(workflow_id).terminate(reason="issue closed")
+        done = [f"terminated {workflow_id}"]
+    except RPCError as error:  # no workflow, or one already over
+        log.info("poll: closed #%s: %s not terminated: %s", number, workflow_id, error.message)
+        done = []
+    retired = []
+    if not prep:
+        for buffer in await asyncio.to_thread(activities.registry.buffers):
+            latest = (buffer.get("latest_event") or {}).get("kind")
+            try:
+                mine = _issue_of(buffer["id"]) == number
+            except ValueError:
+                continue
+            if mine and latest != "retired":
+                await activities.retire_buffer(buffer["id"], buffer["id"])
+                retired.append(buffer["id"])
+    if prep:
+        await activities.set_prep_stage(number, "done")
+    else:
+        await activities.set_stage(number, "retired")
+    what = ("workflow stopped" if done else "no workflow running") + (
+        f"; retired {', '.join(f'`{b}`' for b in retired)}" if retired else ""
+    )
+    marker = cfg.marker("closed")
+    await activities._comment_once(activities.gh_issues, number, f"issue closed: {what}\n\n{marker}", marker)
+    return done + [f"retired {b}" for b in retired] + [f"closed #{number}"]
 
 
 def _incoming_signature(directory) -> tuple | None:
