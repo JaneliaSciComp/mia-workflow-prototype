@@ -36,6 +36,7 @@ button,select,input{font:inherit;color:inherit}
 .small{font-size:12.5px;color:var(--muted)}
 tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
+td.pills{white-space:normal;min-width:180px}
 
 /* top bar: title, the five tabs, the catalog ref, the theme toggle */
 .topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
@@ -1303,6 +1304,8 @@ function joinRow(r) {
     fits: !!(r.fit && r.fit.ok), inPool: !!(r.admitted && r.fit && r.fit.ok), decision: decisionOf(r) };
 }
 const stagedUsable = a => !["evicted","missing"].includes(a.data?.state);
+// the usable builds of a dataset by geometry: levels key -> count (several builds: other conversion code or binding)
+const geometries = staged => { const m = new Map(); for (const a of staged.filter(stagedUsable)) { const k = a.data?.levels_key || "?"; m.set(k, (m.get(k) || 0) + 1); } return m; };
 
 // ---- the records table (the explorer's, with the registry columns)
 let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
@@ -1313,9 +1316,14 @@ const COLS = [
   { key: "dims", label: "dims", get: x => x.dims || "" },
   { key: "mod", label: "modality", get: x => x.modality_group || "" },
   { key: "lic", label: "licence", get: x => x.lic },
-  { key: "prep", label: "preparation", get: x => x.prepared || "", cell: x => el("td", {}, statePill(x.prepared), x.ds?.issue ? " " : null, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : null) },
-  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data ? assetPill(x.raw.data.state) : "", x.raw?.data?.bytes ? " " + fmtBytes(x.raw.data.bytes) : "") },
-  { key: "staged", label: "staged", get: x => x.staged.map(a => a.data?.levels_key || "").join(" "), cell: x => el("td", { class: "mono" }, x.staged.filter(stagedUsable).map(a => a.data?.levels_key || "?").join(" ")) },
+  { key: "state", label: "state", title: "preparation (with its dataset issue), then the raw cache's state, then \"staged\" when a pyramid of it exists",
+    get: x => `${x.prepared === "prepared" ? 0 : 1}${x.raw?.data ? 0 : 1}${x.staged.some(stagedUsable) ? 0 : 1}`,
+    cell: x => { const td = el("td", { class: "pills" }, statePill(x.prepared)); if (x.ds?.issue) td.append(" ", ghIssue(S.meta.datasets_repo, x.ds.issue));
+      if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool")); return td; } },
+  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data?.bytes ? fmtBytes(x.raw.data.bytes) : "") },
+  { key: "staged", label: "staged geometries", title: "each geometry a pyramid of this dataset was built for: p<patch edge in pixels>-l<pyramid levels>; a count when several builds exist (different conversion code or binding)",
+    get: x => [...geometries(x.staged).keys()].join(" "),
+    cell: x => { const td = el("td", { class: "mono" }); let first = true; for (const [key, n] of geometries(x.staged)) { td.append(first ? "" : " ", el("span", { title: `${n} build${n > 1 ? "s" : ""} for this geometry` }, key + (n > 1 ? `×${n}` : ""))); first = false; } return td; } },
   { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
   { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
   { key: "w", label: "weight", num: true, get: x => x.weight || 0, cell: x => el("td", { class: "num" }, x.weight ? pct(x.weight) : "") },
@@ -1323,7 +1331,7 @@ const COLS = [
 ];
 function renderTableHead() {
   const tr = el("tr");
-  for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
+  for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", title: c.title || null, onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
   $("table").tHead.replaceChildren(tr);
 }
 function renderTable() {
