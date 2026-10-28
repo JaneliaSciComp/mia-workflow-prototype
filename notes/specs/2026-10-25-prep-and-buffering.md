@@ -1,6 +1,8 @@
 # MIA: data preparation and buffering as two pipelines around one registry — Spec
 
-**Status:** draft v0.5 · 2026-10-27 · milestones A–F, H and I built on branch `training-buffers`. v0.5 is the amendment
+**Status:** draft v0.6 · 2026-10-28 · milestones A–F, H, I and J built on branch `training-buffers`. v0.6 is the
+amendment in §15: a round is staged before it is approved (`buffer:go`), with an optional gate after the plan
+(`buffer:plan`), and an approve may accept a partial buffer. v0.5 is the amendment
 in §14: every set is reviewed, `data:reject` sends the reviewer's comments to the agent, and the loop runs until
 `data:approve`, which merges the snippet PR. v0.4 is the amendment
 in §13: one crop set per round, validated, then prepared (no production phase). v0.3 is the amendment in
@@ -668,6 +670,7 @@ removed `waiting-dataset` path needs no `patched()` guard; the replay fixtures a
 | G | evaluation step | its own spec and plan; the row schema in §4.3 is the contract |
 | I | one crop set per round (§13): the round's crops are reviewed and, approved, published; no production phase, no `data:cropping`; the approve gate is pluggable | a `go` on a prepared-looking record runs one crop job of `crops.per_round`, shows them at `data:review`, and `data:approve` publishes exactly those crops with the binding and manifest, the registry row turning `prepared`; no `data:cropping` label is set; a second `go` adds crops without duplicating; the replay fixtures pass unchanged; mia-workflow-data#215, at review from before the deploy, publishes its set on approve |
 | H | eligibility leaves the data pipeline (§12): no `ineligible` state, no size or licence verdict, crops capped by the image, the harness's crop size a parameter | issue 213 (60×59 yeast traps) reaches `data:review` with whole-image test crops and, approved, `prepared`; `POST /plan` with the 2D gray spec lists it under the footprint reason while a 32-pixel-patch spec admits it; `GET /datasets` knows no `ineligible`; `mia-data init-labels` creates neither `data:ineligible`, `maybe-small` nor `licence-excluded`; the replay fixtures pass unchanged |
+| K | the staged gate (§15): `buffer:go` plans and stages, then waits at `buffer:staged`; `buffer:plan` also waits at `plan-review`; approve at the staged gate serves what is staged, partial or not | on the five-set live spec, `buffer:go` ends at `buffer:staged` with the board in the comment and no `buffer:approve` given; `buffer:approve` then reaches `ready` with no job submitted; a spec with `buffer:plan` stops at `plan-review` first; with one dataset failed the gate still opens and the approve serves four; `plan.auto_approve` on a full set reaches `ready` with no label; the replay fixtures pass unchanged |
 
 **Built in C (2026-10-26).** Deviations from this spec and rulings made during the build:
 
@@ -1031,3 +1034,100 @@ it with `/approve` and `/revise`, and autodev accepts those commands from a logi
 
 **Live rounds.** No develop round is live (mia-workflow-data#213 is done). mia-workflow-data#215 waits at
 `data:review` on the matched path: its approve publishes as before, and a reject now takes it to the loop.
+
+## 15. Amendment v0.6: the staged gate
+
+**What the user asked for (2026-10-28).** Every error should surface on `buffer:go`; what a human approves
+should be sure to work. Two ways in: `buffer:go` runs everything and asks once, at the end; `buffer:plan` asks
+after the plan and again after it ran. And an approve may accept a partial buffer: the threshold becomes a
+default, not a stop.
+
+**What was wrong.** The only step that can fail for reasons no plan knows, the stage jobs (a harness path that
+needed the network offline, a cache the planner believed complete, a glob the stage did not expand), ran *after*
+the human's decision. The review gate judged a plan, the thing that is sure, and the human then watched the
+unsure part go wrong on an issue that said `buffer:approve` had been given. Four rounds of the live test ended
+in `needs-human` this way, each after an approve.
+
+**The flow.** One pipeline, plan → stage → review → ready, with an optional gate after the plan:
+
+| label | after planning | after staging |
+|---|---|---|
+| `buffer:go` | continues into sourcing | stops at **`buffer:staged`**, waits for `buffer:approve` |
+| `buffer:plan` | stops at `buffer:plan-review`, waits for `buffer:approve` | stops at `buffer:staged`, waits for `buffer:approve` |
+
+- *Planning* is as §5.1; an invalid plan is `needs-human` as now, there is nothing to stage. A `buffer:plan` round
+  posts the plan and waits; its approve continues into sourcing. A `buffer:go` round posts the plan and
+  continues at once.
+- *Sourcing* is §5.2 unchanged: the buffer row is created, datasets are fetched and staged under the record locks,
+  volumes are registered as they land, the board on the page follows. There is no progressive `ready`: the round
+  runs until **no dataset has a job left to run**, every one `servable`, `failed`, `dropped` or waiting
+  (`waiting-drop`, `blocked`, `waiting-lock`), and then stops at **`buffer:staged`**. The staged comment is the
+  board: per dataset its outcome, a failed one with its error from `stage.json`; per weighting group servable
+  over total against `ready.min_fraction`, the short groups named; volumes per split; bytes on disk; the waiting
+  datasets and what they wait for. The `staged` event is written on the buffer.
+- *Approve at the staged gate* is the human saying "serve this": the `approved` and `ready` events, `buffer:ready`,
+  the ready comment. **No job runs between the approve and `ready`.** It is accepted whether or not every group
+  meets `ready.min_fraction`; a short group is stated in the ready comment ("below ready.min_fraction 1:
+  brightfield 0/1, approved"). Waiting datasets keep joining after `ready`, as stragglers do today, and the
+  timeout (`sourcing.dataset_timeout_days`) still drops them. The steady state (§5.3) is unchanged.
+- *`plan.auto_approve: true`* skips both gates when every group meets `ready.min_fraction` at the staged point;
+  a short group stops at `buffer:staged` for a human even then. *My call: the threshold's one remaining job is to
+  decide what runs unattended.*
+- *Labels during a round.* `buffer:go` or `buffer:plan` while a plan or a staged buffer waits for approve starts
+  a new round, as a go in `plan-review` does today; the superseded round's buffer is retired (§5.3's superseded
+  rule covers a serving one; a staged one is retired at once, like a `needs-human` one since
+  `retire-failed-round`). A go while jobs run is `BUSY`, unchanged. An approve from an earlier gate (a stale
+  event id, or one given while sourcing ran) is refused with the comment saying which gate the round is at.
+  `keep` and `retire` are refused before `ready`, unchanged.
+- *A round that cannot open the gate:* every dataset `failed` or `dropped` and nothing waiting is
+  `needs-human`, as today (there is nothing to serve); so is a sourcing that the workflow itself cannot finish.
+
+**Five calls the builder check asked for** (a reviewer read this section as the builder; these are my answers).
+
+1. *Waiting datasets stay live through the gate.* The gate means "no job is running", not "nothing will run". A
+   `waiting-drop`, `blocked` or `waiting-lock` dataset keeps its task; if its turn comes while the round waits,
+   its job runs and the board changes, and the staged comment is updated once (same marker) when the dataset
+   lands. The board at the gate names them as waiting, so what the approve is sure of is what it says is
+   servable; the rest are stragglers either way. The go rules follow from it: a go at `staged` while such a job
+   runs is `BUSY` (the `_await_stragglers` rule), otherwise it starts the new round. The poller delivers `dropped`
+   at `staged` as at `sourcing`. No rollover while tasks live, as in sourcing today.
+2. *The floor after a partial approve is what was approved.* The approve records each group's servable fraction
+   at that moment (`BufferState.accepted: dict[str, float]`, wire, default empty); from then on a group's floor
+   is `min(ready.min_fraction, accepted[group])`, so a degraded rebuild of a short group is judged against the
+   fraction the human accepted, and `_end_rebuild` ends in `needs-human` only below that. The ready comment
+   states the accepted fractions.
+3. *buffer-api serves only an approved buffer.* `next`, `split` and `POST consumers` answer `409 buffer not
+   approved` until the buffer has a `ready` event (a retired one keeps its `410`); the client raises it as a
+   plain error naming the stage. Volumes registered during sourcing are visible on the page and in `status`,
+   not drawable. *My call: "approve = serve this" is hollow if a consumer can draw at `staged`.*
+4. *A staged buffer nobody approves is retired by the keeper.* The keeper watches `staged` buffers as it does
+   `idle` ones: one left unapproved for `retire_after_days` (the spec field, default 14) is signalled `retire`,
+   the round ends `retired`, refs released. `sourcing.dataset_timeout_days` keeps its one job, dropping the
+   waiting datasets, at the gate as in sourcing. No separate gate timeout.
+5. *`buffer:plan` always stops at the plan.* `plan.auto_approve` applies to the staged gate only: a `go` round
+   with a full set reaches `ready` with no label; a `plan` round waits at `plan-review` regardless, because the
+   label is the request to look at the plan.
+
+**What the human sees.** A `buffer:go` issue: the plan comment, the per-dataset comments as they land, then one
+staged comment with the board and "approve with `buffer:approve` to serve it as it is, or edit the spec and add
+`buffer:go` again". A failed dataset's error is in that comment, not behind a `needs-human`. The page shows
+`staged` as a stage between `sourcing` and `ready`, with the same board.
+
+**Changes.**
+
+| where | change |
+|---|---|
+| `mia_buffers/workflows.py` | `_round`: `plan` events stop at `plan-review`, `go` events continue; `_sourcing` ends at `staged` instead of announcing `ready` when the fraction is met; `_staged()` waits for approve / go / timeout; approve → `approved` + `ready` events and the ready stage with the short groups named; `auto_approve` judged at the staged point; marker `staged-gate` (the recorded fixtures replay the old branches, a new fixture records this flow) |
+| `mia_buffers/models.py`, `config.py` | `LabelEvent.kind` adds `plan`; `BufferState.stage` adds `staged`; `BufferState.accepted` (group → fraction at approve, default empty); `HUMAN_LABELS` gains `plan`; `STAGES` gains `staged` (label `buffer:staged`); `EVENT_KINDS` gains `sourcing` and `staged`; `STAGE_EVENTS`: sourcing → `sourcing`, staged → `staged`, ready → `ready` (`approved` written by the approve at the gate) |
+| `mia_buffers/activities.py` | `render_staged(board, groups, min_fraction, splits, bytes, waiting)` for the staged comment; the ready comment takes the short groups; `set_stage("staged")` |
+| `mia_buffers/poll.py` | delivers `buffer:plan` like `go` |
+| `mia_buffers/api.py`, `ledger.py`, `client.py` | accept the new event kinds; consumer routes answer `409 buffer not approved` before the `ready` event; the client raises it |
+| `mia_buffers/activities.py` (keeper) | `_keeper_buffers` watches `staged` as it watches `idle`: unapproved for `retire_after_days` → `retire` |
+| `mia_buffers/ui/index.html` | `STAGE_OF` gains `sourcing` and `staged`; the detail view's notice at `staged` says what approve will serve |
+| `mia_buffers/spec.py` | `plan.auto_approve` doc: skips both gates when every group meets the fraction |
+| docs | `development.md` lifecycle walkthrough (steps 1 and 7); README label table; `mia-buffers init-labels` creates `buffer:plan` and `buffer:staged`; the diagrams artifact |
+
+**Live rounds.** JaneliaSciComp/mia-buffers#5 is at `needs-human` after its fourth round; its workflow run
+predates the marker and keeps the old branches until it rolls over, so the first `buffer:go` after the deploy
+should be given after the run has ended (`mia-buffers` restarts do not end it; closing and reopening the issue
+does, by §J's close rule, or a rollover at the next idle). Issue 2 is closed.
