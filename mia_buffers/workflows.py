@@ -487,7 +487,10 @@ class MiaBuffer:
         await asyncio.gather(*tasks, return_exceptions=True)  # every task handles its own failure (_source)
         if not state.ready:
             reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in state.datasets if d.status != "servable")
-            await self._finish("needs-human", f"no weighting group reached ready.min_fraction: {reasons}")
+            groups = ", ".join(self._below())
+            await self._finish(
+                "needs-human", f"weighting groups below ready.min_fraction {state.min_fraction:g}: {groups}; {reasons}"
+            )
             return False
         await self._refuse_queued()  # labels that arrived while sourcing ran were busy, as in mia-data
         return True

@@ -560,7 +560,12 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path, caplog):
 def _cache_with_files_json(t):
     cache = t.cfg.paths.work_root / "_cache" / "rec-1"
     cache.mkdir(parents=True)
-    (cache / "files.json").write_text(json.dumps({"https://data.example.org/a.zip": {"validators": {"size": 3}}}))
+    url = "https://data.example.org/a.zip"
+    (cache / "files.json").write_text(
+        json.dumps(
+            {url: {"validators": {"size": 3}}, f"{url}::m.tif": {"validators": {"size": 3}, "source": "members"}}
+        )
+    )
     (cache / "a.zip").write_bytes(b"zip")
     return cache
 

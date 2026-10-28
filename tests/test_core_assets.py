@@ -1,6 +1,6 @@
 import json
 
-from mia_core.assets import ASSET_STATES, cache_missing, raw_asset, read_files_json, whole_file_url
+from mia_core.assets import ASSET_STATES, cache_missing, raw_asset, read_files_json
 
 
 def test_raw_asset_is_ready_when_every_binding_url_is_cached(tmp_path):
@@ -8,6 +8,7 @@ def test_raw_asset_is_ready_when_every_binding_url_is_cached(tmp_path):
         json.dumps(
             {
                 "https://h/a.zip": {"validators": {"size": 7}, "source": "download"},
+                "https://h/a.zip::m.png": {"validators": {"size": 7}, "source": "members"},
                 "https://h/b.tif": {"validators": {"size": 3}, "source": "drop"},
             }
         )
@@ -20,11 +21,16 @@ def test_raw_asset_is_ready_when_every_binding_url_is_cached(tmp_path):
         and ready["files"]["https://h/b.tif"]["source"] == "drop"
     )
     assert raw_asset(tmp_path, ["https://h/a.zip", "https://h/c.tif"])["state"] == "partial"
+    # the zip's entry (a HEAD) does not vouch for members a fetch never cached
+    assert cache_missing(read_files_json(tmp_path), ["https://h/a.zip::x/*.png"]) == (
+        False,
+        ["https://h/a.zip::x/*.png"],
+    )
     assert raw_asset(tmp_path / "none", [])["state"] == "partial" and read_files_json(tmp_path / "none") == {}
     stream = ["https://h/c.zarr"]  # read in place by the harness: never in files.json, still ready
     assert raw_asset(tmp_path, ["https://h/b.tif", *stream], stream)["state"] == "ready"
     assert cache_missing({}, stream, stream) == (True, []) and cache_missing({}, stream) == (False, stream)
-    assert whole_file_url("https://h/a.zip::m.png") == "https://h/a.zip" and "evicted" in ASSET_STATES
+    assert "evicted" in ASSET_STATES
 
 
 def test_untrusted_files_json_is_reduced(tmp_path):

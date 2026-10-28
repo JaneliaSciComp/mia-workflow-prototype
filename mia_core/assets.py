@@ -18,11 +18,6 @@ def read_files_json(cache_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def whole_file_url(url: str) -> str:
-    """The file a url names: a zip member url `<zip>::<member>` is cached as its zip."""
-    return url.split("::", 1)[0]
-
-
 def _file_entry(entry: dict) -> dict:
     """The size and source of one files.json entry, reduced to bounded typed values."""
     validators = entry.get("validators")
@@ -39,11 +34,12 @@ def file_entries(manifest: dict) -> dict:
 
 
 def cache_missing(manifest: dict, urls: Iterable[str], stream: Iterable[str] = ()) -> tuple[bool, list[str]]:
-    """(ready, missing): the whole-file urls of `urls` that files.json lacks, leaving out the `stream` urls (the
-    harness reads those in place, they are never cached). Ready when none is missing; with no urls at all, when
-    files.json lists anything."""
+    """(ready, missing): the urls of `urls` that files.json lacks, leaving out the `stream` urls (the harness reads
+    those in place, they are never cached). A `<zip>::<member or glob>` url counts only as itself: `harness fetch`
+    lists it once its members are cached, while the zip's own entry says no more than that a HEAD recorded its
+    validators. Ready when none is missing; with no urls at all, when files.json lists anything."""
     urls, streamed = list(urls), set(stream)
-    wanted = dict.fromkeys(whole_file_url(url) for url in urls if url not in streamed)
+    wanted = dict.fromkeys(url for url in urls if url not in streamed)
     missing = [url for url in wanted if url not in manifest]
     return (not missing if urls else bool(manifest)), missing
 

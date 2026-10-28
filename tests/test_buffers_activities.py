@@ -645,11 +645,13 @@ async def bound_two_urls(acts) -> Path:
 async def test_raw_status_reads_files_json(acts):
     from mia_buffers.drop import merge_manifest
 
-    cache = await bound_two_urls(acts)
-    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, B_ZIP])
+    cache, member = await bound_two_urls(acts), B_ZIP + "::m.tif"
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, member])
     merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
-    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [B_ZIP])  # the zip is cached whole
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [member])
     merge_manifest(cache, {B_ZIP: {"validators": {"size": 5}, "source": "download"}})
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [member])  # a HEAD's entry: no member cached
+    merge_manifest(cache, {member: {"validators": {"size": 5}, "source": "members"}})  # harness fetch noted it
     assert await acts.raw_status(ROUND, U937) == RawStatus(True)
 
 
@@ -764,7 +766,7 @@ async def test_a_stream_url_is_ready_for_fetch_status_and_stage(acts, server):
     cache = await bound_two_urls(acts)
     member = B_ZIP + "::m.tif"
     workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
-    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, B_ZIP])
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, member])
     merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
     files = [{"url": A_TIF, "outcome": "fetched", "bytes": 3}, {"url": member, "outcome": "stream", "reason": "r"}]
     report = {"ok": True, "partial": False, "bytes_fetched": 3, "files": files, "errors": []}
@@ -777,8 +779,8 @@ async def test_a_stream_url_is_ready_for_fetch_status_and_stage(acts, server):
     assert (await acts.read_stage(ROUND, U937)).ok
     row = acts.registry.asset("raw", U937)
     assert row["state"] == "ready" and row["stream"] == [member] and row["last_used"] > 0
-    acts.registry = Registry("http://127.0.0.1:9")  # no registry, no recorded stream urls: the zip counts as missing
-    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [B_ZIP])
+    acts.registry = Registry("http://127.0.0.1:9")  # no registry, no recorded stream urls: the member counts as missing
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [member])
 
 
 async def test_raw_status_and_a_staged_find_touch_last_used(acts, server):

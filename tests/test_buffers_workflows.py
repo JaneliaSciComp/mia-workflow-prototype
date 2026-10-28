@@ -523,7 +523,7 @@ async def test_stage_report_not_ok_fails_dataset_without_registering(env):
         state = await h.query(MiaBuffer.status)
     assert not m.of("register_dataset") and dataset(state, "u937").status == "failed"
     assert "voxel size unknown" in dataset(state, "u937").reason
-    assert "no weighting group reached" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
+    assert "groups below ready.min_fraction" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
 
 
 async def test_job_exit_failure_fails_dataset_with_the_reports_errors(env):
