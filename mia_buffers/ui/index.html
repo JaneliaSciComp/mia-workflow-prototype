@@ -1078,7 +1078,83 @@ const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for
 const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k,v] of Object.entries(attrs||{})) n.setAttribute(k,v); return n; };
 // catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
 const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
-const pill = (text, kind) => el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
+// what each pill means, by its text; the tooltip shows it (a decision pill adds the planner's exact reason)
+const PILL_HELP = {
+  // the planner's decision for a dataset against the current spec
+  "pool": "Fits the spec and is prepared: the dataset is in the plan's pool and would supply crops.",
+  "path not selected": "The record's path in the catalog is not under the spec's select.paths globs.",
+  "excluded by path": "The record's path matches one of the spec's exclude.paths globs.",
+  "excluded by id": "The record's id is listed in the spec's exclude.ids.",
+  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the spec's where.dims.",
+  "modality": "None of the dataset's modalities is in the spec's where.modality.",
+  "organism": "The dataset's organism is not in the spec's where.organism.",
+  "licence unknown": "The record names no SPDX licence and the spec does not allow unknown licences.",
+  "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
+  "annotations required": "The spec requires annotations and the record has none.",
+  "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
+  "annotation source": "The record's annotation source (manual, model, …) is not among those the spec asks for.",
+  "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
+  "no mia-data folder": "The record does not name exactly one modality family and one organism, which is how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
+  "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
+  "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
+  "no patch for dims": "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
+  "no array shape": "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it.",
+  "footprint too large": "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
+  "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",
+  "voxel size unknown": "The record gives no voxel size and the spec does not allow assuming one (sampling.assume_voxel_size).",
+  "not prepared": "Fits the spec, but no reader exists for the dataset's files yet; request preparation, and a later round will pick it up.",
+  // the preparation pipeline's view of a dataset
+  "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
+  "in-progress": "The preparation pipeline is working on it; the stage column or the dataset issue says where it is.",
+  "unprepared": "Nobody has asked for this dataset to be prepared.",
+  "needs-human": "Stopped. The issue's latest comment says what it needs from a person.",
+  // a cache directory or a staged pyramid
+  "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
+  "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
+  "staging": "A stage job is converting the raw files into an OME-Zarr pyramid.",
+  "waiting-drop": "The files cannot be fetched by a job; a person has to place them in the dataset's incoming/ directory.",
+  "partial": "A fetch ended before the cache was complete; the next fetch resumes it.",
+  "missing": "Expected on disk but not found by the last scan.",
+  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
+  "staged": "At least one pyramid of this dataset exists in the staged cache.",
+  // a buffer's stage (its issue's label)
+  "new": "The issue is seen; nothing has run yet.",
+  "planning": "Resolving the spec against the catalog.",
+  "plan-review": "The plan is posted; a buffer:plan round waits here for buffer:approve.",
+  "sourcing": "Fetching and converting the pool's datasets, several at a time.",
+  "ready": "Serving: consumers can draw crops.",
+  "idle": "No consumer has drawn for a while; buffer:keep returns it to ready, otherwise the keeper retires it later.",
+  "retired": "Its references are released; consumers get 410, and the keeper may reclaim the space.",
+  "superseded": "A newer round of the same issue replaced this buffer.",
+  // a dataset of a buffer's pool during sourcing (the board)
+  "pending": "Not started yet; waits for a sourcing slot.",
+  "waiting-dataset": "No approved binding yet; the preparation pipeline is working on the dataset.",
+  "waiting-lock": "Another job holds the dataset's raw-cache lock; this one waits for it.",
+  "blocked": "The raw cache is over its quota; the fetch waits for the keeper to make room.",
+  "servable": "Its volumes are registered and the service can draw crops from them.",
+  "failed": "The fetch or stage job failed; the reason is in the row and on the issue.",
+  "dropped": "Left out of the round: still waiting when the day limit passed.",
+  // the preparation pipeline's stages (mia-data)
+  "matching": "Looking for an existing reader snippet that fits the dataset's files.",
+  "developing": "An agent is writing a reader snippet for the dataset.",
+  "testing": "Making the sample crops a reviewer will look at.",
+  "review": "Sample crops are posted on the dataset issue; waiting for a reviewer to approve or reject them.",
+  "merging": "The crops were approved; the reader's pull request is being merged.",
+  "done": "The dataset is prepared: its crops and binding are published.",
+  // odds and ends
+  "stale": "This consumer has not been seen for longer than expected.",
+};
+function tipOn(node, lines) {  // the page's tooltip on hover (no tab stop: tables hold hundreds of pills)
+  node.addEventListener("pointerenter", e => showTip(e, lines)); node.addEventListener("pointermove", moveTip); node.addEventListener("pointerleave", hideTip);
+  return node;
+}
+// a pill explains itself on hover: PILL_HELP by its text, plus any extra lines (a count pill passes its own)
+const pill = (text, kind, extra) => {
+  const node = el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
+  const help = PILL_HELP[text];
+  const lines = [...(help ? [{ b: text, t: help }] : []), ...(extra || [])];
+  return lines.length ? tipOn(node, lines) : node;
+};
 const GOOD = new Set(["prepared","ready","servable","pool","cached"]);
 const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale"]);
 const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
@@ -1310,7 +1386,7 @@ let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
 const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
 const COLS = [
   { key: "id", label: "dataset", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
-  { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", { title: x.decision.reason }, pill(x.decision.group, x.inPool ? "pool" : "")) },
+  { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", {}, pill(x.decision.group, x.inPool ? "pool" : "", x.decision.reason && x.decision.reason !== x.decision.group ? [{ t: x.decision.reason }] : [])) },
   { key: "dims", label: "dims", get: x => x.dims || "" },
   { key: "mod", label: "modality", get: x => x.modality_group || "" },
   { key: "lic", label: "licence", get: x => x.lic },
@@ -1498,7 +1574,7 @@ async function viewBuffers(id, refresh) {
         ...(b.latest_event ? [statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)]
         : [el("span", { class: "small", title: "registered before buffers recorded lifecycle events; the issue has the stage" }, "no events")])) },
       { label: "volumes", num: true, cell: b => num(b.volumes) },
-      { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn") : "0" },
+      { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn", [{ b: "missing", t: PILL_HELP.missing + " These are volumes registered to the buffer whose pyramid the last scan did not find." }]) : "0" },
       { label: "servable", cell: b => servableText(b.servable) },
       { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
       { label: "draws today", num: true, cell: b => num(b.draws_today) },
