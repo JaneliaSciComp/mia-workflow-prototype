@@ -39,7 +39,7 @@ tr.superseded td{opacity:.55}
 
 /* top bar: title, the five tabs, the catalog ref, the theme toggle */
 .topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
-  position:sticky;top:0;z-index:5;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding */
+  position:sticky;top:0;z-index:6;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding; above the filter box */
 .tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
 .tabs a:hover{color:var(--fg)}
@@ -59,9 +59,16 @@ tr.superseded td{opacity:.55}
 pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
 
-/* filters: one row above everything, wraps on narrow screens */
-.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px;
-  position:sticky;top:var(--topbar-h,0px);z-index:5;box-shadow:0 -14px 0 var(--bg)}  /* stays put under the topbar; the shadow fills the gap between them */
+/* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
+   It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
+   the box-shadow fills that gap in the page colour while the content scrolls under. */
+.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin-bottom:10px;
+  position:sticky;top:calc(var(--topbar-h,0px) + 14px);z-index:5;box-shadow:0 -14px 0 var(--bg)}
+.filterbox:not([open]){padding-bottom:8px}
+.filterbox summary{cursor:pointer;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);user-select:none;width:max-content}
+.filterbox summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.filterbox[open] summary{margin-bottom:8px}
+.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start}
 .filters fieldset{border:0;padding:0;margin:0;min-width:0}
 .filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
@@ -210,6 +217,8 @@ tr.click:hover td{background:var(--accent-soft)}
 <section data-view="datasets" hidden>
   <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
   <div id="dsBody">
+  <details class="filterbox" id="filterBox" open>
+  <summary>Filters</summary>
   <section class="filters" aria-label="Spec filters">
     <fieldset><legend>Spec name</legend><input type="text" id="specName" size="22" aria-label="spec name"></fieldset>
     <fieldset><legend>Paths (glob)</legend><input type="text" id="paths" size="18" aria-label="paths glob"></fieldset>
@@ -234,6 +243,7 @@ tr.click:hover td{background:var(--accent-soft)}
       <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label><br>
       <label class="inline"><input type="checkbox" id="stagedGeom"> staged for this geometry <span class="mono" id="levelsKey"></span></label></fieldset>
   </section>
+  </details>
   <div id="planMsgs" aria-live="polite"></div>
   <div class="actions">
     <button type="button" class="btn" id="download">Download spec YAML</button>
@@ -1664,6 +1674,11 @@ function renderTopbar() {
   const c = S.catalogs[0];
   $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} records · synced `, when(c.synced_at)) : "no catalog synced");
 }
+function setupFilterBox() {  // the fold is a per-viewer convenience, remembered in this browser
+  const box = $("filterBox");
+  try { if (localStorage.getItem("mia-filters") === "closed") box.open = false; } catch { /* storage blocked: open */ }
+  box.addEventListener("toggle", () => { try { localStorage.setItem("mia-filters", box.open ? "open" : "closed"); } catch { /* not remembered */ } });
+}
 function setupTheme() {
   const root = document.documentElement;
   try { const saved = localStorage.getItem("mia-theme"); if (saved) root.dataset.theme = saved; } catch { /* storage blocked: follow the system */ }
@@ -1675,7 +1690,7 @@ function setupTheme() {
   });
 }
 async function boot() {
-  setupTheme(); bindControls();
+  setupTheme(); setupFilterBox(); bindControls();
   const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
   S.meta = meta || {};
   S.catalogs = (catalogs?.catalogs || []).slice().sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
