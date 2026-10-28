@@ -44,8 +44,18 @@ def test_labels_ids_and_markers(tmp_path):
         cfg.deployment == "mia-buffers" and cfg.task_queue == "mia-buffers" and cfg.await_queue == "mia-buffers-await"
     )
     assert cfg.temporal.namespace == "mia-buffers"
-    assert set(STAGES) == {"new", "planning", "plan-review", "sourcing", "ready", "idle", "retired", "needs-human"}
-    assert set(HUMAN_LABELS) == {"go", "approve", "keep", "retire"}
+    assert set(STAGES) == {
+        "new",
+        "planning",
+        "plan-review",
+        "sourcing",
+        "staged",
+        "ready",
+        "idle",
+        "retired",
+        "needs-human",
+    }
+    assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire"}
 
 
 def test_roots_accept_path_and_url_form(tmp_path):

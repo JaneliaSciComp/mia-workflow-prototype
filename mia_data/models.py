@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 class LabelEvent:
     """A human adding `data:go`, `data:approve` or `data:reject` to a dataset issue, delivered as a signal."""
 
-    kind: str  # go | approve | reject
+    kind: str  # go | approve | reject; mia-buffers adds plan
     event_id: str
     actor: str
     at: str  # ISO-8601 from GitHub

@@ -38,7 +38,17 @@ BOARD_STATUSES = (
     "failed",
     "dropped",
 )
-EVENT_KINDS = ("created", "planned", "approved", "ready", "idle", "retired", "needs-human")  # a buffer's lifecycle
+EVENT_KINDS = (  # a buffer's lifecycle; `sourcing` and `staged` since the staged gate (spec §15)
+    "created",
+    "planned",
+    "sourcing",
+    "approved",
+    "staged",
+    "ready",
+    "idle",
+    "retired",
+    "needs-human",
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS buffers (id TEXT PRIMARY KEY, config TEXT NOT NULL);

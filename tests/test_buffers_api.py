@@ -552,6 +552,15 @@ def test_retire_route_archives_and_frees_refs(tmp_path):
     assert worker(s, "DELETE", "/buffers/zz/refs")[0] == 404
 
 
+def test_events_accept_sourcing_and_staged(tmp_path):
+    """The staged gate's lifecycle: `sourcing` when sourcing starts, `staged` at the gate (spec §15)."""
+    s = BufferService(Ledger(tmp_path / "l.sqlite"))
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    assert worker(s, "POST", "/buffers/b/events", {"kind": "sourcing"})[0] == 200
+    assert worker(s, "POST", "/buffers/b/events", {"kind": "staged"})[0] == 200
+    assert [e["kind"] for e in call(s, "GET", "/buffers/b/events")[1]["events"]] == ["sourcing", "staged"]
+
+
 def test_a_retired_buffer_serves_no_consumer(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"))
     call(s, "PUT", "/buffers/b", payload=CFG)

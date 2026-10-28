@@ -24,13 +24,18 @@ STAGES = {
     "planning": ("fbca04", "mia-buffers: resolving the spec against the catalog"),
     "plan-review": ("1d76db", "mia-buffers: plan posted, waiting for buffer:approve"),
     "sourcing": ("fbca04", "mia-buffers: staging datasets"),
+    "staged": ("1d76db", "mia-buffers: staged, waiting for buffer:approve"),
     "ready": ("5319e7", "mia-buffers: the service is serving this buffer"),
     "idle": ("cccccc", "mia-buffers: no consumer for a while"),
     "retired": ("cccccc", "mia-buffers: staged data released"),
     "needs-human": ("d93f0b", "mia-buffers: stopped, needs a human"),
 }
 HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow signal of the same name
-    "go": ("0e8a16", "Plan this buffer (or plan it again after editing the spec)"),
+    "go": (
+        "0e8a16",
+        "Plan and stage this buffer, then wait for buffer:approve (or run it again after editing the spec)",
+    ),
+    "plan": ("0e8a16", "Plan this buffer and wait for approval before staging"),
     "approve": ("0e8a16", "Approve the plan; start sourcing"),
     "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
     "retire": ("b60205", "Retire this buffer: release its staged data"),

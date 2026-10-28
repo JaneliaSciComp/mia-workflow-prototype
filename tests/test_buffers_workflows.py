@@ -676,7 +676,12 @@ async def test_poll_delivers_labels_and_drops(tmp_path):
     cfg = make_cfg(tmp_path)
     at = "2026-10-24T10:00:00Z"
     gh = PollGH(
-        issues={1: issue(1, "buffer:new", "buffer:go"), 2: issue(2, "buffer:sourcing"), 3: issue(3, "buffer:ready")},
+        issues={
+            1: issue(1, "buffer:new", "buffer:go"),
+            2: issue(2, "buffer:sourcing"),
+            3: issue(3, "buffer:ready"),
+            4: issue(4, "buffer:staged"),  # at the gate: a waiting dataset's drop is still delivered (spec §15)
+        },
         events={(1, "buffer:go"): ("alice", "501", at)},
         perms={"alice": "write"},
     )
@@ -688,17 +693,23 @@ async def test_poll_delivers_labels_and_drops(tmp_path):
     ready = BufferState(
         3, round_id="i3-e1", stage="ready", datasets=[workflows.DatasetStatus("x", "g", True, "waiting-drop")]
     )
-    client = FakeClient({cfg.workflow_id(2): waiting, cfg.workflow_id(3): ready})
+    staged = BufferState(
+        4, round_id="i4-e2", stage="staged", datasets=[workflows.DatasetStatus("y", "g", True, "waiting-drop")]
+    )
+    client = FakeClient({cfg.workflow_id(2): waiting, cfg.workflow_id(3): ready, cfg.workflow_id(4): staged})
     acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
     (cfg.paths.raw_root / "bcss" / "incoming").mkdir(parents=True)
     (cfg.paths.raw_root / "bcss" / "incoming" / "a.zip").write_bytes(b"z")
     (cfg.paths.raw_root / "x" / "incoming").mkdir(parents=True)  # empty: nothing to signal
+    (cfg.paths.raw_root / "y" / "incoming").mkdir(parents=True)
+    (cfg.paths.raw_root / "y" / "incoming" / "b.tif").write_bytes(b"t")
     assert await run_poll(acts) == ["go #1"]  # the drop is not signalled on first sight (a copy may be running)
-    assert await run_poll(acts) == ["dropped #2 bcss"]
+    assert set(await run_poll(acts)) == {"dropped #2 bcss", "dropped #4 y"}
     ((wf, state, kw),) = client.started
     assert wf == "MiaBuffer" and state == BufferState(1) and kw["start_signal"] == "go"
     assert kw["start_signal_args"] == [LabelEvent("go", "501", "alice", at)] and kw["id"] == cfg.workflow_id(1)
-    assert gh.removed == [(1, "buffer:go")] and client.signals == [(cfg.workflow_id(2), "dropped", "bcss")]
+    assert gh.removed == [(1, "buffer:go")]
+    assert set(client.signals) == {(cfg.workflow_id(2), "dropped", "bcss"), (cfg.workflow_id(4), "dropped", "y")}
     assert await run_poll(acts) == []  # nothing new: the drop was signalled once
     (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
     assert await run_poll(acts) == []  # a new file: seen, not yet stable

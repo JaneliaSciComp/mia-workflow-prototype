@@ -2,7 +2,7 @@
 
 - a `buffer:go` / `buffer:approve` label on a buffer issue becomes a signal (mia-data's `deliver_label`, which
   starts the workflow if needed and removes the label only once the signal is accepted);
-- for issues in `buffer:sourcing` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
+- for issues in `buffer:sourcing`, `buffer:staged` or `buffer:ready`, a dataset waiting for a manual drop whose `incoming/`
   directory holds a file gets a `dropped` signal once that directory's listing has been stable for a whole poll
   interval (a file still being copied grows between passes), and once per change of it;
 - a `prep:go` label on a preparation request becomes the `go` signal of its `MiaPrep` workflow, the same way;
@@ -27,7 +27,14 @@ from mia_data.poll import deliver_label
 from .config import HUMAN_LABELS, PREP_HUMAN_LABELS
 from .models import BufferState, PrepState
 
-LIVE_STAGES = ("planning", "plan-review", "sourcing", "ready", "idle")  # a closed issue in one of these is retired
+LIVE_STAGES = (
+    "planning",
+    "plan-review",
+    "sourcing",
+    "staged",
+    "ready",
+    "idle",
+)  # a closed issue in one of these is retired
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -66,7 +73,7 @@ async def run_poll(activities: Activities) -> list[str]:
                     done.append(f"{label} #{issue['number']}")
             except Exception:
                 log.exception("poll: issue #%s %s failed", issue["number"], label)
-    for stage in ("sourcing", "ready"):
+    for stage in ("sourcing", "staged", "ready"):
         for issue in await gh.list_issues(labels=cfg.label(stage), state="open"):
             try:
                 done += await notice_drops(activities, issue["number"])

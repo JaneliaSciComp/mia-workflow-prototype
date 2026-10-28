@@ -627,7 +627,7 @@ async function viewDatasets() {
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
 // a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS
-const STAGE_OF = { created: "planning", planned: "plan-review", approved: "sourcing", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
+const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", approved: "sourcing", staged: "staged", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
 const stageOf = ev => ev ? STAGE_OF[ev.kind] || ev.kind : "";
 async function viewBuffers(id, refresh) {
   const root = $("buffersBody"), hash = location.hash;

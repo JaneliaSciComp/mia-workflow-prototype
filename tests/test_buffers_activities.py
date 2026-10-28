@@ -1176,7 +1176,7 @@ async def test_set_stage_writes_the_event(acts, server):
     for stage in ("planning", "plan-review", "sourcing", "new", "ready"):  # `new` has no event
         await acts.set_stage(7, stage, state, "x" * 300)
     events = httpx.get(f"{server}/buffers/{ROUND}/events").json()["events"]
-    assert [event["kind"] for event in events] == ["created", "planned", "approved", "ready"]
+    assert [event["kind"] for event in events] == ["created", "planned", "sourcing", "ready"]
     assert {(event["issue"], event["detail"]) for event in events} == {(7, "x" * 200)}
     acts.registry = Registry("http://127.0.0.1:9")
     await acts.set_stage(7, "idle", state)  # buffer-api down: the label still moves

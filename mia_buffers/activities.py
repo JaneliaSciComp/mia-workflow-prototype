@@ -106,7 +106,8 @@ KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, wha
 STAGE_EVENTS = {  # a stage label's lifecycle event on the buffer's page (the buffer id is the round id)
     "planning": "created",
     "plan-review": "planned",
-    "sourcing": "approved",
+    "sourcing": "sourcing",  # `approved` is the approve at the staged gate (the workflow writes it)
+    "staged": "staged",
     "ready": "ready",
     "idle": "idle",  # `retired` is retire_buffer's: a superseded buffer is retired without a stage label
     "needs-human": "needs-human",

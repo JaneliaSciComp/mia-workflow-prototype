@@ -258,6 +258,11 @@ class BufferState:
     idle_hours: float = 72  # spec idle.hours and retire_after_days, for the idle comment
     retire_after_days: float = 14
     superseded: list[str] = field(default_factory=list)  # buffers a go left serving, until the keeper retires them
+    # the staged gate (spec §15): the plan's auto_approve, the staged comment's time (an approve must be newer), and
+    # each weighting group's servable fraction when the human approved, the buffer's floor from then on
+    auto_approve: bool = False
+    staged_at: str | None = None
+    accepted: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

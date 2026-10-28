@@ -213,7 +213,8 @@ class Sourcing(_Strict):
 
 
 class PlanOptions(_Strict):
-    """What happens to a fresh plan: wait for a human's approval (default) or go ahead."""
+    """Whether the buffer waits for a human: `auto_approve` skips both gates (the plan's and the staged one) when
+    every weighting group meets ready.min_fraction at the staged point; a short group waits for a human even so."""
 
     auto_approve: bool = False
 
