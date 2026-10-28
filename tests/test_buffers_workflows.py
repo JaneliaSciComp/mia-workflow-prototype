@@ -39,6 +39,7 @@ from mia_buffers.models import (
     RawStatus,
     RegisterResult,
     SourcingLimits,
+    StagedSummary,
     StageJobArgs,
     StageResult,
     fetch_job_key,
@@ -294,6 +295,11 @@ class Mocks:
         async def buffer_event(buffer_id: str, kind: str, detail: str = "") -> None:
             rec("buffer_event", buffer_id, kind, detail)
 
+        @activity.defn(name="staged_summary")
+        async def staged_summary(buffer_id: str) -> StagedSummary:
+            rec("staged_summary", buffer_id)
+            return StagedSummary(servable={"train": 1}, bytes=1000)
+
         @activity.defn(name="retire_buffer")
         async def retire_buffer(round_id: str, buffer_id: str) -> dict:
             rec("retire_buffer", buffer_id)
@@ -321,6 +327,7 @@ class Mocks:
             read_fetch,
             mark_asset,
             mark_dataset,
+            staged_summary,
             buffer_event,
             retire_buffer,
             raw_ready,
@@ -385,7 +392,9 @@ IDLE_EVENTS = (
 
 
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None, signal="go"):
+async def started(env, m, first=None, runner=None, signal="plan"):
+    """Start a round; `signal="plan"` keeps the plan-review gate the older tests go through (spec §15: a `go` round
+    skips it and stops at the staged gate only)."""
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -398,7 +407,7 @@ async def started(env, m, first=None, runner=None, signal="go"):
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
             start_signal=signal,
-            start_signal_args=[first or ev("go", "11")],
+            start_signal_args=[first or ev(signal, "11")],
         )
         h = env.client.get_workflow_handle(h0.id)  # follows continue-as-new
         h.first_run_id = h0.run_id
@@ -414,6 +423,22 @@ async def approve(h, m, eid="12", dt=1):
     await h.signal(MiaBuffer.approve, ev("approve", eid, shift(planned_at, dt)))
 
 
+async def approve_staged(h, m, eid="13", dt=1):
+    """At the staged gate: an approve newer than the staged comment (spec §15)."""
+    await idle(h, m, "staged")
+    staged_at = (await h.query(MiaBuffer.status)).staged_at
+    await h.signal(MiaBuffer.approve, ev("approve", eid, shift(staged_at, dt)))
+
+
+READY_IDS = iter(range(130, 199))
+
+
+async def ready(h, m, eid=None):
+    """Through the staged gate to `ready` (a fresh approve event id each call)."""
+    await approve_staged(h, m, eid or str(next(READY_IDS)))
+    await idle(h, m, "ready")
+
+
 def dataset(state, record):
     return next(d for d in state.datasets if d.record == record)
 
@@ -425,11 +450,11 @@ async def test_go_plan_approve_sourcing_ready(env):
         await until(lambda: m.of("register_dataset") and m.of("comment_drop"))
         state = await h.query(MiaBuffer.status)
         assert dataset(state, "u937").status == "servable" and dataset(state, "bcss").status == "waiting-drop"
-        assert m.stages == ["planning", "plan-review", "sourcing"]  # bcss's group is empty: not ready yet
+        assert m.stages == ["planning", "plan-review", "sourcing", "staged"]  # at the gate; bcss still waiting
         await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"]
     assert m.of("create_buffer") == [("i7-e11",)] and state.buffer_id == "i7-e11" and state.ready
     assert sorted(a[0] for a in m.of("register_dataset")) == ["bcss", "u937"]
     assert [a[0] for a in m.of("comment_drop")] == ["bcss"] and m.of("verify_drop") == [("bcss",)]
@@ -442,25 +467,27 @@ async def test_go_plan_approve_sourcing_ready(env):
         "bcss": None,
     }
     assert {d.record: d.status for d in state.datasets} == {"u937": "servable", "bcss": "servable"}
-    ready = m.of("set_stage")[-1]
-    assert "BufferDataset(" in ready[2] and "i7-e11" in ready[2] and "http://svc:8765" in ready[2]
+    announced = m.of("set_stage")[-1]
+    assert "BufferDataset(" in announced[2] and "i7-e11" in announced[2] and "http://svc:8765" in announced[2]
     assert not m.of("refuse_label")
 
 
-async def test_progressive_ready_with_lowered_fraction(env):
+async def test_lowered_fraction_no_longer_opens_ready_early(env):
+    """Spec §15: no progressive ready. With min_fraction 0.5 and `a` servable, the gate still waits while `b`'s
+    stage job runs; once quiet the round stops at `staged`, and the approve serves."""
     m = Mocks(plan=ONE_GROUP, gate=asyncio.Event(), gate_on="stage-b")
     async with started(env, m) as h:
         await approve(h, m)
         await h.signal(MiaBuffer.dropped, "b")
-        await idle(h, m, "ready")  # a alone is half the group: ready
+        await until(lambda: any("`a` is servable" in a[0] for a in m.of("comment")), m=m)
+        await asyncio.sleep(0.3)
         state = await h.query(MiaBuffer.status)
-        assert dataset(state, "b").status == "staging" and dataset(state, "a").status == "servable"
+        assert dataset(state, "b").status == "staging" and m.stages == ["planning", "plan-review", "sourcing"]
         m.gate.set()
-        await until(lambda: len(m.of("register_dataset")) == 2)
-        await until(lambda: any("`b` is servable" in a[0] for a in m.of("comment")))
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
-    assert dataset(state, "b").status == "servable"
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"]
+    assert dataset(state, "b").status == "servable" and state.accepted == {"TEM": 1.0}
 
 
 async def test_invalid_plan_is_needs_human(env):
@@ -475,8 +502,8 @@ async def test_redelivered_go_is_ignored(env):
     m = Mocks()
     async with started(env, m) as h:
         await idle(h, m, "plan-review")
-        await h.signal(MiaBuffer.go, ev("go", "11"))
-        await h.signal(MiaBuffer.go, ev("go", "12"))  # a new go: the spec was edited; plan again
+        await h.signal(MiaBuffer.plan, ev("plan", "11"))  # redelivered: ignored
+        await h.signal(MiaBuffer.plan, ev("plan", "12"))  # a new plan: the spec was edited; plan again
         await until(lambda: len(m.of("admit")) == 2)
         await idle(h, m, "plan-review")
     assert m.of("admit") == [("11",), ("12",)] and not m.of("refuse_label")
@@ -508,8 +535,9 @@ async def test_go_while_sourcing_is_refused_busy(env):
         await until(lambda: m.of("await"))
         await h.signal(MiaBuffer.go, ev("go", "13"))  # "12" is the approve's event id: a reused id is a redelivery
         m.gate.set()
-        await h.signal(MiaBuffer.dropped, "b")  # both datasets finish: the round ends and the go was busy
+        await h.signal(MiaBuffer.dropped, "b")  # both datasets finish: the round reaches the gate; the go was busy
         await until(lambda: m.of("refuse_label"), m=m)
+        await idle(h, m, "staged")  # leave the run quiescent: a terminate mid-task wedges the time-skipping server
     ((label, reason, eid),) = m.of("refuse_label")
     assert (label, eid) == ("buffer:go", "13") and "busy" in reason and len(m.of("admit")) == 1
 
@@ -523,7 +551,7 @@ async def test_stage_report_not_ok_fails_dataset_without_registering(env):
         state = await h.query(MiaBuffer.status)
     assert not m.of("register_dataset") and dataset(state, "u937").status == "failed"
     assert "voxel size unknown" in dataset(state, "u937").reason
-    assert "groups below ready.min_fraction" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
+    assert "nothing to serve" in m.of("set_stage")[-1][1] and "u937" in m.of("set_stage")[-1][1]
 
 
 async def test_job_exit_failure_fails_dataset_with_the_reports_errors(env):
@@ -550,7 +578,7 @@ async def test_drop_with_missing_files_keeps_waiting(env):
         state = await h.query(MiaBuffer.status)
         assert dataset(state, "bcss").status == "waiting-drop" and m.of("comment_drop")[1] == ("bcss", ["a.zip"])
         await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert m.of("verify_drop") == [("bcss",), ("bcss",)] and m.stages[-1] == "ready"
 
 
@@ -568,17 +596,17 @@ async def test_timeout_without_ready_is_needs_human(env):
         await until(lambda: m.of("comment_drop"))
         await idle(h, m, "needs-human")
     detail = m.of("set_stage")[-1][1]
-    assert "after 6e-05 days" in detail and "histology-WSI" in detail and not m.of("verify_drop")
+    assert "after 6e-05 days" in detail and "bcss" in detail and not m.of("verify_drop")
 
 
 async def test_timeout_after_ready_changes_nothing(env):
     m = Mocks(plan=replace(ONE_GROUP, timeout_days=SHORT_DAYS))  # a and b share one group with min_fraction 0.5:
     async with started(env, m) as h:  # a alone makes the buffer ready
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await asyncio.sleep(SHORT_DAYS * 86400 + 1)  # b is still waiting for its drop past the day limit
         state = await h.query(MiaBuffer.status)
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready"] and state.ready
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and state.ready
     assert dataset(state, "b").status == "waiting-drop" and not m.of("verify_drop")
 
 
@@ -595,9 +623,9 @@ async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
                 break
             await asyncio.sleep(0.02)
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert (await h.describe()).run_id != h.first_run_id
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready"] and len(m.of("admit")) == 1
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and len(m.of("admit")) == 1
 
 
 # --- the poller -------------------------------------------------------------------------------
@@ -771,7 +799,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
         await approve(h, m)
         await until(lambda: m.of("comment_drop"))
         await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
     assert [a[0] for a in m.of("prepare_stage")] == ["bcss"] and [a[1].record for a in m.of("submit")] == ["bcss"]
     assert sorted(a[0] for a in m.of("read_stage")) == ["bcss", "u937"]
@@ -780,12 +808,171 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
     assert len(servable) == 1 and "staged earlier" in servable[0]
 
 
+# --- milestone K: the staged gate (spec §15) ---------------------------------------------------------
+
+TWO_GROUPS = PlanResult(
+    True, [], [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "SEM", 0.5, False)], 1, levels=[1], patch=64
+)
+NOT_GATE_TEXT = "`buffer:approve` counts only while the issue is in `buffer:plan-review` or `buffer:staged`"
+
+
+def staged_comments(m):
+    return [c for c in m.of("comment") if c[1].startswith("staged i7-e11")]
+
+
+async def test_go_stages_then_waits_at_staged_and_approve_serves(env):
+    """A `go` round skips the plan gate, sources, stops at `staged` with the board, and the approve serves it with
+    no further job (spec §15)."""
+    m = Mocks()
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")  # opens as soon as nothing runs: u937 servable, bcss waiting for its drop
+        staged = m.of("set_stage")[-1]
+        assert m.stages == ["planning", "sourcing", "staged"]
+        assert "`u937` | servable" in staged[2] and "approve with `buffer:approve` to serve it as it is" in staged[1]
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await until(lambda: any("`bcss` | servable" in c[0] for c in staged_comments(m)), m=m)  # the drop landed
+        await idle(h, m, "staged")
+        submits = len(m.of("submit"))
+        await approve_staged(h, m)
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "sourcing", "staged", "ready"] and state.ready
+    assert state.accepted == {"confocal": 1.0, "histology-WSI": 1.0} and state.staged_at
+    assert m.of("buffer_event") == [("i7-e11", "approved", "")] and len(m.of("submit")) == submits
+    assert m.of("staged_summary") == [("i7-e11",)] * 2 and not m.of("refuse_label")  # the board, then the board again
+
+
+async def test_plan_label_waits_twice(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m, first=ev("plan", "11"), signal="plan") as h:
+        await approve(h, m)
+        await ready(h, m)
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and not m.of("refuse_label")
+
+
+async def test_partial_approve_sets_the_floor_and_a_rebuild_respects_it(env):
+    """A short group is shown at the gate; the approve accepts it and records the fraction as the floor, so a later
+    degraded rebuild of the other group is judged against what was accepted, not ready.min_fraction."""
+    m = Mocks(plan=TWO_GROUPS, stage={"b": StageResult(False, 0, ["raw 0: voxel size unknown"])})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        assert "`SEM` 0/1 **below**" in m.of("set_stage")[-1][2]
+        await approve_staged(h, m)
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+        assert state.accepted == {"TEM": 1.0, "SEM": 0.0}
+        assert "below ready.min_fraction 1: SEM 0/1, approved" in m.of("set_stage")[-1][2]
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing", "i7-e11"))
+        await until(lambda: any(c[0] == "rebuilt a" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert state.stage == "ready" and "needs-human" not in m.stages and dataset(state, "a").rebuilds == 1
+
+
+async def test_auto_approve_full_set_reaches_ready_without_a_label(env):
+    m = Mocks(plan=replace(ONLY_U937, auto_approve=True))
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "sourcing", "staged", "ready"] and state.accepted == {"confocal": 1.0}
+    assert m.of("buffer_event") == [("i7-e11", "approved", "")]
+
+
+async def test_auto_approve_short_set_waits_at_staged(env):
+    m = Mocks(plan=replace(TWO_GROUPS, auto_approve=True), stage={"b": StageResult(False, 0, ["bad"])})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await asyncio.sleep(0.3)
+    assert m.stages == ["planning", "sourcing", "staged"] and not m.of("buffer_event")
+
+
+async def test_approve_while_sourcing_is_refused_and_not_reused(env):
+    """Review focus 1: an approve given while a go round still has a job running is refused naming the gates, and
+    the staged gate waits for a new one."""
+    m = Mocks(plan=ONLY_U937, gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("submit"), m=m)
+        await h.signal(MiaBuffer.approve, ev("approve", "12", "2026-01-02T00:00:00Z"))
+        await until(lambda: m.of("refuse_label"), m=m)
+        assert NOT_GATE_TEXT in " ".join(map(str, m.of("refuse_label")[-1]))
+        m.gate.set()
+        await idle(h, m, "staged")
+        await asyncio.sleep(0.3)
+        assert m.stages == ["planning", "sourcing", "staged"]
+        await ready(h, m)
+    assert m.stages[-1] == "ready"
+
+
+async def test_gate_waits_while_a_drop_is_pending(env):
+    """Review focus 2: a dataset waiting for a drop keeps its place at the gate; its drop lands, a fresh staged
+    comment follows, the gate stays open, and the approve serves both."""
+    m = Mocks()
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        assert "Waiting: `bcss`" in m.of("set_stage")[-1][2]
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await until(lambda: len(m.of("register_dataset")) == 2, m=m)
+        await until(lambda: staged_comments(m), m=m)
+        await asyncio.sleep(0.3)
+        assert m.stages == ["planning", "sourcing", "staged"] and "`bcss` | servable" in staged_comments(m)[-1][0]
+        await ready(h, m)
+        state = await h.query(MiaBuffer.status)
+    assert {d.status for d in state.datasets} == {"servable"} and state.accepted == {
+        "confocal": 1.0,
+        "histology-WSI": 1.0,
+    }
+
+
+async def test_go_at_staged_starts_a_new_round_and_retires_the_staged_buffer(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await until(lambda: m.stages.count("staged") == 2, m=m)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.round_id == "i7-e15" and state.buffer_id == "i7-e15"
+    assert ("failed round's buffer `i7-e11` retired: refs released", "retired i7-e11") in m.of("comment")
+
+
+async def test_stale_approve_at_staged_is_refused(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        staged_at = (await h.query(MiaBuffer.status)).staged_at
+        await h.signal(MiaBuffer.approve, ev("approve", "12", shift(staged_at, -60)))
+        await until(lambda: m.of("refuse_label"), m=m)
+        await asyncio.sleep(0.3)
+    assert "older than the staged comment" in " ".join(map(str, m.of("refuse_label")[-1]))
+    assert m.stages[-1] == "staged"
+
+
+async def test_keeper_retire_at_the_gate_retires_the_round(env):
+    """Review focus 3: the keeper's retire of a staged buffer nobody approved ends the round `retired`."""
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
+        await idle(h, m, "retired")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.retired and m.stages[-2:] == ["staged", "retired"]
+
+
+async def test_timeout_at_the_gate_drops_waiting_and_keeps_the_gate(env):
+    m = Mocks(plan=replace(PLAN, timeout_days=SHORT_DAYS))
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await until(lambda: staged_comments(m), timeout=20, m=m)
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "bcss").status == "dropped" and m.stages == ["planning", "sourcing", "staged"]
+    assert "`bcss` | dropped" in staged_comments(m)[-1][0]
+
+
 # --- replay -------------------------------------------------------------------------------------
 
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
 CACHE_HISTORY = HISTORY.with_name("buffer_history_c.json")
 LIFECYCLE_HISTORY = HISTORY.with_name("buffer_history_d.json")
 REBUILD_HISTORY = HISTORY.with_name("buffer_history_d_rebuild.json")
+GATE_HISTORY = HISTORY.with_name("buffer_history_k.json")
 
 
 def _scrub(obj):
@@ -804,7 +991,7 @@ async def test_replay_buffer_history(env):
             await approve(h, m)
             await until(lambda: m.of("comment_drop"))
             await h.signal(MiaBuffer.dropped, "bcss")
-            await idle(h, m, "ready")
+            await ready(h, m)
             HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-recorded", HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
@@ -822,9 +1009,21 @@ async def test_replay_buffer_history_c(env):
             await env.sleep(timedelta(minutes=3))
             await until(lambda: m.of("comment_drop"), m=m)
             await h.signal(MiaBuffer.dropped, "bcss")
-            await idle(h, m, "ready")
+            await ready(h, m)
             CACHE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-c-cache", CACHE_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+async def test_replay_buffer_history_k(env):
+    """The staged gate (spec §15): a `go` round stages u937, stops at `staged`, and the approve serves it. Re-record
+    this one alone: MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_k"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(plan=ONLY_U937)
+        async with started(env, m, signal="go") as h:
+            await ready(h, m)
+            GATE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-staged-gate", GATE_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
@@ -836,7 +1035,7 @@ async def test_activity_failure_fails_only_that_dataset(env):
     async with started(env, m) as h:
         await approve(h, m)
         await h.signal(MiaBuffer.dropped, "b")
-        await idle(h, m, "ready")  # b alone is half the group
+        await ready(h, m)  # b alone is half the group
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "a").status == "failed" and "boom" in dataset(state, "a").reason
     assert dataset(state, "b").status == "servable" and "needs-human" not in m.stages
@@ -846,10 +1045,10 @@ async def test_go_after_ready_with_a_straggler_starts_a_new_round(env):
     m = Mocks(plan=ONE_GROUP)
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")  # a servable, b waiting for its drop
+        await ready(h, m)  # a servable, b waiting for its drop
         await h.signal(MiaBuffer.approve, ev("approve", "14"))
         await until(lambda: m.of("refuse_label"), m=m)
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await until(lambda: len(m.of("admit")) == 2, m=m)
         await idle(h, m, "plan-review")
         state = await h.query(MiaBuffer.status)
@@ -879,11 +1078,15 @@ async def test_poll_signals_only_a_stable_listing(tmp_path):
 
 
 async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
+    """The day limit at the staged gate drops the waiting dataset (a fresh board says so); the approve then serves
+    the rest. After the approve nothing is dropped any more (test_timeout_after_ready_changes_nothing)."""
     m = Mocks(plan=replace(PLAN, timeout_days=SHORT_DAYS))  # bcss waits for a manual drop that never comes
     async with started(env, m) as h:
         await approve(h, m)
         await until(lambda: m.of("register_dataset") and m.of("comment_drop"), m=m)
-        await idle(h, m, "ready")
+        await idle(h, m, "staged")
+        await until(lambda: staged_comments(m), timeout=20, m=m)  # the day limit: bcss dropped, the board again
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
     bcss = dataset(state, "bcss")
     assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-drop" in bcss.reason
@@ -948,7 +1151,7 @@ async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
         assert dataset(state, "bcss").status == "dropped" and dataset(state, "u937").status == "staging"
         assert "needs-human" not in m.stages
         m.gate.set()
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"
 
@@ -1012,7 +1215,7 @@ async def test_two_buffers_one_record_second_waits_then_reuses(env):
         await env.sleep(timedelta(minutes=3))
         await until(lambda: len(m.of("take_lock")) == 2, m=m)
         await env.sleep(timedelta(minutes=5))
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
         assert await poll_timers(h) == [2, 4]  # poll_minutes, doubling
     assert m.of("take_lock") == [("raw", "u937", OWNER, 900)] * 3
@@ -1040,7 +1243,7 @@ async def test_fetch_then_offline_stage(env):
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert [a[0] for a in m.of("submit_fetch")] == [fetch_job_key(7, "i7-e11", "u937", n) for n in (1, 2)]
     assert [a[1].attempt for a in m.of("submit_fetch")] == [1, 2] and m.of("submit_fetch")[0][1].hosts == ["zenodo.org"]
     assert fetch_job_key(7, "i7-e11", "u937", 1).startswith("buf-7-i7-e11-fetch1-u937-")
@@ -1066,7 +1269,7 @@ async def test_stream_url_keeps_the_stage_online(env):
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
     ((_, stage),) = m.of("submit")
     assert stage.cache_writable is True and stage.hosts == ["zenodo.org"] and len(m.of("submit_fetch")) == 1
 
@@ -1114,7 +1317,7 @@ async def test_blocked_waits_for_quota_then_fetches(env):
         blocked = await waits_on_lock(h, "u937", "blocked")
         assert "over by 5 bytes" in blocked.reason and not m.of("submit_fetch")
         await env.sleep(timedelta(minutes=15))  # the polls back off: 2, 4, 8 minutes
-        await idle(h, m, "ready")
+        await ready(h, m)
         assert await poll_timers(h) == [2, 4, 8]
     assert len([c for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]) == 1
     assert len(m.of("check_quota")) == 4 and len(m.of("submit_fetch")) == 1
@@ -1139,7 +1342,7 @@ async def test_dropped_files_mark_the_raw_row_and_stage_offline(env):
         await approve(h, m)
         await until(lambda: m.of("comment_drop"), m=m)
         await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert m.of("mark_asset") == [("raw", "bcss", {"state": "waiting-drop"})]
     assert m.names().index("mark_asset") < m.names().index("comment_drop") and not m.of("submit_fetch")
     ((_, stage),) = m.of("submit")
@@ -1151,7 +1354,7 @@ async def test_heaviest_dataset_is_sourced_first(env):
     m = Mocks(plan=PlanResult(True, [], pool, 2, levels=[1], patch=64))
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
         bindings = await scheduled(h, "read_binding")
     assert [args[1] for args in bindings[:2]] == ["heavy", "light"]
@@ -1194,7 +1397,7 @@ async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
                 break
             await asyncio.sleep(0.05)
         m.gate.set()
-        await idle(h, m, "ready")
+        await ready(h, m)
         await until(lambda: len(m.of("release_lock")) == 2, m=m)
         state = await h.query(MiaBuffer.status)
     assert {d.record: (d.status, d.reason) for d in state.datasets} == {
@@ -1228,7 +1431,7 @@ async def test_a_blocked_dataset_leaves_its_fetch_slot_to_others(env):
         assert [args[1].record for args in m.of("submit_fetch")] == ["second"]  # while first is blocked
         assert dataset(await h.query(MiaBuffer.status), "first").status == "blocked"
         await env.sleep(timedelta(minutes=3))
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert [args[1].record for args in m.of("submit_fetch")] == ["second", "first"]
 
 
@@ -1245,7 +1448,7 @@ async def test_a_retake_that_waited_decides_again(env):
         await approve(h, m)
         await waits_on_lock(h, "u937")
         await env.sleep(timedelta(minutes=3))
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert order(m, "take_lock", "read_binding", "raw_status", "read_stage", "release_lock") == [
         "read_binding",
         "take_lock",
@@ -1275,9 +1478,9 @@ async def test_a_go_while_blocked_stops_the_blocked_dataset(env):
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")  # a servable; b blocked, inside its release
+        await ready(h, m)  # a servable; b blocked, inside its release
         await until(lambda: ("release_lock", ("raw", "b", "mia-buffers i7-e11 b")) in m.calls, m=m)
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
         before = order(m, "check_quota", "take_lock", "submit_fetch", record="b")
         gate.set()
@@ -1335,20 +1538,22 @@ def ticker_timers_pending(events) -> list[int]:
     return sorted(started_ids)
 
 
-async def test_auto_approve_skips_review(env):
+async def test_auto_approve_does_not_skip_the_plan_gate_of_a_plan_round(env):
+    """Spec §15: `buffer:plan` is the request to look at the plan, so it waits there even with auto_approve; the
+    staged gate is then approved without a label."""
     m = Mocks(plan=replace(ONLY_U937, auto_approve=True))
-    async with started(env, m) as h:
-        await idle(h, m, "ready")
-    assert m.stages == ["planning", "sourcing", "ready"] and not m.of("refuse_label")
-    (auto,) = [c for c in m.of("comment") if c[1] == "auto-approve i7-e11"]
-    assert auto[0] == "plan.auto_approve: sourcing starts without review"
+    async with started(env, m) as h:  # a plan round
+        await approve(h, m)
+        await idle(h, m, "ready")  # the staged gate is auto-approved
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and not m.of("refuse_label")
+    assert m.of("buffer_event") == [("i7-e11", "approved", "")]
 
 
 async def test_board_is_written_on_every_status_change(env):
     m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await until(lambda: len(m.board) == 4, m=m)
     assert m.board == [("u937", "pending"), ("u937", "fetching"), ("u937", "staging"), ("u937", "servable")]
     assert {args[0] for args in m.of("mark_dataset")} == {"i7-e11"}
@@ -1358,21 +1563,21 @@ async def test_idle_keep_and_retire(env):
     m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.idle)
         await idle(h, m, "idle")
         assert (await h.query(MiaBuffer.status)).idle_since
         await h.signal(MiaBuffer.idle)  # the keeper says it again: nothing changes
         await h.signal(MiaBuffer.keep, ev("keep", "31"))
-        await idle(h, m, "ready")
+        await idle(h, m, "ready")  # kept: back to ready, no gate
         state = await h.query(MiaBuffer.status)
         assert state.idle_since is None and state.stage == "ready"
         await h.signal(MiaBuffer.retire, ev("retire", "32"))
         await idle(h, m, "retired")
         state = await h.query(MiaBuffer.status)
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready", "idle", "ready", "retired"]
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready", "idle", "ready", "retired"]
     assert m.of("retire_buffer") == [("i7-e11",)] and state.retired and state.stage == "retired"
-    idle_detail = m.of("set_stage")[4][1]
+    idle_detail = m.of("set_stage")[5][1]  # planning, plan-review, sourcing, staged, ready, idle
     assert idle_detail.startswith("No consumer for 72 hours: idle.") and "14 days of idleness" in idle_detail
     assert ("kept", "keep i7-e11 31") in m.of("comment")
     assert m.of("set_stage")[-1][1] == "Retired: refs released; draws archived to /state/archive/i7-e11.draws.jsonl.gz"
@@ -1405,7 +1610,7 @@ async def test_degraded_rebuilds_from_the_raw_cache(env):
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
@@ -1415,7 +1620,7 @@ async def test_degraded_rebuilds_from_the_raw_cache(env):
     assert len(m.of("read_binding")) == 4  # staged=True on both of the rebuild's reads, and staged anyway
     u937 = dataset(state, "u937")
     assert (u937.status, u937.rebuilds) == ("servable", 1) and state.stage == "ready"
-    assert m.stages == ["planning", "plan-review", "sourcing", "ready"]
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"]
     assert m.of("raw_ready") == [("u937",)] and m.of("prepare_stage") == [("u937",), ("u937", 1)]
     assert [args[0] for args in m.of("submit")] == [job_key(7, "i7-e11", "u937"), job_key(7, "i7-e11", "u937", 1)]
     assert m.of("submit")[1][1].rebuild == 1 and m.of("read_stage") == [("u937",), ("u937", 1)]
@@ -1431,7 +1636,7 @@ async def test_degraded_manual_dataset_rebuilds_without_a_new_drop(env):
         await approve(h, m)
         await until(lambda: m.of("comment_drop"), m=m)
         await h.signal(MiaBuffer.dropped, "bcss")
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["bcss"], "pyramid missing: bcss/v0.zarr"))
         await until(lambda: any(c[0] == "rebuilt bcss" for c in m.of("comment")), m=m)
         state = await h.query(MiaBuffer.status)
@@ -1443,7 +1648,7 @@ async def test_degraded_without_raw_is_needs_human_only_below_the_floor(env):
     m = Mocks(plan=TWO, raw_ready={"a": False, "b": False})
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing: a/v0.zarr"))
         await until(lambda: any("`a` failed" in c[0] for c in m.of("comment")), m=m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing: a/v0.zarr"))  # the next keeper pass
@@ -1508,11 +1713,11 @@ async def test_ticker_stops_with_the_round(env):
     m = Mocks(plan=TWO, raw={"b": RawStatus(False, [U937_URL])}, quotas={"b": QuotaCheck(False, over_by=5)})
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await waits_on_lock(h, "b", "blocked")
         await env.sleep(timedelta(minutes=3))
         await until(lambda: len(m.of("check_quota")) >= 2, m=m)
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
         events = (await h.fetch_history()).events
         timers, checks = await poll_timers(h), len(m.of("check_quota"))
@@ -1533,11 +1738,11 @@ async def test_replay_buffer_history_d(env):
             await until(lambda: m.of("take_lock"), m=m)
             await waits_on_lock(h, "u937")
             await env.sleep(timedelta(minutes=3))
-            await idle(h, m, "ready")
+            await ready(h, m)
             await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # as the keeper sends it
             await idle(h, m, "idle")
             await h.signal(MiaBuffer.keep, ev("keep", "31"))
-            await idle(h, m, "ready")
+            await ready(h, m)
             await h.signal(MiaBuffer.retire, ev("retire", "32"))
             await idle(h, m, "retired")
             LIFECYCLE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
@@ -1551,7 +1756,7 @@ async def test_a_keeper_signal_about_another_buffer_is_ignored(env):
     m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.idle, args=[None, "i7-e3"])
         await h.signal(MiaBuffer.retire, args=[None, "i7-e3"])
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e3"))
@@ -1565,7 +1770,7 @@ async def test_retire_abandons_a_rebuild_that_waits(env):
     m = Mocks(plan=ONLY_U937, locks={"u937": [LockTaken(True), LockTaken(True), HELD]})  # sourcing takes it twice
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await waits_on_lock(h, "u937")
         await h.signal(MiaBuffer.retire, ev("retire", "32"))
@@ -1583,10 +1788,10 @@ async def test_go_abandons_a_rebuild_that_waits(env):
     m = Mocks(plan=ONLY_U937, locks={"u937": [LockTaken(True), LockTaken(True), HELD]})  # sourcing takes it twice
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await waits_on_lock(h, "u937")
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
         state = await h.query(MiaBuffer.status)
     assert state.round_id == "i7-e15" and m.stages[-3:] == ["ready", "planning", "plan-review"]
@@ -1600,7 +1805,7 @@ async def test_lifecycle_labels_outside_the_ready_loop_are_refused_at_once(env):
         await h.signal(MiaBuffer.retire, ev("retire", "21"))
         await until(lambda: m.of("refuse_label"), m=m)
         await approve(h, m)
-        await idle(h, m, "ready")  # a servable, b waits for its drop
+        await ready(h, m)  # a servable, b waits for its drop
         await h.signal(MiaBuffer.keep, ev("keep", "22"))
         await until(lambda: len(m.of("refuse_label")) == 2, m=m)
     assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("buffer:retire", "21"), ("buffer:keep", "22")]
@@ -1620,7 +1825,7 @@ async def test_a_rebuild_another_buffer_finished_while_this_one_waited_is_reused
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
         await waits_on_lock(h, "u937")
         await env.sleep(timedelta(minutes=3))
@@ -1639,7 +1844,7 @@ async def test_the_keepers_retire_of_a_ready_buffer_is_ignored(env):
     m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])
         await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
         await idle(h, m, "idle")
@@ -1657,7 +1862,7 @@ async def test_a_go_after_needs_human_retires_the_failed_rounds_buffer(env):
         await approve(h, m)
         await idle(h, m, "needs-human")
         assert (await h.query(MiaBuffer.status)).buffer_id == "i7-e11"
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
         state = await h.query(MiaBuffer.status)
     assert m.of("retire_buffer") == [("i7-e11",)] and state.round_id == "i7-e15" and state.buffer_id is None
@@ -1671,13 +1876,14 @@ async def test_a_superseded_buffer_is_retired_by_the_keeper(env):
     m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
-        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await ready(h, m)
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
         assert (await h.query(MiaBuffer.status)).superseded == ["i7-e11"]
         await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])
-        await until(lambda: m.of("buffer_event"), m=m)
-        assert m.of("buffer_event") == [("i7-e11", "idle", "superseded")] and not m.of("retire_buffer")
+        events = lambda: [e for e in m.of("buffer_event") if e[1] != "approved"]  # noqa: E731
+        await until(events, m=m)
+        assert events() == [("i7-e11", "idle", "superseded")] and not m.of("retire_buffer")
         await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])  # retire_after_days later
         await until(lambda: m.of("retire_buffer"), m=m)
         await h.signal(MiaBuffer.retire, args=[None, "i7-e11"])  # the next keeper pass, before it saw the event
@@ -1697,7 +1903,7 @@ async def test_a_lifecycle_label_while_sourcing_is_refused_at_once(env):
         await h.signal(MiaBuffer.keep, ev("keep", "31"))
         await until(lambda: m.of("refuse_label"), m=m)
         m.gate.set()
-        await idle(h, m, "ready")
+        await ready(h, m)
     assert m.of("refuse_label") == [
         ("buffer:keep", "1 datasets still sourcing; add `buffer:keep` again once they settle", "31")
     ]
@@ -1712,10 +1918,10 @@ async def test_replay_buffer_history_d_rebuild(env):
         m = Mocks(plan=ONLY_U937, missing=[["u937"]])
         async with started(env, m) as h:
             await approve(h, m)
-            await idle(h, m, "ready")
+            await ready(h, m)
             await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
             await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
-            await idle(h, m, "ready")
+            await ready(h, m)
             assert len(m.of("submit")) == 2 and len(m.of("missing_records")) == 2
             REBUILD_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-d-rebuild", REBUILD_HISTORY.read_text())
@@ -1953,7 +2159,7 @@ async def test_buffer_fails_an_unprepared_record_instead_of_waiting(env):
     m = Mocks(plan=ONE_GROUP, unbound={"b"})  # a alone is half the group: ready
     async with started(env, m) as h:
         await approve(h, m)
-        await idle(h, m, "ready")
+        await ready(h, m)
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "b").status == "failed" and dataset(state, "b").reason == NOT_PREPARED
     assert not m.of("nudge_dataset") and not m.of("comment_drop") and state.ready
@@ -1981,7 +2187,7 @@ async def test_replay_buffer_history_e(env):
         m = Mocks(plan=ONE_GROUP, unbound={"b"})
         async with started(env, m) as h:
             await approve(h, m)
-            await idle(h, m, "ready")
+            await ready(h, m)
             PREP_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-e-prep", PREP_E_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)

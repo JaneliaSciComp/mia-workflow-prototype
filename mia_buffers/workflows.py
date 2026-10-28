@@ -47,19 +47,27 @@ with workflow.unsafe.imports_passed_through():
         RawStatus,
         RegisterResult,
         SourcingLimits,
+        StagedSummary,
         StageJobArgs,
         StageResult,
         fetch_job_key,
         job_key,
     )
-    from .status import render_ready
+    from .status import render_ready, render_staged
 
 GO, APPROVE = "buffer:go", "buffer:approve"
 BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
 NOT_REVIEW = "`buffer:approve` counts only while the issue is in `buffer:plan-review`, for the plan under review."
+# the staged gate (spec §15)
+NOT_GATE = "`buffer:approve` counts only while the issue is in `buffer:plan-review` or `buffer:staged`."
+STAGED_NEXT = "approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again"
+NOT_READY_YET = "the buffer is staged, not ready: `{label}` is refused until it serves"
+STALE_STAGED = "it is older than the staged comment; add it again to approve it"
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 # dataset statuses that wait on a human, on mia-data or on quota: dropped at the timeout, abandoned by a new go
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
+GATE_WAITING = WAITING + ("waiting-lock",)  # no job of its own: the staged gate opens over these (spec §15)
+SETTLED = ("servable", "failed", "dropped")
 ABANDONED = "abandoned: a new buffer:go started another round"
 RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this issue has no ready or idle buffer"
@@ -136,6 +144,8 @@ class MiaBuffer:
         self.held: set[str] = set()  # owners of the raw-cache locks this run holds (c-cache)
         self.lifecycle: list[tuple[str, Any, str]] = []  # (idle|keep|retire|degraded, event or signal, buffer)
         self.lifecycle_on = False  # this run takes the d-lifecycle path, decided once at its start
+        self.gate_on = False  # this run stages before it asks (staged-gate, spec §15), decided once at its start
+        self.gate_mark = 0  # at the staged gate: the progress count the board last showed
         self.board: list[asyncio.Task] = []  # fire-and-forget status board writes, awaited before the round goes on
         self.progress = 0  # bumped by every dataset status change; the ticker backs off while it stays put
         self.tick = 0  # the shared ticker's count; lock and quota waiters wake on its next value (d-tick)
@@ -148,6 +158,11 @@ class MiaBuffer:
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
+        self.go_events.append(event)
+
+    @workflow.signal
+    def plan(self, event: LabelEvent) -> None:
+        """`buffer:plan`: a round that waits at the plan too (its event's kind says so; spec §15)."""
         self.go_events.append(event)
 
     @workflow.signal
@@ -188,6 +203,7 @@ class MiaBuffer:
     async def run(self, state: BufferState) -> None:
         rounds = 0
         self.lifecycle_on = workflow.patched("d-lifecycle")
+        self.gate_on = workflow.patched("staged-gate")
         if state.stage == "plan-review":  # rolled over while waiting for an approve
             await self._guard(self._from_review())
         elif self.lifecycle_on and state.stage in ("ready", "idle") and state.buffer_id:  # rolled over serving
@@ -252,7 +268,8 @@ class MiaBuffer:
     async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
         queued = []
         if approves:
-            queued, self.approve_events = [(APPROVE, NOT_REVIEW, event) for event in self.approve_events], []
+            reason = NOT_GATE if self.gate_on else NOT_REVIEW
+            queued, self.approve_events = [(APPROVE, reason, event) for event in self.approve_events], []
         if gos:
             queued, self.go_events = queued + [(GO, BUSY, event) for event in self.go_events], []
         for label, reason, event in queued:
@@ -332,11 +349,13 @@ class MiaBuffer:
     async def _round(self, event: LabelEvent) -> None:
         """Admit, plan, post the plan, wait for review; an approve continues into sourcing."""
         state = self.state
-        failed = state.buffer_id if state.stage == "needs-human" and state.buffer_id and not state.retired else None
+        over = state.stage in ("needs-human", "staged")  # a staged round a go supersedes is retired like a failed one
+        failed = state.buffer_id if over and state.buffer_id and not state.retired else None
         state.round_id = f"i{state.issue}-e{event.event_id}"
         state.pins = state.buffer_id = state.planned_at = None
         state.datasets, state.ready = [], False
         state.idle_since, state.retired = None, False
+        state.accepted, state.staged_at = {}, None
         if failed and workflow.patched("retire-failed-round"):
             await self._retire_failed(failed)
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
@@ -358,7 +377,17 @@ class MiaBuffer:
         state.min_fraction, state.timeout_days = plan.min_fraction, plan.timeout_days
         state.levels, state.patch = list(plan.levels), plan.patch
         state.idle_hours, state.retire_after_days = plan.idle_hours, plan.retire_after_days
-        state.planned_at = workflow.now().isoformat()
+        state.planned_at, state.auto_approve = workflow.now().isoformat(), plan.auto_approve
+        if self.gate_on:  # spec §15: a `plan` round waits at the plan; a `go` round stages first and asks at the gate
+            if event.kind == "plan":
+                await self._stage(
+                    "plan-review",
+                    "approve the plan with `buffer:approve`, or edit the spec and add `buffer:plan` again",
+                )
+                await self._refuse_queued(approves=False)
+                return await self._from_review()
+            await self._refuse_queued(gos=False)  # approves that queued while planning: no gate is open
+            return await self._serve()
         if plan.auto_approve and self.lifecycle_on:
             await self._comment(AUTO_APPROVE, f"auto-approve {state.round_id}")
             await self._refuse_queued()  # gos were busy, and an approve has no plan under review
@@ -423,16 +452,20 @@ class MiaBuffer:
             groups[dataset.group] = (servable + (dataset.status == "servable"), total + 1)
         return groups
 
+    def _floor(self, group: str) -> float:
+        """A group's floor: ready.min_fraction, or the fraction the human accepted at the staged gate if lower."""
+        return min(self.state.min_fraction, self.state.accepted.get(group, 1.0))
+
     def _ready_now(self) -> bool:
         groups = self._groups()
-        return bool(groups) and all(servable / total >= self.state.min_fraction for servable, total in groups.values())
+        return bool(groups) and all(
+            servable / total >= self._floor(group) for group, (servable, total) in groups.items()
+        )
 
     def _below(self) -> list[str]:
-        """The weighting groups under ready.min_fraction, sorted."""
+        """The weighting groups under their floor, sorted."""
         groups = self._groups()
-        return sorted(
-            group for group, (servable, total) in groups.items() if servable / total < self.state.min_fraction
-        )
+        return sorted(group for group, (servable, total) in groups.items() if servable / total < self._floor(group))
 
     async def _sourcing(self) -> bool:
         """Create the buffer, source every dataset in parallel, announce ready when the groups allow it. True when
@@ -448,7 +481,7 @@ class MiaBuffer:
             self._post(dataset)
         self._start_ticker(limits)
         try:
-            return await self._source_all(limits)
+            return await (self._source_all_gated(limits) if self.gate_on else self._source_all(limits))
         finally:
             await self._stop_ticker()
             await self._flush_board()
@@ -507,6 +540,156 @@ class MiaBuffer:
             return False
         await self._refuse_queued()  # labels that arrived while sourcing ran were busy, as in mia-data
         return True
+
+    # --- the staged gate (staged-gate, spec §15) ------------------------------------------------------
+
+    def _pairs(self, tasks: list[asyncio.Task]) -> list[tuple[asyncio.Task, DatasetStatus]]:
+        return list(zip(tasks, self.state.datasets, strict=True))
+
+    def _quiet(self, tasks: list[asyncio.Task]) -> bool:
+        """No dataset has a job or a registration in flight: every one is settled or waits on a drop, quota or lock
+        (a settled dataset's task may still be posting its comment or releasing its lock)."""
+        return all(
+            task.done() or dataset.status in GATE_WAITING or dataset.status in SETTLED
+            for task, dataset in self._pairs(tasks)
+        )
+
+    def _gate_open(self, tasks: list[asyncio.Task]) -> bool:
+        return self._quiet(tasks) and any(dataset.status == "servable" for dataset in self.state.datasets)
+
+    async def _source_all_gated(self, limits: SourcingLimits) -> bool:
+        """Source every dataset; once nothing runs and something is servable, stop at the staged gate; after the
+        approve, wait for the stragglers. Approves that come while jobs run are refused (no gate is open)."""
+        state = self.state
+        semaphore = asyncio.Semaphore(max(1, limits.parallel))
+        fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
+        datasets = state.datasets
+        starts = sorted(range(len(datasets)), key=lambda index: (-datasets[index].weight, datasets[index].record))
+        created = {
+            index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
+        }
+        tasks = [created[index] for index in range(len(datasets))]
+        # one timer for the round's day limit: the waits below start none of their own (a timer per wake would
+        # litter the history and never let it look idle)
+        deadline = asyncio.create_task(asyncio.sleep(state.timeout_days * 86400))
+        try:
+            while True:
+                await workflow.wait_condition(
+                    lambda: (
+                        self._gate_open(tasks)
+                        or all(task.done() for task in tasks)
+                        or bool(self.approve_events or self.go_events)
+                        or self._lifecycle()
+                        or (deadline.done() and not self.timed_out)
+                    )
+                )
+                await self._day_limit(tasks, deadline)
+                if self._gate_open(tasks) or all(task.done() for task in tasks):
+                    break
+                await self._refuse_queued()  # while jobs run: an approve has no gate, a go is busy
+                await self._refuse_lifecycle(SOURCING, sum(not task.done() for task in tasks))
+            if not any(dataset.status == "servable" for dataset in datasets):
+                await asyncio.gather(*tasks, return_exceptions=True)
+                reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in datasets if d.status != "servable")
+                await self._finish("needs-human", f"nothing to serve: {reasons}")
+                return False
+            if not await self._staged_gate(tasks, limits, deadline):
+                return False  # retired at the gate, or a new go: the main loop plans again
+        finally:
+            deadline.cancel()
+        if not await self._await_stragglers(tasks):
+            return False
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self._refuse_queued()
+        return True
+
+    async def _day_limit(self, tasks: list[asyncio.Task], deadline: asyncio.Task) -> None:
+        """The round's day limit, once: the datasets still waiting on a human, quota or lock are dropped."""
+        if deadline.done() and not self.timed_out:
+            self.timed_out = True
+            await self._drop_waiting(tasks, f"still {{status}} after {self.state.timeout_days:g} days")
+
+    async def _staged_board(self) -> str:
+        state = self.state
+        assert state.buffer_id
+        summary = await self._act("staged_summary", state.buffer_id, seconds=300, result_type=StagedSummary)
+        summary.waiting = [d.record for d in state.datasets if d.status in GATE_WAITING]
+        rows = [(d.record, d.status, d.reason) for d in state.datasets]
+        return render_staged(rows, self._groups(), state.min_fraction, summary)
+
+    async def _staged_gate(self, tasks: list[asyncio.Task], limits: SourcingLimits, deadline: asyncio.Task) -> bool:
+        """Stop at `buffer:staged` with the board and wait: an approve newer than the staged comment serves the
+        buffer as it is (True); a go abandons the waiting datasets for a new round, the keeper's retire ends the
+        round (False). A dataset that lands meanwhile gets a fresh board; the day limit drops the waiting ones."""
+        state = self.state
+        assert state.round_id and state.buffer_id
+        state.staged_at = workflow.now().isoformat()
+        await self._stage("staged", STAGED_NEXT, extra=await self._staged_board())
+        if state.auto_approve and self._ready_now():
+            await self._approve_at_gate(limits)
+            return True
+        staged_at = _parse_time(state.staged_at) or workflow.now()
+        self.gate_mark = self.progress  # the progress the board last showed
+        while True:
+            await workflow.wait_condition(
+                lambda: (
+                    bool(self.approve_events or self.go_events or self.lifecycle)
+                    or self.progress != self.gate_mark
+                    or (deadline.done() and not self.timed_out)
+                )
+            )
+            await self._day_limit(tasks, deadline)
+            moved, self.gate_mark = self.progress != self.gate_mark, self.progress  # always taken, or the wait spins
+            if moved and self._quiet(tasks):  # a straggler landed (or was dropped): the board again
+                await self._comment(await self._staged_board(), f"staged {state.round_id} {self.progress}")
+            while self.approve_events:
+                event = self.approve_events.pop(0)
+                if self._seen(event):
+                    continue
+                if (approved_at := _parse_time(event.at)) and approved_at > staged_at:
+                    await self._approve_at_gate(limits)
+                    return True
+                await self._refuse(APPROVE, STALE_STAGED, event)
+            self.go_events = [go for go in self.go_events if go.event_id not in state.handled]
+            if self.go_events:
+                if not self._quiet(tasks):  # a straggler's job runs: a new round would write the same directories
+                    await self._refuse_queued(approves=False)
+                else:
+                    for task, dataset in self._pairs(tasks):
+                        if not task.done():
+                            task.cancel()
+                            self._set(dataset, "failed", ABANDONED)
+                    return False
+            if any(kind == "retire" and buffer == state.buffer_id for kind, _, buffer in self.lifecycle):
+                self.lifecycle = [
+                    item for item in self.lifecycle if not (item[0] == "retire" and item[2] == state.buffer_id)
+                ]
+                for task, dataset in self._pairs(tasks):
+                    if not task.done():
+                        task.cancel()
+                        self._set(dataset, "failed", RETIRED_WHILE)
+                retired = await self._act(
+                    "retire_buffer", state.round_id, state.buffer_id, seconds=900, result_type=dict
+                )
+                state.retired = True
+                await self._stage("retired", RETIRED.format(path=retired.get("archive") or "none"))
+                return False
+            await self._refuse_lifecycle(NOT_READY_YET)
+
+    async def _approve_at_gate(self, limits: SourcingLimits) -> None:
+        """The human (or auto_approve) says serve this: each group's fraction becomes its floor, the `approved`
+        event is written, the buffer is ready. No job runs from here to `ready`."""
+        state = self.state
+        assert state.buffer_id
+        groups = self._groups()
+        state.accepted = {group: servable / total for group, (servable, total) in groups.items()}
+        short = [f"{g} {s}/{t}" for g, (s, t) in sorted(groups.items()) if s / t < state.min_fraction]
+        try:
+            await self._act("buffer_event", state.buffer_id, "approved", "", budget=timedelta(minutes=10))
+        except ActivityError as error:  # best effort: the ready event follows and the page reads the stage
+            workflow.logger.warning("issue #%d: approved event: %s", state.issue, error_message(error))
+        await self._refuse_lifecycle()  # they came while there was no ready buffer
+        await self._announce_ready(limits, short)
 
     # --- serving: the ready-state loop (d-lifecycle) ---------------------------------------------
 
@@ -749,11 +932,13 @@ class MiaBuffer:
                 return False
         return True
 
-    async def _announce_ready(self, limits: SourcingLimits) -> None:
+    async def _announce_ready(self, limits: SourcingLimits, short: list[str] | None = None) -> None:
         state = self.state
         state.ready = True
         servable = [dataset.record for dataset in state.datasets if dataset.status == "servable"]
-        await self._stage("ready", extra=render_ready(state.buffer_id or "", limits.service_url, servable))
+        detail = "approved below ready.min_fraction" if short else ""
+        extra = render_ready(state.buffer_id or "", limits.service_url, servable, short or [], state.min_fraction)
+        await self._stage("ready", detail, extra=extra)
 
     async def _source(
         self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, fetch_slots: asyncio.Semaphore

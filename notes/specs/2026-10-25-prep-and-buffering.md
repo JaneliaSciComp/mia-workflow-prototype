@@ -1068,8 +1068,9 @@ in `needs-human` this way, each after an approve.
 - *Approve at the staged gate* is the human saying "serve this": the `approved` and `ready` events, `buffer:ready`,
   the ready comment. **No job runs between the approve and `ready`.** It is accepted whether or not every group
   meets `ready.min_fraction`; a short group is stated in the ready comment ("below ready.min_fraction 1:
-  brightfield 0/1, approved"). Waiting datasets keep joining after `ready`, as stragglers do today, and the
-  timeout (`sourcing.dataset_timeout_days`) still drops them. The steady state (§5.3) is unchanged.
+  brightfield 0/1, approved"). Waiting datasets keep joining after `ready`, as stragglers do today; the
+  timeout (`sourcing.dataset_timeout_days`) drops them only until the approve, as it does today (after `ready`
+  nothing is dropped: the human approved knowing who was waiting). The steady state (§5.3) is unchanged.
 - *`plan.auto_approve: true`* skips both gates when every group meets `ready.min_fraction` at the staged point;
   a short group stops at `buffer:staged` for a human even then. *My call: the threshold's one remaining job is to
   decide what runs unattended.*
