@@ -1243,12 +1243,14 @@ class Activities:
     async def _keeper_buffers(self, report: KeeperReport, now: float, dry_run: bool) -> None:
         """Watch the ready and idle buffers of a workflow (id `i<issue>-e<event>`): a pyramid gone from disk signals
         `degraded` with its records, a ready buffer no consumer has seen for `idle_hours` signals `idle`, an idle one
-        older than `retire_after_days`, with no consumer since it went idle, signals `retire`. A buffer that fails
+        older than `retire_after_days`, with no consumer since it went idle, signals `retire`. A staged buffer
+        (spec §15) nobody approved for `retire_after_days` signals `retire` too; nothing else about it is judged,
+        nothing serves it yet. A buffer that fails
         (an odd config, buffer-api refusing its status) is an error entry; the next buffer is still watched. Dry
         run, or no Temporal client (the CLI): only reported."""
         for buffer in await asyncio.to_thread(self.registry.buffers):
             latest = buffer.get("latest_event") or {}
-            if not (ROUND_RE.fullmatch(buffer["id"]) and latest.get("kind") in ("ready", "idle")):
+            if not (ROUND_RE.fullmatch(buffer["id"]) and latest.get("kind") in ("ready", "idle", "staged")):
                 continue
             try:
                 await self._keeper_buffer(report, buffer, latest, now, dry_run)
@@ -1262,7 +1264,12 @@ class Activities:
         buffer_id, kind = buffer["id"], latest["kind"]
         config = BufferConfig.model_validate(buffer["config"])  # a config stored before D gets D's defaults
         signals: list[tuple[str, list[Any], str]] = []
-        missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]  # stats the pyramids
+        if kind == "staged":  # unapproved past retire_after_days: retire; a missing pyramid is not yet its problem
+            if now - float(latest["at"]) > config.retire_after_days * 86400:
+                signals.append(("retire", [None, buffer_id], ""))
+            missing = []
+        else:
+            missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]  # stats the pyramids
         if missing:
             records = sorted({volume.split("/", 1)[0] for volume in missing})
             reason = "pyramid missing: " + ", ".join(missing)

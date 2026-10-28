@@ -1297,18 +1297,29 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
     buffer("i8-e9", ["ready", "idle"], retire_after_days=0.01)  # its workflow is gone
     buffer("i10-e11", ["approved"], [("rec-e/v0", False)])  # still sourcing: not the keeper's to judge
     buffer("hand", ["ready", "idle"], retire_after_days=0.01)  # registered by hand: no workflow
+    # the staged gate (spec §15): a staged buffer nobody approves is retired after retire_after_days; a fresh one
+    # and its missing pyramid are not the keeper's business (nothing serves yet)
+    buffer("i12-e13", ["created", "sourcing", "staged"], [("rec-f/v0", False)], retire_after_days=0.01)
+    buffer("i14-e15", ["created", "sourcing", "staged"], [("rec-g/v0", False)])
     report = KeeperReport()
     now = time.time() + 2 * 3600
     acts.client = FakeTemporal(gone={acts.cfg.workflow_id(8)})
 
     await acts._keeper_buffers(report, now, dry_run=True)
-    expected = ["degraded i2-e3 rec-a,rec-b", "idle i4-e5", "retire i6-e7", "retire i8-e9"]
+    expected = [
+        "retire i12-e13",
+        "degraded i2-e3 rec-a,rec-b",
+        "idle i4-e5",
+        "retire i6-e7",
+        "retire i8-e9",
+    ]  # id order
     assert report.signalled == expected and acts.client.sent == [] and report.errors == []
 
     report = KeeperReport()
     await acts._keeper_buffers(report, now, dry_run=False)
-    assert report.signalled == expected[:3] and report.errors == []  # the gone workflow is logged, not reported
+    assert report.signalled == expected[:4] and report.errors == []  # the gone workflow is logged, not reported
     assert acts.client.sent == [
+        (acts.cfg.workflow_id(12), "retire", [None, "i12-e13"]),
         (
             acts.cfg.workflow_id(2),
             "degraded",
