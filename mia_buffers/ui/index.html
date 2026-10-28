@@ -34,6 +34,7 @@ a{color:var(--accent)}
 code{font-family:var(--mono);font-size:.92em}
 button,select,input{font:inherit;color:inherit}
 .small{font-size:12.5px;color:var(--muted)}
+tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
 
 /* top bar: title, the four tabs, the catalog ref, the theme toggle */
@@ -634,21 +635,28 @@ async function viewBuffers(id, refresh) {
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   const out = await load("/buffers");
   if (location.hash !== hash) return;  // the reader moved on while this loaded
-  const buffers = out?.buffers || [];
-  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its issue and stage; open one for its events, status board, volumes, consumers and usage."),
+  // newest round first within an issue, newest issue first; every older round of an issue is superseded by its newest
+  const eventOf = id => Number((id.match(/-e(\d+)$/) || [])[1] || 0);
+  const buffers = (out?.buffers || []).slice().sort((a, b) => (issueOf(b.id) - issueOf(a.id)) || (eventOf(b.id) - eventOf(a.id)));
+  const current = new Map();
+  for (const b of buffers) if (!current.has(issueOf(b.id))) current.set(issueOf(b.id), b.id);
+  const supersededBy = b => { const c = current.get(issueOf(b.id)); return c !== b.id ? c : null; };
+  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its issue and stage, the issue's newest round first; an older round is superseded by it. Open one for its events, status board, volumes, consumers and usage."),
     table([
       { label: "buffer", cell: b => bufferLink(b.id) },
       { label: "issue", cell: b => ghIssue(S.meta.buffers_repo, issueOf(b.id)) },
       { label: "spec", cell: b => b.config?.spec_name || "" },
-      { label: "state", cell: b => b.latest_event ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at))
-        : el("span", { class: "small", title: "registered before buffers recorded lifecycle events; the issue has the stage" }, "no events") },
+      { label: "state", cell: b => el("span", {}, ...(supersededBy(b) ? [pill("superseded", ""), " "] : []),
+        ...(b.latest_event ? [statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)]
+        : [el("span", { class: "small", title: "registered before buffers recorded lifecycle events; the issue has the stage" }, "no events")])) },
       { label: "volumes", num: true, cell: b => num(b.volumes) },
       { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn") : "0" },
       { label: "servable", cell: b => servableText(b.servable) },
       { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
       { label: "draws today", num: true, cell: b => num(b.draws_today) },
     ], buffers, out ? "No buffers yet: open a buffer issue from the Datasets view." : "The buffer list did not load.",
-    b => ({ class: "click", onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
+    b => ({ class: "click" + (supersededBy(b) ? " superseded" : ""), title: supersededBy(b) ? `superseded by ${supersededBy(b)}, the issue's newest round` : "",
+      onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
 }
 function sparkline(days) {
   if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");

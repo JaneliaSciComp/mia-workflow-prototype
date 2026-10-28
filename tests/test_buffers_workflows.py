@@ -1638,6 +1638,22 @@ async def test_the_keepers_retire_of_a_ready_buffer_is_ignored(env):
     assert m.of("retire_buffer") == [("i7-e11",)] and m.stages[-3:] == ["ready", "idle", "retired"]
 
 
+async def test_a_go_after_needs_human_retires_the_failed_rounds_buffer(env):
+    """A round that ended needs-human leaves its buffer registered; the next go retires it before planning, with a
+    comment, so an issue has one live buffer. A round that never created a buffer has nothing to retire."""
+    m = Mocks(plan=ONLY_U937, stage={"u937": StageResult(False, 0, ["raw 0: voxel size unknown"])})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await idle(h, m, "needs-human")
+        assert (await h.query(MiaBuffer.status)).buffer_id == "i7-e11"
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "plan-review")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.round_id == "i7-e15" and state.buffer_id is None
+    assert ("failed round's buffer `i7-e11` retired: refs released", "retired i7-e11") in m.of("comment")
+    assert m.stages[-3:] == ["needs-human", "planning", "plan-review"]
+
+
 async def test_a_superseded_buffer_is_retired_by_the_keeper(env):
     """A go from the ready loop leaves the buffer registered: the keeper's idle about it writes the `idle` event on
     it (so the keeper's retire rule can fire), its retire releases it and says so; the new round is untouched."""

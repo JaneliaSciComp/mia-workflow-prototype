@@ -289,7 +289,9 @@ stays for the next retire). The worker then writes the `retired` event, after wh
 `POST consumers` answer `410 buffer retired`. Volumes and the config stay for the page. Both thresholds travel in
 the buffer config. Run `mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`.
 `mia exec mia-buffers retire <buffer>` does it by hand (refs, archive, then the `retired` event, so consumers get
-410; the issue's stage stays as it is) and exits 1 when buffer-api refuses. **Closing the issue is also a retire**: the
+410; the issue's stage stays as it is) and exits 1 when buffer-api refuses. **A new go after a `needs-human` round retires that round's buffer** before planning (refs released,
+`retired` event, a comment), so an issue has one live buffer; the page lists an issue's newest round first and
+marks the older ones superseded. **Closing the issue is also a retire**: the
 poller finds a closed issue that still carries a live stage label (`planning` to `idle`), terminates its workflow
 (a terminate needs no replay, so it also ends a run that a nondeterministic history froze), retires its registered
 buffers, swaps the label to `buffer:retired` and comments. A closed `prep:requested` request is ended the same way

@@ -332,10 +332,13 @@ class MiaBuffer:
     async def _round(self, event: LabelEvent) -> None:
         """Admit, plan, post the plan, wait for review; an approve continues into sourcing."""
         state = self.state
+        failed = state.buffer_id if state.stage == "needs-human" and state.buffer_id and not state.retired else None
         state.round_id = f"i{state.issue}-e{event.event_id}"
         state.pins = state.buffer_id = state.planned_at = None
         state.datasets, state.ready = [], False
         state.idle_since, state.retired = None, False
+        if failed and workflow.patched("retire-failed-round"):
+            await self._retire_failed(failed)
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
         await self._stage("planning")
         plan = await self._act("plan", state.issue, state.round_id, state.pins, seconds=1800, result_type=PlanResult)
@@ -365,6 +368,16 @@ class MiaBuffer:
         )
         await self._refuse_queued(approves=False)  # gos that came while planning; approves are judged below
         await self._from_review()
+
+    async def _retire_failed(self, buffer: str) -> None:
+        """A new go supersedes the buffer of a round that ended needs-human: nothing serves it, so it is retired now
+        (refs released, `retired` event) and the page shows the new round as the issue's one live buffer. Best
+        effort: a retire buffer-api refuses is logged, and the keeper's rules still reach the buffer later."""
+        try:
+            await self._act("retire_buffer", buffer, buffer, seconds=900, result_type=dict)
+            await self._comment(f"failed round's buffer `{buffer}` retired: refs released", f"retired {buffer}")
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: retire of %s: %s", self.state.issue, buffer, error_message(error))
 
     async def _from_review(self) -> None:
         if await self._review():
