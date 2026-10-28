@@ -38,7 +38,8 @@ tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
 
 /* top bar: title, the four tabs, the catalog ref, the theme toggle */
-.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid)}
+.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
+  position:sticky;top:0;z-index:5;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding */
 .tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
 .tabs a:hover{color:var(--fg)}
@@ -59,7 +60,8 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
 
 /* filters: one row above everything, wraps on narrow screens */
-.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px;
+  position:sticky;top:var(--topbar-h,0px);z-index:5;box-shadow:0 -14px 0 var(--bg)}  /* stays put under the topbar; the shadow fills the gap between them */
 .filters fieldset{border:0;padding:0;margin:0;min-width:0}
 .filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
@@ -266,9 +268,12 @@ async function api(path, options) {
   if (!res.ok) throw new HttpError(res.status, (data && data.error) || res.statusText);
   return data;
 }
-function banner(message) {
-  const line = el("div", {}, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
-  $("banner").append(line);
+function banner(message) {  // at most 3 lines, a repeat bumps its count instead of adding one, and each fades after 20 s
+  const box = $("banner"), same = [...box.children].find(d => d.dataset.message === message);
+  if (same) { same.count = (same.count || 1) + 1; same.firstChild.textContent = `${message} (×${same.count})`; clearTimeout(same.timer); }
+  const line = same || el("div", { "data-message": message }, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
+  line.timer = setTimeout(() => line.remove(), 20000);
+  if (!same) { box.append(line); while (box.children.length > 3) box.firstChild.remove(); }
 }
 async function load(path, quiet404) {  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
   try { return await api(path); }
@@ -427,9 +432,9 @@ function issueAction(container, label, repo, title, intro, yaml, disabledReason)
   const status = el("span", { class: "small" });
   container.replaceChildren(
     el("a", { class: "btn", href: `${base}&body=${encodeURIComponent(intro + "\n\n(paste the copied YAML here)")}`, target: "_blank", rel: "noopener" }, label),
-    el("button", { type: "button", class: "btn", onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
-    status,
-    el("div", { class: "notice" }, `The prefilled link would be ${num(url.length)} characters, over GitHub's ~8 KB limit. Copy the YAML, open the issue, paste it into the body.`));
+    el("button", { type: "button", class: "btn", title: "the YAML is too long for a prefilled link: copy it, open the issue, paste it into the body",
+      onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
+    status);
 }
 
 // ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
@@ -687,7 +692,7 @@ async function viewBuffer(root, id, refresh) {
   const hash = location.hash, e = encodeURIComponent(id);
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   // status, board and usage exist from sourcing on (create_buffer writes the config); a planned buffer has only events
-  const [status, board, events, usage] = await Promise.all([load(`/buffers/${e}/status`, true), load(`/buffers/${e}/datasets`, true), load(`/buffers/${e}/events`), load(`/usage/${e}`, true)]);
+  const [status, board, events, usage, ds] = await Promise.all([load(`/buffers/${e}/status`, true), load(`/buffers/${e}/datasets`, true), load(`/buffers/${e}/events`), load(`/usage/${e}`, true), load("/datasets")]);
   if (location.hash !== hash) return;  // a slow load of a buffer the reader already left
   const meta = S.meta, cfg = status?.config || {}, evs = (events?.events || []).slice().sort((a, b) => b.seq - a.seq);
   const retired = evs.find(x => x.kind === "retired");
@@ -696,6 +701,9 @@ async function viewBuffer(root, id, refresh) {
   const draws = status?.draws || {}, missing = new Set(status?.missing || []);
   const volumes = [...new Set([...Object.keys(draws), ...missing])].sort().map(v => ({ id: v, draws: draws[v] || 0, missing: missing.has(v) }));
   const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
+  const datasets = new Map((ds?.datasets || []).map(d => [d.id, d])), dsOf = x => datasets.get(x.record) || {};
+  const levelsKey = cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null;  // jobspec.levels_key
+  const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${encodeURIComponent(folder)}`, "open") : "";
   root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
     el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
     el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
@@ -720,9 +728,13 @@ async function viewBuffer(root, id, refresh) {
       { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },
       { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
     ], evs, "no events yet")),
-    card("Status board", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", table([
+    card("Data set pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason. Links: the dataset issue and its mia-data workflow, the crops and stage folders.", table([
       { label: "record", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
       { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
+      { label: "issue", cell: x => dsOf(x).issue ? ghIssue(meta.datasets_repo, dsOf(x).issue) : "" },
+      { label: "workflow", cell: x => dsOf(x).issue && meta.datasets_workflow_url ? link(meta.datasets_workflow_url + dsOf(x).issue, "temporal") : "" },
+      { label: "crops", cell: x => folderLink(roots.storage_root, dsOf(x).folder) },
+      { label: "stage", cell: x => folderLink(roots.staged_root, levelsKey && `${levelsKey}/${x.record}`) },
     ], board?.datasets || [], "no dataset on the board yet")),
     el("section", { class: "grid2" },
       card("Volumes", `${num(status?.volumes || 0)} registered; listed here are the ones drawn from or flagged missing.`, table([
@@ -825,6 +837,7 @@ function renderTopbar() {
 function setupTheme() {
   const root = document.documentElement;
   try { const saved = localStorage.getItem("mia-theme"); if (saved) root.dataset.theme = saved; } catch { /* storage blocked: follow the system */ }
+  new ResizeObserver(() => root.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px")).observe(document.querySelector(".topbar"));
   $("theme").addEventListener("click", () => {
     const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     root.dataset.theme = dark ? "light" : "dark";

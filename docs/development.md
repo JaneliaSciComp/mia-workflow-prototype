@@ -405,8 +405,9 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
 
 - **Datasets** reads `/meta`, `/catalogs`, `/records?ref=`, `/datasets`, `/assets/raw|staged` and runs the controls'
   spec through `POST /plan` (debounced 300 ms): fit funnel, charts, records table.
-- **Buffers** reads `/buffers`, then per buffer `/buffers/<id>/status`, `/events`, `/datasets` and `/usage/<id>`
-  (config, health line, daily draws, board, consumers). The list shows each buffer's issue (from its id) and its
+- **Buffers** reads `/buffers`, then per buffer `/buffers/<id>/status`, `/events`, `/datasets`, `/usage/<id>` and
+  the registry's `/datasets` (config, health line, daily draws, the data set pool with each dataset's issue, Temporal
+  workflow from `temporal.ui_url`, crops and stage folders, consumers). The list shows each buffer's issue (from its id) and its
   stage: the latest lifecycle event read back as the stage label; a buffer registered before those events shows
   "no events".
 - **Cache** reads `/assets/*`, `/locks`, `/keeper` and the quotas from `/meta`: meters, tables, the keeper card
@@ -420,7 +421,7 @@ human adds `buffer:go` / `prep:go`, and the body says so (a prefilled label once
 request its author thought was still a draft). Open buffer issue is disabled
 while the plan has errors (with them as the reason; "request preparation first" when only unprepared records fit),
 and a record's landing link is shown only for an `http(s)` URL. A link
-over 8 KB falls back to a "copy YAML" button and a notice. With an empty registry the views say so ("No catalog
+over 8 KB falls back to a "copy YAML" button. With an empty registry the views say so ("No catalog
 synced; run `mia-buffers catalog sync`.").
 
 **Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served draws,

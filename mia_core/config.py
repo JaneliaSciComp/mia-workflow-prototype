@@ -24,6 +24,7 @@ TEMPORAL_MANIFEST_ONLY = frozenset({"managed", "state_dir"})  # temporal keys re
 class TemporalCfg(BaseModel):
     address: str = "localhost:7233"
     namespace: str = "default"
+    ui_url: str | None = None  # the Temporal web UI; the buffers page links each dataset's workflow when set
     via_https_proxy: bool = False  # inside agentic-sandbox: reach Temporal through the allowlist proxy
     poll_minutes: int = 2
 
