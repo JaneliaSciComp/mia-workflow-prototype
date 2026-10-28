@@ -287,7 +287,8 @@ once the quota asks) and its draws are gzipped to `<state_dir>/archive/<buffer>.
 connection outside the service's lock, then deleted up to the last seq seen at the start (a draw recorded meanwhile
 stays for the next retire). The worker then writes the `retired` event, after which `next`, `split` and
 `POST consumers` answer `410 buffer retired`. Volumes and the config stay for the page. Both thresholds travel in
-the buffer config. Run `mia exec mia-buffers init-labels` once to create `buffer:keep` and `buffer:retire`.
+the buffer config. Run `mia exec mia-buffers init-labels` once to create `buffer:keep`, `buffer:retire`, and since
+the staged gate `buffer:plan` and `buffer:staged`.
 `mia exec mia-buffers retire <buffer>` does it by hand (refs, archive, then the `retired` event, so consumers get
 410; the issue's stage stays as it is) and exits 1 when buffer-api refuses. **A new go after a `needs-human` round retires that round's buffer** before planning (refs released,
 `retired` event, a comment), so an issue has one live buffer; the page lists an issue's newest round first and
@@ -441,8 +442,9 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
 `mia-buffers schedule apply`.
 
 1. **The issue.** Its body holds the spec in exactly one ```` ```yaml ```` fence; the title is free. A human adds
-   `buffer:go`. The poller (every `temporal.poll_minutes`) turns the label into a signal and removes it; only a
-   person with write access counts.
+   `buffer:go` (plan, stage, then ask once at `buffer:staged`) or `buffer:plan` (ask after the plan as well). The
+   poller (every `temporal.poll_minutes`) turns the label into a signal and removes it; only a person with write
+   access counts.
 2. **Planning.** The worker pins the round (`state_dir/rounds/<round>/`: `spec.yaml`, `pins.json`), archives the
    catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan (one row per record selection
    admitted, the rest as a count per rule under `excluded`); `plan.md` and `plan.json` land
@@ -452,8 +454,10 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    row's voxel size travels to its stage job (1 nm for the plane axis a 2D stack keeps). The plan is posted (pool table,
    cut at 60k characters) and the issue moves to `buffer:plan-review`; an invalid plan, or no `tensorizers/<name>`
    in the harness checkout, goes to `buffer:needs-human`.
-3. **Approval.** `buffer:approve` newer than the plan comment starts sourcing; an older one is refused with a
-   comment, and a new `buffer:go` (after editing the spec) plans again.
+3. **Approval of the plan** (`buffer:plan` rounds). `buffer:approve` newer than the plan comment starts sourcing;
+   an older one is refused with a comment, and a new `buffer:go` or `buffer:plan` (after editing the spec) plans
+   again. A `buffer:go` round skips this gate: sourcing starts as soon as the plan is posted, and an approve given
+   while jobs run is refused naming the two gates.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<issue>-e<event>`). Per dataset, in
    parallel (`sourcing.parallel` stage jobs at a time): the binding is read from
    `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data published for
@@ -470,10 +474,20 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    moves them into the cache under the harness's key and lists them in `raw_root/<record>/files.json`, which the
    harness reads instead of a HEAD request. A dataset with no binding under `storage_root` is handed to mia-data
    (next section). Each dataset ends `servable`, `failed` or `dropped`, with a comment.
-5. **Ready.** When every weighting group's servable share reaches the spec's `ready.min_fraction` (default 1.0),
-   the issue moves to `buffer:ready` with the buffer id and the `BufferDataset` cell to paste; the remaining
-   datasets keep sourcing and join as they finish. If the threshold is not met after
-   `sourcing.dataset_timeout_days` (default 14) the issue goes `buffer:needs-human` naming the groups below it.
+5. **Staged, then ready** (spec §15). Sourcing runs until no dataset has a job left: every one servable, failed,
+   dropped, or waiting on a drop, quota or lock. With something servable the issue moves to `buffer:staged` with
+   the board in the comment: each dataset's outcome (a failure with its `stage.json` error), each weighting group
+   against `ready.min_fraction`, volumes per split, bytes, who is waiting. `buffer:approve` newer than that comment
+   serves the buffer as it is: each group's servable fraction becomes its floor (`accepted` in the state, what a
+   later degraded rebuild is judged against), the `approved` and `ready` events are written, the issue moves to
+   `buffer:ready` with the `BufferDataset` cell, and a short group is named there. No job runs between the approve
+   and `ready`. buffer-api answers consumers `409 buffer not approved` until the `ready` event. A waiting dataset
+   keeps its place and joins when it lands (a fresh board comment follows); the day limit
+   (`sourcing.dataset_timeout_days`, default 14) drops waiters only until the approve. `plan.auto_approve` skips
+   the gate when every group meets the fraction, and the plan gate of a `buffer:go` round; a `buffer:plan` round
+   always waits at its plan. A `buffer:go` at the gate starts a new round and retires the staged buffer; the keeper
+   retires a staged buffer nobody approves for `retire_after_days`. Nothing servable once the day limit has
+   dropped the waiters is `buffer:needs-human`.
 
 Not in milestones 3 and 4: no tensorizer develop path; `idle` and `retired` are labels only (milestone 5).
 
