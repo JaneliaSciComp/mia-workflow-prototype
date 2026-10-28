@@ -87,16 +87,19 @@ def _artifact_fields(report: Any) -> dict:
 
 def scan_assets(
     raw_root: Path | None, staged_root: Path | None, known: dict[AssetKey, dict]
-) -> tuple[dict[AssetKey, dict], list[Path], list[str]]:
+) -> tuple[dict[AssetKey, dict], list[Path], list[str], list[Path]]:
     """(kind, key) → row for every raw cache `raw_root/<record>` and staged artifact
     `staged_root/<levels key>/<record>/<artifact>/stage.json` (a pre-artifact `<record>/stage.json` is logged and skipped,
     its sibling artifacts still scanned); the `.building-*` directories found (staged builds
-    and the evictions' asides in both roots); and the kinds
-    whose root is unset, missing or empty, so a sync never marks a whole unmounted root missing."""
+    and the evictions' asides in both roots); the kinds
+    whose root is unset, missing or empty, so a sync never marks a whole unmounted root missing; and the raw
+    directories with nothing in them (no bytes, no files.json entry): a job creates a record's cache directory
+    before it runs, so one that never received a file is not an asset (the keeper removes the old ones)."""
     now = time.time()
     found: dict[AssetKey, dict] = {}
     building: list[Path] = []
     skipped: list[str] = []
+    empty: list[Path] = []
     raw_dirs = _children(raw_root)
     if raw_dirs is None:
         skipped.append("raw")
@@ -105,7 +108,11 @@ def scan_assets(
     for folder in raw_dirs or []:
         if folder.is_dir():
             row = {"path": str(folder), "bytes": _bytes(folder, known.get(("raw", folder.name)))}
-            found[("raw", folder.name)] = {**row, "files": file_entries(read_files_json(folder)), "scanned_at": now}
+            files = file_entries(read_files_json(folder))
+            if not row["bytes"] and not files:
+                empty.append(folder)
+                continue
+            found[("raw", folder.name)] = {**row, "files": files, "scanned_at": now}
     levels_dirs = _children(staged_root)
     if levels_dirs is None:
         skipped.append("staged")
@@ -128,4 +135,4 @@ def scan_assets(
                     **_artifact_fields(report),
                     "scanned_at": now,
                 }
-    return found, building, skipped
+    return found, building, skipped, empty

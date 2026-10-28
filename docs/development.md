@@ -215,7 +215,8 @@ without `last_used` gets its first scan's time. `raw_status` and a reusable stag
 
 1. datasets sync and assets sync (each with a 10-minute timeout);
 2. stale builds: a `fetching` or `staging` row whose csub job is gone becomes `partial` or `missing`;
-3. `.building-*` directories older than `quota.hold_hours` are removed;
+3. `.building-*` directories older than `quota.hold_hours` are removed, and so are empty raw directories (a job's
+   mount point that never received a file; the scan does not register one, and drops the row of one it had);
 4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes` (for raw, minus the largest
    `wanted` of a fetch blocked within `hold_hours` when that is more than the headroom), oldest `last_used` first, free
    assets only: no refs, `ready`, unused for `hold_hours`, and for raw no mia-data round in progress on the record and

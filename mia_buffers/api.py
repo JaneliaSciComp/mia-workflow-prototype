@@ -361,10 +361,11 @@ class BufferService:
             started = time.time()
             known = {("raw", row["key"]): row["data"] for row in self.ledger.assets("raw") if row["data"]}
             known |= {("staged", row["key"]): row["data"] for row in self.ledger.assets("staged") if row["data"]}
-            found, building, skipped = scan_assets(self.raw_root, self.staged_root, known)
+            found, building, skipped, empty = scan_assets(self.raw_root, self.staged_root, known)
             kinds = tuple(kind for kind in ("raw", "staged") if kind not in skipped)
             counts = self.ledger.sync_assets(found, older_than=started, kinds=kinds)
-            return 200, {**counts, "building": [str(path) for path in building], "skipped": skipped}, {}
+            paths = {"building": [str(path) for path in building], "empty": [str(path) for path in empty]}
+            return 200, {**counts, **paths, "skipped": skipped}, {}
         finally:
             self._sync_lock.release()
 

@@ -504,7 +504,8 @@ class Ledger:
         kinds: tuple[str, ...] = ("raw", "staged"),
     ) -> dict:
         """Merge what a scan found (a new, stateless, missing or evicted row becomes ready; other states are kept),
-        mark `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted, then
+        mark `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted (a raw
+        row with nothing cached, no bytes and no files, is dropped instead: the scan skips its empty directory), then
         merge each staged row's `last_used` from the draws (a new row, or a known one without it, starts with its
         `scanned_at`; later scans leave it). With `older_than`, a row written since (by a worker,
         during the scan) is neither merged nor marked: the scan may predate that write."""
@@ -526,18 +527,23 @@ class Ledger:
                     fields = {"last_used": fields["scanned_at"], **fields}
                 becomes_ready = known is None or known[0].get("state") in (None, "missing", "evicted")
                 self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)
-            missing = 0
+            missing = dropped = 0
             for (kind, key), (data, updated) in rows.items():
                 if kind not in kinds or (kind, key) in found or (older_than is not None and updated >= older_than):
                     continue
-                if data.get("state") not in ("fetching", "staging", "waiting-drop", "evicted", "missing"):
-                    self._merge_asset(db, kind, key, {"state": "missing"}, now)
-                    missing += 1
+                if data.get("state") in ("fetching", "staging", "waiting-drop", "evicted", "missing"):
+                    continue
+                if kind == "raw" and not data.get("bytes") and not data.get("files"):
+                    db.execute("DELETE FROM assets WHERE kind = ? AND key = ?", (kind, key))
+                    dropped += 1
+                    continue
+                self._merge_asset(db, kind, key, {"state": "missing"}, now)
+                missing += 1
             for artifact, ts in last_used.items():
                 row = db.execute("SELECT data FROM assets WHERE kind = 'staged' AND key = ?", (artifact,)).fetchone()
                 if row and ts > (json.loads(row[0]).get("last_used") or 0):
                     self._merge_asset(db, "staged", artifact, {"last_used": ts}, now)
-        return {"scanned": len(found), "new": new, "missing": missing}
+        return {"scanned": len(found), "new": new, "missing": missing, "dropped": dropped}
 
     def add_consumer(self, buffer: str, info: dict) -> str:
         consumer_id = uuid.uuid4().hex

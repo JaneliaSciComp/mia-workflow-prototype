@@ -1188,7 +1188,7 @@ class Activities:
         """One pass of the cache keeper (rules in keeper.py), each step best effort, a failure an `errors` entry:
         sync datasets and assets; signal the workflows of ready and idle buffers (degraded, idle, retire); the catalog
         when `keeper.catalog_sync_hours` have passed; rows building under an
-        ended job reset; `.building-*` directories older than `quota.hold_hours` removed; free assets evicted per
+        ended job reset; `.building-*` directories and empty raw directories older than `quota.hold_hours` removed; free assets evicted per
         kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
         the resets, removals and evictions are only reported. The catalog sync runs last, so a slow one never
         holds up an eviction; a background task heartbeats through any single long step."""
@@ -1223,6 +1223,8 @@ class Activities:
             await step("stale builds", self._keeper_stale(report, dry_run))
             for path in synced.get("building") or []:
                 await step("building", self._keeper_building(report, Path(path), roots, hold_s, now, dry_run))
+            for path in synced.get("empty") or []:
+                await step("empty", self._keeper_empty(report, Path(path), roots, hold_s, now, dry_run))
             for kind in ("staged", "raw"):
                 await step(f"evict {kind}", self._keeper_evict(report, kind, roots, hold_s, now, dry_run))
             await step("catalog sync", self._keeper_catalog(report, now))
@@ -1346,6 +1348,26 @@ class Activities:
                 raise RuntimeError(f"could not remove {path}")
             log.info("keeper: removed %s, untouched for %.0f h", path, (now - modified) / 3600)
         report.removed_building.append(str(path))
+
+    async def _keeper_empty(
+        self, report: KeeperReport, path: Path, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool
+    ) -> None:
+        """Remove an empty raw directory (a job's mount point that never received a file) once it is older than
+        `hold_hours`; a young one may be a job about to start. rmdir refuses a directory that filled meanwhile."""
+        try:
+            modified = path.stat().st_mtime
+        except FileNotFoundError:
+            return
+        if modified + hold_s >= now or not any(path.resolve().is_relative_to(root.resolve()) for root in roots):
+            return
+        if not dry_run:
+            try:
+                await asyncio.to_thread(os.rmdir, path)
+            except OSError as error:  # filled since the scan, or gone
+                log.info("keeper: %s not removed: %s", path, error)
+                return
+            log.info("keeper: removed empty %s, untouched for %.0f h", path, (now - modified) / 3600)
+        report.removed_empty.append(str(path))
 
     async def _keeper_evict(
         self, report: KeeperReport, kind: str, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool

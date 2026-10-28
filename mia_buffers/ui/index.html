@@ -1078,9 +1078,11 @@ const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w
 // catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
 const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
 const pill = (text, kind) => el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
-const GOOD = new Set(["prepared","ready","servable","pool"]);
+const GOOD = new Set(["prepared","ready","servable","pool","cached"]);
 const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale"]);
 const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
+// an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
+const assetPill = s => statePill(s === "ready" ? "cached" : s);
 
 // ---- times: the ledger stores epoch seconds; keep ISO strings working too
 function toEpoch(t) { if (t == null || t === "") return null; if (typeof t === "number") return t; const ms = Date.parse(t); return isNaN(ms) ? null : ms / 1000; }
@@ -1312,7 +1314,7 @@ const COLS = [
   { key: "mod", label: "modality", get: x => x.modality_group || "" },
   { key: "lic", label: "licence", get: x => x.lic },
   { key: "prep", label: "preparation", get: x => x.prepared || "", cell: x => el("td", {}, statePill(x.prepared), x.ds?.issue ? " " : null, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : null) },
-  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data ? statePill(x.raw.data.state) : "", x.raw?.data?.bytes ? " " + fmtBytes(x.raw.data.bytes) : "") },
+  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data ? assetPill(x.raw.data.state) : "", x.raw?.data?.bytes ? " " + fmtBytes(x.raw.data.bytes) : "") },
   { key: "staged", label: "staged", get: x => x.staged.map(a => a.data?.levels_key || "").join(" "), cell: x => el("td", { class: "mono" }, x.staged.filter(stagedUsable).map(a => a.data?.levels_key || "?").join(" ")) },
   { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
   { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
@@ -1607,19 +1609,19 @@ async function viewCache() {
       card("The keeper's last pass", S.meta.keeper?.minutes ? `Runs every ${num(S.meta.keeper.minutes)} min; syncs the catalog every ${num(S.meta.keeper.catalog_sync_hours)} h.` : null,
         k ? kv([
           ["at", el("span", {}, when(k.at), k.dry_run ? " (dry run)" : "")], ["scanned / missing / new", `${num(k.scanned)} / ${num(k.missing)} / ${num(k.new)}`],
-          ["evicted", list(k.evicted)], ["reset stale", list(k.stale)], ["removed building", list(k.removed_building)], ["spared (locked)", list(k.locked)],
+          ["evicted", list(k.evicted)], ["reset stale", list(k.stale)], ["removed building", list(k.removed_building)], ["removed empty", list(k.removed_empty)], ["spared (locked)", list(k.locked)],
           ["over quota", Object.keys(k.over_quota || {}).length ? Object.entries(k.over_quota).map(([kind, b]) => `${kind} ${fmtBytes(b)}`).join(" · ") : "none"],
           ["signalled", list(k.signalled)], ["catalog", k.catalog || "not due"], ["errors", list(k.errors)],
         ]) : el("div", { class: "empty" }, "The keeper has not reported a pass yet."))),
     card("Raw cache", "One row per dataset's download; \"open\" browses its directory when the raw root has a URL.", table([
-      { label: "dataset", cell: a => a.key }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => statePill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
+      { label: "dataset", cell: a => a.key }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => assetPill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
       { label: "last used", cell: a => when(a.data?.last_used) }, { label: "buffers", num: true, cell: a => num((a.refs || []).length) },
       { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" }, { label: "streams", num: true, cell: a => Array.isArray(a.data?.stream) ? num(a.data.stream.length) : "" },
     ], S.rawAssets, "Nothing in the raw cache yet.")),
     card("Staged pyramids", "One row per staged artifact.", table([
       { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.key) }, { label: "dataset", cell: a => a.data?.record || "" },
       { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
-      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => statePill(a.data?.state) },
+      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => assetPill(a.data?.state) },
       { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },
       { label: "buffers", cell: a => { const s = el("span"); (a.refs || []).forEach((b, i) => s.append(i ? " " : "", bufferLink(b))); return s; } },
       { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" },

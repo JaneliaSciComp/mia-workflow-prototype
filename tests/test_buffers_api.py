@@ -473,7 +473,15 @@ def test_sync_assets_skips_a_missing_or_empty_root(tmp_path):
     led.put_asset("raw", "gone", {"state": "ready", "bytes": 5})
     s = BufferService(led, raw_root=raw, staged_root=tmp_path / "unmounted")
     status, out, _ = call(s, "POST", "/sync/assets")
-    assert status == 200 and out == {"scanned": 1, "new": 1, "missing": 1, "building": [], "skipped": ["staged"]}
+    assert status == 200 and out == {
+        "scanned": 1,
+        "new": 1,
+        "missing": 1,
+        "dropped": 0,
+        "building": [],
+        "empty": [],
+        "skipped": ["staged"],
+    }
     assert led.asset("staged", "art")["state"] == "ready" and led.asset("raw", "gone")["state"] == "missing"
     assert led.asset("raw", "rec")["state"] == "ready" and led.asset("raw", "rec")["bytes"] == 8
     assert BufferService(led).handle("POST", "/sync/assets", {}, b"")[0] == 503

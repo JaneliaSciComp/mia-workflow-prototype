@@ -63,7 +63,7 @@ def test_scan_assets_finds_raw_and_artifact_dirs_and_reuses_sizes(tmp_path, capl
     # a record that was staged before artifact ids and again after: the old stage is skipped, the artifact found
     (staged / "p256-l1-2" / "rec" / "stage.json").write_text("{}")
     with caplog.at_level(logging.INFO):
-        found, building, skipped = scan_assets(raw, staged, known={})
+        found, building, skipped, _ = scan_assets(raw, staged, known={})
     assert "pre-artifact" in caplog.text
     assert set(found) == {("raw", "rec"), ("staged", "0123456789abcdef")}
     raw_row = found[("raw", "rec")]
@@ -107,7 +107,19 @@ def test_scan_assets_reduces_an_odd_stage_json(tmp_path):
         json.dumps({"artifact": {"binding_hash": ["x"], "harness_commit": "h", "voxel_size_nm": {"y": "big"}}})
     )
     (art.parent / ".building-art-job.log").write_text("a file, not a building directory")
-    found, building, _ = scan_assets(tmp_path / "raw", tmp_path / "staged", {})
+    found, building, _, _ = scan_assets(tmp_path / "raw", tmp_path / "staged", {})
     row = found[("staged", "art")]
     assert row["harness_commit"] == "h" and building == []
     assert not {"binding_hash", "env_digest", "voxel_size_nm"} & row.keys()  # absent or ill-typed: not emitted
+
+
+def test_scan_assets_reports_an_empty_raw_directory_instead_of_registering_it(tmp_path):
+    """A job creates the record's cache directory before it runs (a mount must exist); one that never received a
+    file is not a raw asset. A directory with a pending drop (bytes under incoming/) or a files.json entry is."""
+    raw = tmp_path / "raw"
+    (raw / "phantom").mkdir(parents=True)
+    (raw / "dropping" / "incoming").mkdir(parents=True)
+    (raw / "dropping" / "incoming" / "a.tif").write_bytes(b"x")
+    found, _, _, empty = scan_assets(raw, None, known={})
+    assert set(found) == {("raw", "dropping")}
+    assert empty == [raw / "phantom"]

@@ -155,7 +155,7 @@ def test_sync_assets_marks_missing_but_keeps_building_rows(tmp_path):
     by_key = {a["key"]: a["data"] for a in ledger.assets("staged")}
     assert by_key["gone"]["state"] == "missing" and by_key["building"]["state"] == "staging"
     assert by_key["back"]["state"] == "ready" and by_key["new"]["state"] == "ready" and by_key["new"]["record"] == "rec"
-    assert counts == {"scanned": 2, "new": 1, "missing": 1}
+    assert counts == {"scanned": 2, "new": 1, "missing": 1, "dropped": 0}
     assert by_key["new"]["last_used"] == 9.0  # first seen: used then
     assert by_key["back"]["last_used"] == 9.0  # known, but without last_used (from before it): as first seen
     ledger.sync_assets({("staged", "new"): {"bytes": 4, "scanned_at": 99.0}}, older_than=time.time() + 1, kinds=())
@@ -173,7 +173,7 @@ def test_sync_assets_readies_stateless_and_evicted_rows_and_skips_rows_written_d
     ledger.put_asset("staged", "evicted", {"state": "evicted", "bytes": 0})
     started = time.time() + 1
     found = {("staged", key): {"bytes": 7, "scanned_at": 9.0} for key in ("old", "evicted")}
-    assert ledger.sync_assets(found, older_than=started) == {"scanned": 2, "new": 0, "missing": 0}
+    assert ledger.sync_assets(found, older_than=started) == {"scanned": 2, "new": 0, "missing": 0, "dropped": 0}
     assert ledger.asset("staged", "old") == {
         "binding_hash": "b",
         "bytes": 7,
@@ -342,3 +342,17 @@ def test_kv(tmp_path):
     led.put_kv("keeper", {"a": 1})
     led.put_kv("keeper", {"b": 2})
     assert led.kv("keeper") == {"b": 2}
+
+
+def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(tmp_path):
+    """The scan skips an empty raw directory; its row (registered by an earlier scan) goes rather than turning
+    `missing`. A row with content is still marked missing, and a fetch in progress is untouched."""
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("raw", "phantom", {"state": "ready", "bytes": 0, "files": {}})
+    ledger.put_asset("raw", "wiped", {"state": "ready", "bytes": 12, "files": {}})
+    ledger.put_asset("raw", "fetching", {"state": "fetching", "bytes": 0, "files": {}, "job": "1"})
+    counts = ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))
+    by_key = {a["key"]: a["data"] for a in ledger.assets("raw")}
+    assert "phantom" not in by_key
+    assert by_key["wiped"]["state"] == "missing" and by_key["fetching"]["state"] == "fetching"
+    assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}

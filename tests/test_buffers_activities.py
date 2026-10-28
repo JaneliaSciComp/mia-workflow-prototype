@@ -1067,11 +1067,19 @@ async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keep
     stamp = time.time() - 49 * 3600
     os.utime(old, (stamp, stamp))
 
+    empty_old, empty_young = acts.cfg.paths.raw_root / "phantom", acts.cfg.paths.raw_root / "fresh"
+    empty_old.mkdir(parents=True)
+    empty_young.mkdir()
+    os.utime(empty_old, (stamp, stamp))
+
     dry = await acts.keep(dry_run=True)
     assert dry.stale == ["raw r partial", "staged s missing"] and dry.removed_building == [str(old)]
+    assert dry.removed_empty == [str(empty_old)] and empty_old.is_dir()
     assert old.is_dir() and registry.asset("raw", "r")["state"] == "fetching"
     report = await acts.keep()
     assert report.errors == [] and report.stale == dry.stale and report.removed_building == [str(old)]
+    assert report.removed_empty == [str(empty_old)] and not empty_old.exists() and empty_young.is_dir()
+    assert registry.asset("raw", "phantom") is None  # never registered
     assert not old.exists() and young.is_dir()
     assert registry.asset("raw", "r") == {"state": "partial", "job": None}
     assert registry.asset("staged", "s") == {"state": "missing", "job": None}
