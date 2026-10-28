@@ -1086,8 +1086,8 @@ in `needs-human` this way, each after an approve.
 
 1. *Waiting datasets stay live through the gate.* The gate means "no job is running", not "nothing will run". A
    `waiting-drop`, `blocked` or `waiting-lock` dataset keeps its task; if its turn comes while the round waits,
-   its job runs and the board changes, and the staged comment is updated once (same marker) when the dataset
-   lands. The board at the gate names them as waiting, so what the approve is sure of is what it says is
+   its job runs and the board changes, and a fresh staged comment (the board again) follows when the dataset
+   lands, one per landing. The board at the gate names them as waiting, so what the approve is sure of is what it says is
    servable; the rest are stragglers either way. The go rules follow from it: a go at `staged` while such a job
    runs is `BUSY` (the `_await_stragglers` rule), otherwise it starts the new round. The poller delivers `dropped`
    at `staged` as at `sourcing`. No rollover while tasks live, as in sourcing today.
