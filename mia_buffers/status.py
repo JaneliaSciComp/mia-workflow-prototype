@@ -93,10 +93,19 @@ def render_staged(
     """The staged gate's comment (spec §15): every dataset's outcome (`(record, status, reason)`, a failure with its
     error), each weighting group's servable/total against `min_fraction` with the short ones marked, volumes per
     split, bytes on disk, the datasets still waiting, and what to do next."""
-    rows = "\n".join(
-        f"| `{safe_text(record)}` | {safe_text(status)} | {safe_text(reason)} |" for record, status, reason in datasets
-    )
     served = sum(1 for _, status, _ in datasets if status == "servable")
+    lines, budget = [], COMMENT_LIMIT - 2_000  # room for the head, the groups, the summary and the call to action
+    for record, status, reason in datasets:
+        cut = reason if len(reason) <= 300 else reason[:300] + "…"
+        line = f"| `{safe_text(record)}` | {safe_text(status)} | {safe_text(cut)} |"
+        if budget - len(line) - 1 < 0:
+            lines.append(
+                f"\n(truncated: {len(lines)} of {len(datasets)} datasets shown; the board on the web UI has them all)"
+            )
+            break
+        lines.append(line)
+        budget -= len(line) + 1
+    rows = "\n".join(lines)
     marks = ", ".join(
         f"`{safe_text(group)}` {servable}/{total}" + (" **below**" if servable / total < min_fraction else "")
         for group, (servable, total) in sorted(groups.items())

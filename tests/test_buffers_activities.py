@@ -252,6 +252,17 @@ def test_render_staged_lists_outcomes_groups_and_the_call_to_action():
     assert "Waiting: `bcss`" in text and CALL_TO_ACTION in text
 
 
+def test_render_staged_is_cut_at_the_comment_limit():
+    """Review fix: thousands of datasets with long errors must still fit a GitHub comment; a long reason is cut."""
+    from mia_buffers.status import COMMENT_LIMIT
+
+    datasets = [(f"rec-{i}", "failed", "e" * 2000) for i in range(3000)]
+    groups = {"TEM": (0, 3000)}
+    text = render_staged(datasets, groups, 1.0, StagedSummary())
+    assert len(text) <= COMMENT_LIMIT and "truncated" in text and CALL_TO_ACTION in text
+    assert "e" * 400 not in text  # the reason itself is cut
+
+
 def test_render_ready_names_short_groups():
     plain = render_ready("i7-e11", "http://svc:8765", ["a"])
     assert "below ready.min_fraction" not in plain

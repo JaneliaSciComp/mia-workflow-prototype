@@ -885,6 +885,45 @@ async def test_auto_approve_short_set_waits_at_staged(env):
     assert m.stages == ["planning", "sourcing", "staged"] and not m.of("buffer_event")
 
 
+async def test_auto_approve_fires_when_a_late_dataset_completes_the_set(env):
+    """Review fix: the gate opens with a dataset still waiting for its drop (short set, no auto-approve); when the
+    drop lands and every group meets the fraction, auto_approve approves without a label."""
+    m = Mocks(plan=replace(PLAN, auto_approve=True))
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await asyncio.sleep(0.3)
+        assert m.stages == ["planning", "sourcing", "staged"] and not m.of("buffer_event")
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("buffer_event") == [("i7-e11", "approved", "")] and state.accepted == {
+        "confocal": 1.0,
+        "histology-WSI": 1.0,
+    }
+
+
+async def test_go_at_the_gate_spares_a_dataset_still_releasing_its_lock(env):
+    """Review fix: the gate opens as soon as every dataset is settled or waiting, even while a servable one is still
+    releasing its lock; a go then abandons only the waiting ones, the servable dataset keeps its status."""
+    release = asyncio.Event()
+    m = Mocks(release_gates={"u937": release})  # PLAN: u937 servable (its release blocked), bcss waiting for a drop
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await asyncio.sleep(0.5)
+        assert m.stages.count("planning") == 1  # the new round waits for u937's release to finish
+        release.set()
+        await until(lambda: m.stages.count("staged") == 2, m=m)
+        state = await h.query(MiaBuffer.status)
+    first = (
+        next(c for c in m.of("mark_dataset") if c[1] == "u937" and c[2] == "failed")
+        if any(c[1] == "u937" and c[2] == "failed" for c in m.of("mark_dataset"))
+        else None
+    )
+    assert first is None, first  # u937 was never marked failed
+    assert state.round_id == "i7-e15" and m.of("retire_buffer") == [("i7-e11",)]
+
+
 async def test_approve_while_sourcing_is_refused_and_not_reused(env):
     """Review focus 1: an approve given while a go round still has a job running is refused naming the gates, and
     the staged gate waits for a new one."""

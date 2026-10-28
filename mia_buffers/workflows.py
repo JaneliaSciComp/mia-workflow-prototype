@@ -640,8 +640,14 @@ class MiaBuffer:
             )
             await self._day_limit(tasks, deadline)
             moved, self.gate_mark = self.progress != self.gate_mark, self.progress  # always taken, or the wait spins
-            if moved and self._quiet(tasks):  # a straggler landed (or was dropped): the board again
-                await self._comment(await self._staged_board(), f"staged {state.round_id} {self.progress}")
+            if moved and self._quiet(tasks):  # a straggler landed (or was dropped): the board again, best effort
+                try:
+                    await self._comment(await self._staged_board(), f"staged {state.round_id} {self.progress}")
+                except ActivityError as error:
+                    workflow.logger.warning("issue #%d: staged board: %s", state.issue, error_message(error))
+                if state.auto_approve and self._ready_now():  # the late dataset completed the set
+                    await self._approve_at_gate(limits)
+                    return True
             while self.approve_events:
                 event = self.approve_events.pop(0)
                 if self._seen(event):
@@ -655,19 +661,13 @@ class MiaBuffer:
                 if not self._quiet(tasks):  # a straggler's job runs: a new round would write the same directories
                     await self._refuse_queued(approves=False)
                 else:
-                    for task, dataset in self._pairs(tasks):
-                        if not task.done():
-                            task.cancel()
-                            self._set(dataset, "failed", ABANDONED)
+                    await self._abandon_waiting(tasks, ABANDONED)
                     return False
             if any(kind == "retire" and buffer == state.buffer_id for kind, _, buffer in self.lifecycle):
                 self.lifecycle = [
                     item for item in self.lifecycle if not (item[0] == "retire" and item[2] == state.buffer_id)
                 ]
-                for task, dataset in self._pairs(tasks):
-                    if not task.done():
-                        task.cancel()
-                        self._set(dataset, "failed", RETIRED_WHILE)
+                await self._abandon_waiting(tasks, RETIRED_WHILE)
                 retired = await self._act(
                     "retire_buffer", state.round_id, state.buffer_id, seconds=900, result_type=dict
                 )
@@ -675,6 +675,16 @@ class MiaBuffer:
                 await self._stage("retired", RETIRED.format(path=retired.get("archive") or "none"))
                 return False
             await self._refuse_lifecycle(NOT_READY_YET)
+
+    async def _abandon_waiting(self, tasks: list[asyncio.Task], reason: str) -> None:
+        """Leaving the gate: the datasets still waiting on a drop, quota or lock are cancelled and marked with
+        `reason`; a settled one whose task is still posting its comment or releasing its lock finishes first."""
+        pairs = self._pairs(tasks)
+        for task, dataset in pairs:
+            if not task.done() and dataset.status in GATE_WAITING:
+                task.cancel()
+                self._set(dataset, "failed", reason)
+        await asyncio.gather(*[task for task, dataset in pairs if not task.done()], return_exceptions=True)
 
     async def _approve_at_gate(self, limits: SourcingLimits) -> None:
         """The human (or auto_approve) says serve this: each group's fraction becomes its floor, the `approved`
