@@ -31,11 +31,12 @@ from mia_buffers.models import (
     PrepState,
     QuotaCheck,
     RawStatus,
+    StagedSummary,
     job_key,
 )
 from mia_buffers.plan import load_records, plan_hash
 from mia_buffers.spec import load_spec
-from mia_buffers.status import render_plan_comment
+from mia_buffers.status import render_plan_comment, render_ready, render_staged
 from mia_core.registry import Registry, RegistryError
 from mia_data.catalog import dataset_folder
 from mia_data.models import LockTaken
@@ -226,6 +227,50 @@ async def test_comment_plan_posts_once(acts):
         and U937 in bodies[0]
         and "<!-- mia-buffers: plan i7-e11 -->" in bodies[0]
     )
+
+
+CALL_TO_ACTION = "approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again"
+
+
+def test_render_staged_lists_outcomes_groups_and_the_call_to_action():
+    """The staged gate's comment (spec §15): every dataset's outcome with a failure's error, each weighting group
+    against ready.min_fraction with the short ones marked, volumes per split, bytes, who is waiting, what to do."""
+    datasets = [
+        ("zenodo-1-confocal", "servable", ""),
+        ("zenodo-2-ecoli", "failed", "stage job 1 exited with code 1: host 'zenodo.org' is not allowed <!-- x -->"),
+        ("bcss", "waiting-drop", ""),
+    ]
+    groups = {"brightfield": (0, 1), "confocal": (1, 1), "histology-WSI": (0, 1)}
+    summary = StagedSummary(servable={"train": 2, "val": 1, "test": 0}, bytes=2_000_000, waiting=["bcss"])
+    text = render_staged(datasets, groups, 1.0, summary)
+    assert "`zenodo-2-ecoli` | failed | stage job 1 exited with code 1: host 'zenodo.org' is not allowed" in text
+    assert "<!--" not in text and "`zenodo-1-confocal` | servable" in text
+    assert (
+        "`brightfield` 0/1 **below**" in text and "`confocal` 1/1," in text and "`confocal` 1/1 **below**" not in text
+    )
+    assert "ready.min_fraction 1" in text and "train 2, val 1, test 0" in text and "2.0 MB" in text
+    assert "Waiting: `bcss`" in text and CALL_TO_ACTION in text
+
+
+def test_render_ready_names_short_groups():
+    plain = render_ready("i7-e11", "http://svc:8765", ["a"])
+    assert "below ready.min_fraction" not in plain
+    short = render_ready("i7-e11", "http://svc:8765", ["a"], short=["brightfield 0/1"], min_fraction=1.0)
+    assert "below ready.min_fraction 1: brightfield 0/1, approved" in short and "BufferDataset(" in short
+
+
+async def test_staged_summary_reads_servable_and_bytes(acts, server):
+    """What the staged comment needs from buffer-api: servable volumes per split from the buffer's row, bytes of the
+    staged assets the buffer references (another buffer's are not counted)."""
+    from test_buffers_api import CFG, body
+
+    registry = acts.registry
+    registry.request("PUT", "/buffers/i7-e11", json=CFG)
+    registry.request("PUT", "/buffers/i7-e11/volumes/a", json=body("a"))  # path /staged/a/v0.zarr
+    registry.request("PUT", "/assets/staged/%2Fstaged%2Fa", json={"record": "rec", "bytes": 1234})
+    registry.request("PUT", "/assets/staged/%2Fstaged%2Fz", json={"record": "other", "bytes": 999})
+    assert await acts.staged_summary("i7-e11") == StagedSummary(servable={"train": 1, "val": 1}, bytes=1234)
+    assert await acts.staged_summary("nobody") == StagedSummary()
 
 
 def test_render_plan_comment_truncates():

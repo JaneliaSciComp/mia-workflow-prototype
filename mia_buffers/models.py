@@ -266,6 +266,17 @@ class BufferState:
 
 
 @dataclass
+class StagedSummary:
+    """What the staged gate's comment takes from buffer-api: servable volumes per split, bytes of the staged assets
+    the buffer references; `waiting` is filled by the workflow (the datasets still waiting on a drop, quota or
+    lock)."""
+
+    servable: dict[str, int] = field(default_factory=dict)
+    bytes: int = 0
+    waiting: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PrepPins:
     """What a preparation request is pinned to at admission: its round, the catalog commit, the records it asks
     for (named, or admitted by its `select` there) and how long it may take."""

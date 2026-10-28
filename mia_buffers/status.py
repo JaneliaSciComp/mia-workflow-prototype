@@ -1,7 +1,10 @@
-"""Rendering mia-buffers' issue comments: the plan, a manual-drop request, the ready notice."""
+"""Rendering mia-buffers' issue comments: the plan, a manual-drop request, the staged board, the ready notice."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+from mia_buffers.models import StagedSummary
 from mia_data.status import render_links, safe_text
 
 COMMENT_LIMIT = 60_000  # GitHub allows 65,536 characters; leave room for the marker and links
@@ -81,11 +84,46 @@ def render_drop_comment(
     return "\n".join(lines) + render_links({"Incoming": incoming_link})
 
 
-def render_ready(buffer_id: str, service_url: str, servable: list[str]) -> str:
-    """The ready notice: the buffer id, the service and the dataset cell from docs/development.md."""
-    datasets = "\n".join(f"- `{safe_text(record)}`" for record in servable)
+def render_staged(
+    datasets: list[tuple[str, str, str]],
+    groups: dict[str, tuple[int, int]],
+    min_fraction: float,
+    summary: StagedSummary,
+) -> str:
+    """The staged gate's comment (spec §15): every dataset's outcome (`(record, status, reason)`, a failure with its
+    error), each weighting group's servable/total against `min_fraction` with the short ones marked, volumes per
+    split, bytes on disk, the datasets still waiting, and what to do next."""
+    rows = "\n".join(
+        f"| `{safe_text(record)}` | {safe_text(status)} | {safe_text(reason)} |" for record, status, reason in datasets
+    )
+    served = sum(1 for _, status, _ in datasets if status == "servable")
+    marks = ", ".join(
+        f"`{safe_text(group)}` {servable}/{total}" + (" **below**" if servable / total < min_fraction else "")
+        for group, (servable, total) in sorted(groups.items())
+    )
+    splits = ", ".join(f"{safe_text(split)} {count}" for split, count in summary.servable.items())
+    waiting = f"\nWaiting: {', '.join(f'`{safe_text(r)}`' for r in summary.waiting)}." if summary.waiting else ""
     return (
-        f"**Buffer:** `{safe_text(buffer_id)}` at {safe_text(service_url)}\n\nServable now:\n{datasets}\n\n"
+        f"**Staged:** {served} of {len(datasets)} datasets servable.\n\n| dataset | outcome | detail |\n|---|---|---|\n"
+        f"{rows}\n\nWeighting groups against ready.min_fraction {min_fraction:g}: {marks}.\n"
+        f"Volumes servable per split: {splits or 'none'}. On disk: {summary.bytes / 1e6:.1f} MB.{waiting}\n\n"
+        "Next: approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again."
+    )
+
+
+def render_ready(
+    buffer_id: str, service_url: str, servable: list[str], short: Sequence[str] = (), min_fraction: float = 1.0
+) -> str:
+    """The ready notice: the buffer id, the service and the dataset cell from docs/development.md; `short` names
+    the weighting groups (as "group servable/total") the approve accepted below `min_fraction`."""
+    datasets = "\n".join(f"- `{safe_text(record)}`" for record in servable)
+    accepted = (
+        f"below ready.min_fraction {min_fraction:g}: {', '.join(safe_text(g) for g in short)}, approved\n\n"
+        if short
+        else ""
+    )
+    return (
+        f"**Buffer:** `{safe_text(buffer_id)}` at {safe_text(service_url)}\n\nServable now:\n{datasets}\n\n{accepted}"
         "```python\nfrom mia_buffers.client import BufferDataset\n\n"
         f'URL, TENSORIZERS = "{safe_text(service_url)}", "<mia-snippets checkout>"  # or export MIA_BUFFERS_TENSORIZERS\n'
         f'train_ds = BufferDataset(URL, "{safe_text(buffer_id)}", "train", n_samples=4000, tensorizers=TENSORIZERS)\n'

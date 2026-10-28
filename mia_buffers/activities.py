@@ -69,6 +69,7 @@ from .models import (
     RawStatus,
     RegisterResult,
     SourcingLimits,
+    StagedSummary,
     StageJobArgs,
     StageResult,
     job_key,
@@ -198,6 +199,7 @@ class Activities:
             self.create_buffer,
             self.register_dataset,
             self.mark_dataset,
+            self.staged_summary,
             self.buffer_event,
             self.retire_buffer,
             self.raw_ready,
@@ -1127,6 +1129,22 @@ class Activities:
         """The records of the buffer's volumes whose path is gone from disk now (buffer-api stats each one)."""
         missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]
         return sorted({str(volume).split("/", 1)[0] for volume in missing})
+
+    @activity.defn(name="staged_summary")
+    @mia_permanent_errors
+    async def staged_summary(self, buffer_id: str) -> StagedSummary:
+        """What the staged comment needs from buffer-api (spec §15): servable volumes per split from the buffer's
+        row and the bytes of the staged assets it references; an unknown buffer gives the empty summary."""
+        registry = self.registry
+        rows = [row for row in await asyncio.to_thread(registry.buffers) if row.get("id") == buffer_id]
+        servable = {str(k): int(v) for k, v in ((rows[0].get("servable") or {}) if rows else {}).items()}
+        assets = (await asyncio.to_thread(registry.assets, "staged")).get("assets") or []
+        total = 0
+        for asset in assets:
+            size = (asset.get("data") or {}).get("bytes")
+            if buffer_id in (asset.get("refs") or []) and isinstance(size, int) and not isinstance(size, bool):
+                total += size
+        return StagedSummary(servable=servable, bytes=total)
 
     @activity.defn(name="buffer_event")
     @mia_permanent_errors
