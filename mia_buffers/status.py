@@ -94,7 +94,8 @@ def render_staged(
     error), each weighting group's servable/total against `min_fraction` with the short ones marked, volumes per
     split, bytes on disk, the datasets still waiting, and what to do next."""
     served = sum(1 for _, status, _ in datasets if status == "servable")
-    lines, budget = [], COMMENT_LIMIT - 2_000  # room for the head, the groups, the summary and the call to action
+    lines: list[str] = []
+    budget = COMMENT_LIMIT - 2_000  # room for the head, the groups, the summary and the call to action
     for record, status, reason in datasets:
         cut = reason if len(reason) <= 300 else reason[:300] + "…"
         line = f"| `{safe_text(record)}` | {safe_text(status)} | {safe_text(cut)} |"
