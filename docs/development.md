@@ -416,6 +416,9 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
   (the last pass the worker stored with `PUT /keeper`, or "has not reported a pass yet").
 - **Preparation** reads `/datasets`: in-progress and needs-human rows with issue links, plus a GitHub search for
   `prep:` labels (the service cannot list issues).
+- **Docs** is static: the user guide (`#docs`, the loop from spec to training as the person training a model sees
+  it) and the architecture overview (`#docs/architecture`). Both live in `index.html` under `data-view="docs"`;
+  the overview is the same text as the published explainer, and the page is the copy to edit first.
 
 Actions: Download spec YAML (a file), Open buffer issue and Request preparation (prefilled
 `https://github.com/<buffers_repo>/issues/new?title=&body=` links). The links set no label: nothing runs until the
