@@ -420,7 +420,7 @@ human adds `buffer:go` / `prep:go`, and the body says so (a prefilled label once
 request its author thought was still a draft). Open buffer issue is disabled
 while the plan has errors (with them as the reason; "request preparation first" when only unprepared records fit),
 and a record's landing link is shown only for an `http(s)` URL. A link
-over 8 KB falls back to a "copy YAML" button and a notice. With an empty registry the views say so ("No catalog
+over 8 KB falls back to a "copy YAML" button. With an empty registry the views say so ("No catalog
 synced; run `mia-buffers catalog sync`.").
 
 **Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served draws,

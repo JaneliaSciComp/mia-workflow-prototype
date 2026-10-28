@@ -38,7 +38,8 @@ tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
 
 /* top bar: title, the four tabs, the catalog ref, the theme toggle */
-.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid)}
+.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
+  position:sticky;top:0;z-index:5;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding */
 .tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
 .tabs a:hover{color:var(--fg)}
@@ -59,7 +60,8 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
 
 /* filters: one row above everything, wraps on narrow screens */
-.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;margin-bottom:10px;
+  position:sticky;top:var(--topbar-h,0px);z-index:5;box-shadow:0 -14px 0 var(--bg)}  /* stays put under the topbar; the shadow fills the gap between them */
 .filters fieldset{border:0;padding:0;margin:0;min-width:0}
 .filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
 .chips{display:flex;flex-wrap:wrap;gap:4px}
@@ -427,9 +429,9 @@ function issueAction(container, label, repo, title, intro, yaml, disabledReason)
   const status = el("span", { class: "small" });
   container.replaceChildren(
     el("a", { class: "btn", href: `${base}&body=${encodeURIComponent(intro + "\n\n(paste the copied YAML here)")}`, target: "_blank", rel: "noopener" }, label),
-    el("button", { type: "button", class: "btn", onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
-    status,
-    el("div", { class: "notice" }, `The prefilled link would be ${num(url.length)} characters, over GitHub's ~8 KB limit. Copy the YAML, open the issue, paste it into the body.`));
+    el("button", { type: "button", class: "btn", title: "the YAML is too long for a prefilled link: copy it, open the issue, paste it into the body",
+      onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
+    status);
 }
 
 // ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
@@ -831,6 +833,7 @@ function renderTopbar() {
 function setupTheme() {
   const root = document.documentElement;
   try { const saved = localStorage.getItem("mia-theme"); if (saved) root.dataset.theme = saved; } catch { /* storage blocked: follow the system */ }
+  new ResizeObserver(() => root.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px")).observe(document.querySelector(".topbar"));
   $("theme").addEventListener("click", () => {
     const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     root.dataset.theme = dark ? "light" : "dark";
