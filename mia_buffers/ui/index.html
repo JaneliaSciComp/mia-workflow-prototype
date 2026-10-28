@@ -268,9 +268,12 @@ async function api(path, options) {
   if (!res.ok) throw new HttpError(res.status, (data && data.error) || res.statusText);
   return data;
 }
-function banner(message) {
-  const line = el("div", {}, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
-  $("banner").append(line);
+function banner(message) {  // at most 3 lines, a repeat bumps its count instead of adding one, and each fades after 20 s
+  const box = $("banner"), same = [...box.children].find(d => d.dataset.message === message);
+  if (same) { same.count = (same.count || 1) + 1; same.firstChild.textContent = `${message} (×${same.count})`; clearTimeout(same.timer); }
+  const line = same || el("div", { "data-message": message }, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
+  line.timer = setTimeout(() => line.remove(), 20000);
+  if (!same) { box.append(line); while (box.children.length > 3) box.firstChild.remove(); }
 }
 async function load(path, quiet404) {  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
   try { return await api(path); }
