@@ -82,9 +82,12 @@ class PathsCfg(mia_data_config.PathsCfg):
     def _default_raw_root(cls, data):
         if isinstance(data, dict) and not data.get("raw_root") and data.get("work_root"):
             work = data["work_root"]
+            url = work.get("url") if isinstance(work, dict) else data.get("work_root_url")  # before or after _flatten
             work = work.get("path") if isinstance(work, dict) else work
             if isinstance(work, str):
                 data = {**data, "raw_root": str(Path(work) / "_cache")}
+                if url and not data.get("raw_root_url"):  # browsable wherever work_root is
+                    data["raw_root_url"] = str(url).rstrip("/") + "/_cache"
         return data
 
 

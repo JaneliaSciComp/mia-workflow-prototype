@@ -118,6 +118,25 @@ def test_raw_root_defaults_to_mia_data_download_cache(tmp_path):
     assert cfg.paths.raw_root == (tmp_path / "work" / "_cache").resolve() and cfg.paths.raw_root_url is None
 
 
+def test_defaulted_raw_root_takes_its_browse_url_from_work_root(tmp_path):
+    """The page links a raw directory through `raw_root_url`; a raw root defaulted under work_root is browsable
+    wherever work_root is."""
+    cfg = make_cfg(
+        tmp_path,
+        paths={
+            "state_dir": str(tmp_path / "state"),
+            "local_root": str(tmp_path / "local"),
+            "work_root": {"path": str(tmp_path / "work"), "url": "https://b/work/"},
+            "storage_root": str(tmp_path / "storage"),
+            "raw_root": None,
+            "staged_root": str(tmp_path / "s"),
+        },
+    )
+    assert cfg.paths.raw_root == (tmp_path / "work" / "_cache").resolve()
+    assert cfg.paths.raw_root_url == "https://b/work/_cache"
+    assert cfg.paths.link(cfg.paths.raw_root / "rec") == "https://b/work/_cache/rec"
+
+
 def test_load_config_by_service_name(tmp_path, monkeypatch):
     (tmp_path / "harness").mkdir()
     (tmp_path / "mia.yaml").write_text(

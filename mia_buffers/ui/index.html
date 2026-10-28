@@ -254,7 +254,7 @@ tr.click:hover td{background:var(--accent-soft)}
 
   <section class="kpis" id="kpis" aria-label="Summary"></section>
   <section class="grid2">
-    <div class="card"><h2>Where records leave</h2><div class="sub">Rules in the planner's order; a record is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out until mia-data has prepared it.</div><div id="funnel"></div></div>
+    <div class="card"><h2>Where datasets leave</h2><div class="sub">Rules in the planner's order; a dataset is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out until mia-data has prepared it.</div><div id="funnel"></div></div>
     <div class="card"><h2>Fitting datasets by modality</h2><div class="sub">Datasets that fit the spec, prepared or not, by modality group.</div><div id="bymod"></div></div>
   </section>
   <section class="grid2">
@@ -263,7 +263,7 @@ tr.click:hover td{background:var(--accent-soft)}
   </section>
   <section>
     <div class="tablebar">
-      <h2 style="margin:0">Records</h2>
+      <h2 style="margin:0">Datasets</h2>
       <input type="search" id="search" placeholder="search id, title, modality, licence" aria-label="search records">
       <label class="inline"><input type="checkbox" id="fitOnly"> fitting only</label>
       <span class="small" id="tableCount"></span>
@@ -417,7 +417,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <h2>Words the pages use</h2>
 <div class="tw"><table>
 <tr><th>word</th><th>meaning</th></tr>
-<tr><td>record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described.</td></tr>
+<tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
 <tr><td>prepared</td><td>a record with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared records enter a plan.</td></tr>
 <tr><td>buffer, round</td><td>one served pool of crops for one spec. An issue runs one round at a time; each <code>buffer:go</code> starts a new round with a new buffer id, and the earlier buffer is retired.</td></tr>
 <tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
@@ -1159,6 +1159,8 @@ const kv = pairs => el("dl", { class: "kv" }, ...pairs.filter(p => p).flatMap(([
 const ghIssue = (repo, n) => repo && n ? link(`https://github.com/${repo}/issues/${n}`, `#${n}`) : (n ? `#${n}` : "");
 const code = (v, n) => v ? el("code", { title: String(v) }, n ? short(v, n) : String(v)) : null;
 const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) }, id);
+// a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
+const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "open") : "";
 
 // ---- shared state: the service's meta, the newest catalog, and the registry rows the views join
 const S = { meta: {}, catalogs: [], ref: null, records: new Map(), recordsRef: null, datasets: new Map(),
@@ -1304,7 +1306,7 @@ const stagedUsable = a => !["evicted","missing"].includes(a.data?.state);
 let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
 const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
 const COLS = [
-  { key: "id", label: "record", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
+  { key: "id", label: "dataset", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
   { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", { title: x.decision.reason }, pill(x.decision.group, x.inPool ? "pool" : "")) },
   { key: "dims", label: "dims", get: x => x.dims || "" },
   { key: "mod", label: "modality", get: x => x.modality_group || "" },
@@ -1538,7 +1540,6 @@ async function viewBuffer(root, id, refresh) {
   const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
   const datasets = new Map((ds?.datasets || []).map(d => [d.id, d])), dsOf = x => datasets.get(x.record) || {};
   const levelsKey = cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null;  // jobspec.levels_key
-  const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${encodeURIComponent(folder)}`, "open") : "";
   root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
     el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
     el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
@@ -1564,7 +1565,7 @@ async function viewBuffer(root, id, refresh) {
       { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
     ], evs, "no events yet")),
     card("Data set pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason. Links: the dataset issue and its mia-data workflow, the crops and stage folders.", table([
-      { label: "record", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
+      { label: "dataset", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
       { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
       { label: "issue", cell: x => dsOf(x).issue ? ghIssue(meta.datasets_repo, dsOf(x).issue) : "" },
       { label: "workflow", cell: x => dsOf(x).issue && meta.datasets_workflow_url ? link(meta.datasets_workflow_url + dsOf(x).issue, "temporal") : "" },
@@ -1596,7 +1597,7 @@ async function viewCache() {
   const root = $("cacheBody");
   root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   const [, locks, keeper] = await Promise.all([loadRegistry(), load("/locks"), load("/keeper")]);
-  const quota = S.meta.quota || {};
+  const quota = S.meta.quota || {}, roots = S.meta.roots || {};
   const k = keeper;
   root.replaceChildren(
     el("section", { class: "grid2" },
@@ -1610,13 +1611,13 @@ async function viewCache() {
           ["over quota", Object.keys(k.over_quota || {}).length ? Object.entries(k.over_quota).map(([kind, b]) => `${kind} ${fmtBytes(b)}`).join(" · ") : "none"],
           ["signalled", list(k.signalled)], ["catalog", k.catalog || "not due"], ["errors", list(k.errors)],
         ]) : el("div", { class: "empty" }, "The keeper has not reported a pass yet."))),
-    card("Raw cache", "One row per record's download.", table([
-      { label: "record", cell: a => a.key }, { label: "state", cell: a => statePill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
+    card("Raw cache", "One row per dataset's download; \"open\" browses its directory when the raw root has a URL.", table([
+      { label: "dataset", cell: a => a.key }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => statePill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
       { label: "last used", cell: a => when(a.data?.last_used) }, { label: "buffers", num: true, cell: a => num((a.refs || []).length) },
       { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" }, { label: "streams", num: true, cell: a => Array.isArray(a.data?.stream) ? num(a.data.stream.length) : "" },
     ], S.rawAssets, "Nothing in the raw cache yet.")),
     card("Staged pyramids", "One row per staged artifact.", table([
-      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "record", cell: a => a.data?.record || "" },
+      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.key) }, { label: "dataset", cell: a => a.data?.record || "" },
       { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
       { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => statePill(a.data?.state) },
       { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },
@@ -1642,10 +1643,10 @@ async function viewPreparation() {
     el("div", { class: "links" }, meta.buffers_repo ? link(q("prep:requested"), "open preparation requests") : el("span", { class: "small" }, "GET /meta names no buffers repo"),
       meta.buffers_repo ? link(q("prep:needs-human"), "requests that need a human") : null),
     card("In progress", "Datasets mia-data is preparing, with the stage it reached.", table([
-      { label: "record", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
     ], by("in-progress"), "Nothing in progress.")),
     card("Needs a human", "Stopped datasets; the dataset issue says why.", table([
-      { label: "record", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
     ], by("needs-human"), "Nothing needs a human.")));
 }
 
@@ -1672,7 +1673,7 @@ function route() {
 }
 function renderTopbar() {
   const c = S.catalogs[0];
-  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} records · synced `, when(c.synced_at)) : "no catalog synced");
+  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} datasets · synced `, when(c.synced_at)) : "no catalog synced");
 }
 function setupFilterBox() {  // the fold is a per-viewer convenience, remembered in this browser
   const box = $("filterBox");
