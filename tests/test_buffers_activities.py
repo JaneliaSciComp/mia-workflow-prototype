@@ -1266,6 +1266,15 @@ async def test_mark_dataset_and_retire(acts, server):
         await acts.retire_buffer(ROUND, ROUND)
 
 
+async def test_retire_of_a_round_never_registered_writes_its_retired_event(acts, server):
+    """A round that ended before sourcing has `created`/`planned` events but no config (create_buffer runs at
+    sourcing): there are no refs to drop, and its `retired` event is still written so the page shows it over."""
+    await acts.buffer_event(ROUND, "planned")
+    assert await acts.retire_buffer(ROUND, ROUND) == {"refs": 0, "draws": 0, "archive": None}
+    [planned, retired] = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]
+    assert (planned["kind"], retired["kind"], retired["detail"]) == ("planned", "retired", "never registered")
+
+
 class FakeTemporal:
     """get_workflow_handle(id).signal(name, args=[...]) recorded as (id, name, args); `gone` ids raise not found."""
 

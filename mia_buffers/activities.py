@@ -1162,10 +1162,17 @@ class Activities:
     @mia_permanent_errors
     async def retire_buffer(self, round_id: str, buffer_id: str) -> dict:
         """Release the buffer's references and archive its draws ({refs, draws, archive}), then write its `retired`
-        event (best effort; buffer-api then refuses its consumers). A failed retire raises, so the workflow
-        retries."""
-        retired, registry = await asyncio.to_thread(self.registry.retire, buffer_id), self.registry
-        detail = f"archive {retired.get('archive') or 'none'}"
+        event (best effort; buffer-api then refuses its consumers). A round that ended before sourcing was never
+        registered (its events precede its config): nothing to release, the event alone. A failed retire raises,
+        so the workflow retries."""
+        registry = self.registry
+        try:
+            retired = await asyncio.to_thread(registry.retire, buffer_id)
+            detail = f"archive {retired.get('archive') or 'none'}"
+        except RegistryError as error:
+            if error.status != 404:
+                raise
+            retired, detail = {"refs": 0, "draws": 0, "archive": None}, "never registered"
         await asyncio.to_thread(
             best_effort,
             lambda: registry.event(buffer_id, "retired", issue=_issue_of(buffer_id), event_id=None, detail=detail),
