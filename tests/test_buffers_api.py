@@ -561,6 +561,30 @@ def test_events_accept_sourcing_and_staged(tmp_path):
     assert [e["kind"] for e in call(s, "GET", "/buffers/b/events")[1]["events"]] == ["sourcing", "staged"]
 
 
+def test_an_unapproved_buffer_serves_no_consumer(tmp_path):
+    """Until the approve at the staged gate (the `ready` event), consumers are refused with 409: the page still
+    reads the buffer; a hand-registered buffer (no events) stays servable; retired stays 410 (spec §15)."""
+    s = BufferService(Ledger(tmp_path / "l.sqlite"))
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    for kind in ("created", "sourcing", "staged"):
+        worker(s, "POST", "/buffers/b/events", {"kind": kind})
+        waiting = (409, {"error": "buffer not approved"})
+        assert call(s, "GET", "/buffers/b/next", {"consumer": "x"})[:2] == waiting, kind
+        assert call(s, "GET", "/buffers/b/split/val", {"consumer": "x"})[:2] == waiting, kind
+        assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[:2] == waiting, kind
+    assert call(s, "GET", "/buffers/b/status")[0] == 200 and call(s, "GET", "/buffers/b/events")[0] == 200
+    worker(s, "POST", "/buffers/b/events", {"kind": "approved"})
+    worker(s, "POST", "/buffers/b/events", {"kind": "ready"})
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[0] == 200
+    worker(s, "POST", "/buffers/b/events", {"kind": "retired"})
+    assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[:2] == (410, {"error": "buffer retired"})
+    call(s, "PUT", "/buffers/hand", payload=CFG)  # `mia-buffers register`: no events, serves as before
+    call(s, "PUT", "/buffers/hand/volumes/a", payload=body())
+    assert call(s, "POST", "/buffers/hand/consumers", payload=CONSUMER)[0] == 201
+
+
 def test_a_retired_buffer_serves_no_consumer(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"))
     call(s, "PUT", "/buffers/b", payload=CFG)

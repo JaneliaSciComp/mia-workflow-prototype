@@ -56,6 +56,8 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 # a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers
 Response = tuple[int, dict | bytes | None, dict[str, str]]
 
+UNAPPROVED = ("created", "planned", "sourcing", "staged")  # latest events of a round no human has approved yet
+
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -269,10 +271,15 @@ class BufferService:
         return BufferConfig.model_validate(config)
 
     def _serving(self, buffer: str) -> BufferConfig:
-        """The config of a buffer consumers may still use: 410 once its latest event is `retired`."""
+        """The config of a buffer consumers may use: 410 once its latest event is `retired`, 409 while the round has
+        not been approved yet (its latest event is from before the staged gate's approve, spec §15). A buffer with
+        no events (registered by hand) serves."""
         config = self._config(buffer)
-        if (self.ledger.latest_event(buffer) or {}).get("kind") == "retired":
+        kind = (self.ledger.latest_event(buffer) or {}).get("kind")
+        if kind == "retired":
             raise HttpError(410, "buffer retired")
+        if kind in UNAPPROVED:
+            raise HttpError(409, "buffer not approved")
         return config
 
     def _consumer(self, buffer: str, query: dict[str, str]) -> str:

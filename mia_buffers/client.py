@@ -31,6 +31,10 @@ except ImportError:  # the harness is in the mia-snippets checkout's environment
 TENSORIZERS_ENV = "MIA_BUFFERS_TENSORIZERS"
 
 
+class BufferNotApproved(RuntimeError):
+    """buffer-api answered 409: the round is staged but no human has approved it yet (spec §15)."""
+
+
 class BufferEmpty(RuntimeError):
     """The service has nothing servable for this split yet (HTTP 204)."""
 
@@ -49,8 +53,13 @@ class BufferClient:
             raise type(error)(f"{error} (buffer-api at {self.url})", request=error.request) from None
         if response.status_code == 204:
             raise BufferEmpty(f"buffer {self.buffer} has nothing servable for split {split}")
+        self._approved(response)
         response.raise_for_status()
         return response
+
+    def _approved(self, response: httpx.Response) -> None:
+        if response.status_code == 409:
+            raise BufferNotApproved(f"buffer {self.buffer} is not approved yet (409 {response.text[:200]})")
 
     def status(self) -> dict:
         return self._get("status", "").json()
@@ -64,6 +73,7 @@ class BufferClient:
             "mode": mode,
         }
         response = self._http.post(f"/buffers/{self.buffer}/consumers", json=info)
+        self._approved(response)
         response.raise_for_status()
         return str(response.json()["consumer_id"])
 

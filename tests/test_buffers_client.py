@@ -8,7 +8,7 @@ import pytest
 
 from mia_buffers import client as client_module
 from mia_buffers.api import BufferService, make_server
-from mia_buffers.client import BufferClient, BufferDataset, BufferEmpty
+from mia_buffers.client import BufferClient, BufferDataset, BufferEmpty, BufferNotApproved
 from mia_buffers.ledger import Ledger
 from tests.test_buffers_api import CFG, body
 
@@ -55,6 +55,16 @@ def buffer_server(tmp_path, monkeypatch):
 
 def consumers(base):
     return httpx.get(f"{base}/buffers/b/status").json()["consumers"]
+
+
+def test_client_names_an_unapproved_buffer(buffer_server, tmp_path):
+    """A buffer at the staged gate answers 409: the client raises an error that says so, not a bare HTTP error."""
+    Ledger(tmp_path / "l.sqlite").add_event("b", "staged", issue=None, event_id=None, detail="")
+    c = BufferClient(buffer_server, "b")
+    with pytest.raises(BufferNotApproved, match="buffer b is not approved yet"):
+        c.register("train")
+    with pytest.raises(BufferNotApproved, match="not approved yet"):
+        c.next("nobody", 1)
 
 
 def test_client_calls(buffer_server):
