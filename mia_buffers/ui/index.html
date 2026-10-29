@@ -320,7 +320,7 @@ tr.click:hover td{background:var(--accent-soft)}
 <ul>
   <li><b>Where records leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
   <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>
-  <li><b>Request preparation</b> opens an issue that hands the fitting, unprepared datasets to the preparation pipeline. Each one is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a human. Progress is on the <a href="#preparation">Preparation</a> tab. A buffer plans over prepared datasets only, so a buffer started now uses what is prepared now, and a later round picks up the rest.</li>
+  <li><b>Request preparation</b> opens an issue that hands every unprepared dataset in the table below, after its search box and fitting-only toggle, to the preparation pipeline. Each one is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a human. Progress is on the <a href="#preparation">Preparation</a> tab. A buffer plans over prepared datasets only, so a buffer started now uses what is prepared now, and a later round picks up the rest.</li>
   <li><b>Download spec YAML</b> saves the spec as a file, for editing by hand or for keeping with an experiment.</li>
 </ul>
 <p>The fields of a spec that are usually edited:</p>
@@ -1406,10 +1406,13 @@ function renderTableHead() {
   for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", title: c.title || null, onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
   $("table").tHead.replaceChildren(tr);
 }
+function tableRows() {  // the results list: the view rows after the search box and the fitting-only toggle
+  const q = $("search").value.trim().toLowerCase(), fitOnly = $("fitOnly").checked;
+  return currentRows.filter(x => (!fitOnly || x.fits) && (!q || [x.id, x.title, x.modality_group, x.lic, x.decision.group, x.prepared].join(" ").toLowerCase().includes(q)));
+}
 function renderTable() {
   renderTableHead();
-  const q = $("search").value.trim().toLowerCase(), fitOnly = $("fitOnly").checked;
-  const rows = currentRows.filter(x => (!fitOnly || x.fits) && (!q || [x.id, x.title, x.modality_group, x.lic, x.decision.group, x.prepared].join(" ").toLowerCase().includes(q)));
+  const rows = tableRows();
   const col = COLS.find(c => c.key === sortKey);
   rows.sort((a, b) => { const va = col.get(a), vb = col.get(b); return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir || (a.path < b.path ? -1 : 1); });
   $("tableCount").textContent = `${num(rows.length)} rows` + (rows.length > shown ? `, showing ${num(shown)}` : "");
@@ -1417,6 +1420,7 @@ function renderTable() {
   tb.replaceChildren(...rows.slice(0, shown).map(x => el("tr", { class: x.inPool ? "" : "out" }, ...COLS.map(c => c.cell ? c.cell(x) : el("td", { class: c.num ? "num" : "" }, String(c.get(x)))))));
   if (!rows.length) tb.append(el("tr", {}, el("td", { colspan: COLS.length, class: "empty" }, currentRows.length ? "no row matches the search or the registry toggles" : "the spec admits no record")));
   $("more").hidden = rows.length <= shown;
+  renderActions();  // the preparation request follows the list
 }
 
 // ---- datasets: controls → YAML → POST /plan (debounced) → KPIs, funnel, charts, table, actions
@@ -1483,12 +1487,12 @@ function renderActions() {
   const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
   issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
     `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Nothing runs until you add the \`buffer:go\` label.`, yaml, bufferBlocker());
-  // the Unprepared tile's rows: in progress is already on its way
-  const todo = viewRows().filter(x => x.fits && x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
-  const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records"
-    : C.rawCached || C.stagedGeom ? "no unprepared record passes the registry toggles" : "every fitting record is prepared or in progress";
+  // every unprepared record in the results list below (search and fitting-only applied); in progress is already on its way
+  const todo = tableRows().filter(x => x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
+  const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records" : "every record in the list is prepared or in progress";
+  const q = $("search").value.trim(), scope = `\`${name}\`` + (q ? `, search "${q}"` : "") + ($("fitOnly").checked ? ", fitting only" : "");
   issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
-    `Preparation request from the buffer page: the ${todo.length} records that pass \`${name}\` and are not prepared. Nothing runs until you add the \`prep:go\` label; each record then costs an agent run.`
+    `Preparation request from the Datasets tab: the ${todo.length} unprepared records in its list (${scope}). Nothing runs until you add the \`prep:go\` label; each record then costs an agent run.`
     + (todo.length > 25 ? ` Before that, add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
     toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : none);
 }
@@ -1504,7 +1508,7 @@ function renderDatasets() {
   $("footprint").textContent = `footprint ${num(F)} px = ${C.patch} × ${C.level} · levels ${levelsOf(C.level).join(", ")}`;
   $("tVal").textContent = C.T.toFixed(2);
   $("levelsKey").textContent = levelsKey(C);
-  renderPlanMessages(); renderActions();
+  renderPlanMessages();
   const plan = S.plan, rows = viewRows(); currentRows = rows;
   const fitting = rows.filter(x => x.fits), pool = rows.filter(x => x.inPool);
   const count = state => fitting.filter(x => x.prepared === state).length;
