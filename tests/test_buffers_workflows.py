@@ -74,8 +74,11 @@ ONE_GROUP = PlanResult(
 )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def env():
+    """One time-skipping server per test. Terminating a workflow with a task or activity still scheduled leaks a
+    time-skipping lock on the test server (nothing releases it), and every later env.sleep on that server hangs
+    past the client's 30 s RPC deadline; on a slow runner `started()`'s terminate does that often enough."""
     e = await WorkflowEnvironment.start_time_skipping()
     yield e
     await e.shutdown()
@@ -449,6 +452,7 @@ async def test_go_plan_approve_sourcing_ready(env):
     async with started(env, m) as h:
         await approve(h, m)
         await until(lambda: m.of("register_dataset") and m.of("comment_drop"))
+        await idle(h, m, "staged")  # the gate comes after both; on a slow runner it had not been set yet
         state = await h.query(MiaBuffer.status)
         assert dataset(state, "u937").status == "servable" and dataset(state, "bcss").status == "waiting-drop"
         assert m.stages == ["planning", "plan-review", "sourcing", "staged"]  # at the gate; bcss still waiting

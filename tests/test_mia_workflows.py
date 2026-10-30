@@ -39,8 +39,9 @@ SHA = "a" * 40
 PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x")
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def env():
+    """One time-skipping server per test: see the fixture in test_buffers_workflows."""
     e = await WorkflowEnvironment.start_time_skipping()
     yield e
     await e.shutdown()
