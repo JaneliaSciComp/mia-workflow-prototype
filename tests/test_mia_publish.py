@@ -38,6 +38,27 @@ def test_publish_twice_is_idempotent(tmp_path):
     assert not list(ds.glob(".tmp-*"))
 
 
+def test_previews_go_beside_the_crops_and_backfill(tmp_path):
+    src, verified = _src(tmp_path)
+    ds = tmp_path / "ds"
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)  # a round before previews: none
+    preview = tmp_path / "verify-1" / "preview"
+    (preview / "c2").mkdir(parents=True)
+    (preview / "c2" / "overlay.png").write_bytes(b"ov2")
+    (preview / "c1").mkdir()
+    (preview / "c1" / "overlay.png").symlink_to(preview / "c2" / "overlay.png")  # job output: a symlink is refused
+    src3, verified3 = _src(tmp_path, ids=("c3",), name="src3")
+    assert publish(ds, src3, verified3, {}, tmp_max_age_s=AGE, previews=[preview])["total"] == 3
+    assert (ds / "c2" / "overlay.png").read_bytes() == b"ov2"  # backfilled beside an already published crop
+    assert not (ds / "c1" / "overlay.png").exists() and not (ds / "c3" / "overlay.png").exists()
+    manifest = json.loads((ds / "manifest.json").read_text())
+    assert all("overlay.png" not in crop["files"] for crop in manifest["crops"])  # outside the checksums
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)  # idempotent still: the preview is not a conflict
+    (ds / "binding.yaml").write_bytes(b"record: r\n")
+    reindex(ds, {})
+    assert prepared_row(ds)["previews"] == ["c2"]
+
+
 def test_conflicting_crop_raises(tmp_path):
     src, verified = _src(tmp_path)
     ds = tmp_path / "ds"
@@ -175,6 +196,7 @@ def test_prepared_row_requires_matching_manifest(tmp_path):
         "binding_hash": hashlib.sha256(binding).hexdigest(),
         "binding_commit": "4c1d",
         "crops": 2,
+        "previews": [],
     }
     (ds / "binding.yaml").write_bytes(b"snippets_commit: 4c1d\n")  # no record
     reindex(ds, {})

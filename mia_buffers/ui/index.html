@@ -140,6 +140,9 @@ tr.click:hover td{background:var(--accent-soft)}
 .pill{display:inline-block;border-radius:999px;padding:0 7px;font-size:11.5px;border:1px solid var(--axis)}
 .pill.pool{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
 .pill.warn{border-color:var(--warn);color:var(--warn)}
+img.thumb{display:block;width:36px;height:36px;object-fit:cover;border-radius:3px;background:var(--grid)}
+td:has(img.thumb){padding-top:2px;padding-bottom:2px}
+.tip img{display:block;width:256px;height:256px;margin-top:4px}
 .more{margin:10px 0 0;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer}
 
 /* tooltip */
@@ -1035,7 +1038,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <p>buffer-api serves the web UI at <code>/</code>. The page reads only the open routes and holds no token. Its three actions are prefilled GitHub links, so the one click that needs an identity leaves the web UI.</p>
 <div class="tw"><table>
 <tr><th>view</th><th>shows</th><th>reads</th></tr>
-<tr><td>Datasets</td><td>the catalog filtered by spec fields and planned by the server, with each record's preparation state, raw and staged state and the buffers that use it. Its actions download the spec, open the buffer issue and request preparation</td><td><code>POST /plan</code> · <code>/datasets</code> · <code>/assets/*</code></td></tr>
+<tr><td>Datasets</td><td>the catalog filtered by spec fields and planned by the server, with each record's preparation state, a crop preview, raw and staged state and the buffers that use it. Its actions download the spec, open the buffer issue and request preparation</td><td><code>POST /plan</code> · <code>/datasets</code> · <code>/assets/*</code> · <code>/crops/*</code></td></tr>
 <tr><td>Buffers</td><td>every buffer with its latest event, and for one buffer its board, volumes, consumers, daily usage and health line</td><td><code>/buffers</code> · <code>/status</code> · <code>/events</code> · <code>/usage</code></td></tr>
 <tr><td>Cache</td><td>raw by record, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/*</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Preparation</td><td>datasets in progress with their mia-data stage and issue, those needing a human, open requests</td><td><code>/datasets</code></td></tr>
@@ -1196,7 +1199,7 @@ async function load(path, quiet404) {  // quiet404: a 404 is an expected answer 
 
 // ---- tooltip (the explorer's)
 const tip = $("tip");
-function showTip(evt, lines) { tip.replaceChildren(); for (const l of lines) { const d = el("div"); if (l.k) d.append(Object.assign(el("span",{class:"k"}), {style:`background:${l.k}`})); if (l.b) d.append(el("b",{}, l.b), " "); d.append(l.t); tip.append(d); } tip.hidden = false; moveTip(evt); }
+function showTip(evt, lines) { tip.replaceChildren(); for (const l of lines) { const d = el("div"); if (l.k) d.append(Object.assign(el("span",{class:"k"}), {style:`background:${l.k}`})); if (l.b) d.append(el("b",{}, l.b), " "); if (l.t) d.append(l.t); if (l.img) d.append(el("img", { src: l.img, alt: "" })); tip.append(d); } tip.hidden = false; moveTip(evt); }
 function moveTip(evt) { const x = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8); tip.style.left = x + "px"; tip.style.top = (evt.clientY + 14) + "px"; }
 function hideTip() { tip.hidden = true; }
 function hoverable(node, lines) { node.addEventListener("pointerenter", e => showTip(e, lines)); node.addEventListener("pointermove", moveTip); node.addEventListener("pointerleave", hideTip); node.setAttribute("tabindex","0"); node.addEventListener("focus", () => { const b = node.getBoundingClientRect(); showTip({clientX:b.left+b.width/2, clientY:b.top}, lines); }); node.addEventListener("blur", hideTip); }
@@ -1238,6 +1241,12 @@ const kv = pairs => el("dl", { class: "kv" }, ...pairs.filter(p => p).flatMap(([
 const ghIssue = (repo, n) => repo && n ? link(`https://github.com/${repo}/issues/${n}`, `#${n}`) : (n ? `#${n}` : "");
 const code = (v, n) => v ? el("code", { title: String(v) }, n ? short(v, n) : String(v)) : null;
 const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) }, id);
+// a prepared dataset's first crop overlay, served by buffer-api from the dataset folder (`previews` lists the crops that have one); hover enlarges, click opens
+const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
+const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
+  return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
+    [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+const dsIssue = record => { const d = S.datasets.get(record); return d?.issue ? ghIssue(S.meta.datasets_repo, d.issue) : ""; };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "open") : "";
 
@@ -1386,6 +1395,7 @@ let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
 const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
 const COLS = [
   { key: "id", label: "dataset", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
+  { key: "preview", label: "preview", get: x => (x.ds?.previews || []).length, cell: x => el("td", {}, thumb(x.ds)) },
   { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", {}, pill(x.decision.group, x.inPool ? "pool" : "", x.decision.reason && x.decision.reason !== x.decision.group ? [{ t: x.decision.reason }] : [])) },
   { key: "dims", label: "dims", get: x => x.dims || "" },
   { key: "mod", label: "modality", get: x => x.modality_group || "" },
@@ -1655,6 +1665,7 @@ async function viewBuffer(root, id, refresh) {
       { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
       { label: "issue", cell: x => dsOf(x).issue ? ghIssue(meta.datasets_repo, dsOf(x).issue) : "" },
       { label: "workflow", cell: x => dsOf(x).issue && meta.datasets_workflow_url ? link(meta.datasets_workflow_url + dsOf(x).issue, "temporal") : "" },
+      { label: "preview", cell: x => thumb(dsOf(x)) },
       { label: "crops", cell: x => folderLink(roots.storage_root, dsOf(x).folder) },
       { label: "stage", cell: x => folderLink(roots.staged_root, levelsKey && `${levelsKey}/${x.record}`) },
     ], board?.datasets || [], "no dataset on the board yet")),
@@ -1698,12 +1709,12 @@ async function viewCache() {
           ["signalled", list(k.signalled)], ["catalog", k.catalog || "not due"], ["errors", list(k.errors)],
         ]) : el("div", { class: "empty" }, "The keeper has not reported a pass yet."))),
     card("Raw cache", "One row per dataset's download; \"open\" browses its directory when the raw root has a URL.", table([
-      { label: "dataset", cell: a => a.key }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => assetPill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
+      { label: "dataset", cell: a => a.key }, { label: "issue", cell: a => dsIssue(a.key) }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => assetPill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
       { label: "last used", cell: a => when(a.data?.last_used) }, { label: "buffers", num: true, cell: a => num((a.refs || []).length) },
       { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" }, { label: "streams", num: true, cell: a => Array.isArray(a.data?.stream) ? num(a.data.stream.length) : "" },
     ], S.rawAssets, "Nothing in the raw cache yet.")),
     card("Staged pyramids", "One row per staged artifact.", table([
-      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.key) }, { label: "dataset", cell: a => a.data?.record || "" },
+      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.data?.levels_key && a.data?.record && `${a.data.levels_key}/${a.data.record}/${a.key}`) }, { label: "dataset", cell: a => a.data?.record || "" }, { label: "issue", cell: a => dsIssue(a.data?.record) },
       { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
       { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => assetPill(a.data?.state) },
       { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },

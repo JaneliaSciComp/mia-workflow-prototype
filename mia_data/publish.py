@@ -15,6 +15,7 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -38,13 +39,29 @@ def check_crop_id(crop_id: Any) -> str:
     return crop_id
 
 
+PREVIEW_FILE = "overlay.png"  # beside a crop's verified files, outside its checksums: a picture for the web UI
+MAX_PREVIEWS = 8  # crop ids a prepared row lists for the page's thumbnail
+
+
 def _hashes(directory: Path) -> dict[str, str]:
-    """relative path -> sha256 of every file under `directory`."""
+    """relative path -> sha256 of every verified file under `directory` (not the preview, not a temp file)."""
     return {
         path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in directory.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.name != PREVIEW_FILE and not path.name.startswith(".")
     }
+
+
+def _place_preview(crop_dir: Path, crop_id: str, previews: Sequence[Path]) -> None:
+    """Copy the crop's overlay.png from the first preview dir that has one; nothing when none does or it is there."""
+    if (crop_dir / PREVIEW_FILE).exists():
+        return
+    for preview_dir in previews:
+        if (data := read_untrusted(preview_dir, f"{crop_id}/{PREVIEW_FILE}", MAX_FILE, binary=True)) is not None:
+            tmp = crop_dir / f".tmp-{PREVIEW_FILE}-{uuid.uuid4().hex}"
+            tmp.write_bytes(data)
+            os.replace(tmp, crop_dir / PREVIEW_FILE)
+            return
 
 
 def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
@@ -60,9 +77,11 @@ def publish(
     *,
     tmp_max_age_s: float,
     binding: Path | None = None,
+    previews: Sequence[Path] = (),
 ) -> dict:
     """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`, and
-    `binding` (the approved binding YAML), when given, to `dataset_dir/binding.yaml`.
+    `binding` (the approved binding YAML), when given, to `dataset_dir/binding.yaml`. `previews` are verify jobs'
+    preview/ dirs: a crop's overlay.png found there goes beside its files (also for crops published earlier).
 
     `verified` is [{"crop_id", "files": {rel: sha256}}] from read_verify; only those files are copied, and
     they must still hash the same. Temp directories older than `tmp_max_age_s` are left by dead attempts and
@@ -108,6 +127,7 @@ def publish(
             if _hashes(tmp) != files:
                 shutil.rmtree(tmp)
                 raise Conflict(f"{crop_id}: source files differ from the verified checksums")
+            _place_preview(tmp, crop_id, previews)
             try:
                 os.rename(tmp, dest)
                 published.append(crop_id)
@@ -117,6 +137,9 @@ def publish(
                 shutil.rmtree(tmp)
                 _assert_same(dest, files, crop_id)
                 already.append(crop_id)
+        for crop_dir in dataset_dir.iterdir():  # crops of earlier rounds too, when a preview dir has theirs
+            if crop_dir.is_dir() and not crop_dir.name.startswith("."):
+                _place_preview(crop_dir, crop_dir.name, previews)
     finally:  # a Conflict leaves the manifest matching what is published
         total = reindex(dataset_dir, withdrawn)
     return {"published": published, "already": already, "total": total}
@@ -172,6 +195,13 @@ def prepared_row(dataset_dir: Path) -> dict | None:
     if not isinstance(binding, dict) or not isinstance(binding.get("record"), str):
         return None
     published = datetime.fromtimestamp((dataset_dir / "manifest.json").stat().st_mtime, UTC)
+    previews: list[str] = []  # the first crops that have a preview; the page shows the first and counts the rest
+    for crop in manifest.get("crops") or []:
+        if len(previews) == MAX_PREVIEWS:
+            break
+        if isinstance(crop, dict) and isinstance(crop_id := crop.get("crop_id"), str) and CROP_ID_RE.fullmatch(crop_id):
+            if (dataset_dir / crop_id / PREVIEW_FILE).is_file():
+                previews.append(crop_id)
     return {
         "state": "prepared",
         "record": binding["record"],
@@ -179,5 +209,6 @@ def prepared_row(dataset_dir: Path) -> dict | None:
         "binding_hash": binding_hash,
         "binding_commit": binding.get("snippets_commit"),
         "crops": count if isinstance(count := manifest.get("count"), int) else 0,  # one odd folder must not stop a scan
+        "previews": previews,
         "published_at": published.isoformat(),
     }

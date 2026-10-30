@@ -29,6 +29,7 @@ from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
+from mia_core.untrusted import read_untrusted
 
 from .config import Config
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
@@ -41,6 +42,7 @@ RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 DATASET_STATES = ("in-progress", "prepared", "needs-human")  # no row = unprepared; `ineligible` ended with spec §12
+CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
 UI_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")  # a file of the page by basename; no dotfile, no "/"
@@ -197,6 +199,7 @@ ROUTES = [
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
+    ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
@@ -408,6 +411,17 @@ class BufferService:
         if row is None:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
+
+    def _crop_png(self, folder: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A published crop's raw.png or overlay.png from storage_root: the page's previews."""
+        if self.storage_root is None:
+            raise HttpError(503, "the service has no storage_root")
+        if not (UI_NAME_RE.match(folder) and UI_NAME_RE.match(crop_id)):
+            raise HttpError(404, "no such crop")
+        data = read_untrusted(self.storage_root, f"{folder}/{crop_id}/{name}.png", CROP_PNG_LIMIT, binary=True)
+        if data is None:
+            raise HttpError(404, "no such crop")
+        return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
 
     def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}

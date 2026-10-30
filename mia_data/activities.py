@@ -771,8 +771,11 @@ class Activities:
     ) -> dict:
         """Publish the verified crops into the dataset folder, marking crops of snippets withdrawn in
         mia-snippets at `sha`, and the approved binding (one of this round's, from state_dir) as binding.yaml
-        beside them for mia-buffers to read (spec §6.1). Returns {"published", "already", "total"}."""
+        beside them for mia-buffers to read (spec §6.1). Each crop's overlay.png (drawn by the round's verify jobs
+        into their preview/ dir) goes beside its files for the web UI's preview. Returns {"published", "already",
+        "total"}."""
         crops_dir = self._crops_dir(self._job_workspace(issue, round_id, crop_workspace))
+        previews = sorted(self._round_workspace(issue, round_id).glob("verify-*/preview"), reverse=True)
         if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
             raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
@@ -785,6 +788,7 @@ class Activities:
             withdrawn,
             tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600),
             binding=Path(binding) if binding else None,
+            previews=previews,
         )
 
     # --- snippet development -----------------------------------------------------------------

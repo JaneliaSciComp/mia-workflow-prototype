@@ -46,6 +46,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
         "/locks",
     }
     assert ("POST", "/plan") in requested
+    assert resolve("GET", "/crops/folder/crop/overlay.png") == "read"  # the thumbnails' <img src>, not an api() call
     for method, path in requested:
         assert resolve(method, path) in {"read", "consumer"}, (method, path)
 

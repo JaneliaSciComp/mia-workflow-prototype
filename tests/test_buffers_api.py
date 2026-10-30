@@ -327,6 +327,22 @@ def test_sync_datasets_route(tmp_path):
     assert worker.handle("POST", "/sync/datasets", {}, b"")[0] == 401
 
 
+def test_crop_png_route_serves_storage_root_only(tmp_path):
+    root = tmp_path / "crops"
+    (root / "confocal-human-u937" / "c1").mkdir(parents=True)
+    (root / "confocal-human-u937" / "c1" / "overlay.png").write_bytes(b"png")
+    (root / "confocal-human-u937" / "c1" / "raw.png").symlink_to(root / "confocal-human-u937" / "c1" / "overlay.png")
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), storage_root=root)
+    status, body, headers = s.handle("GET", "/crops/confocal-human-u937/c1/overlay.png", {}, b"")
+    assert (status, body, headers["Content-Type"]) == (200, b"png", "image/png")
+    assert s.handle("GET", "/crops/confocal-human-u937/c1/raw.png", {}, b"")[0] == 404  # a symlink
+    assert s.handle("GET", "/crops/confocal-human-u937/c2/overlay.png", {}, b"")[0] == 404
+    assert s.handle("GET", "/crops/..%2F..%2Fetc/c1/overlay.png", {}, b"")[0] == 404
+    assert s.handle("GET", "/crops/.hidden/c1/overlay.png", {}, b"")[0] == 404
+    assert s.handle("GET", "/crops/confocal-human-u937/c1/labels.png", {}, b"")[0] == 404
+    assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("GET", "/crops/a/b/raw.png", {}, b"")[0] == 503
+
+
 def test_sync_keeps_a_row_prepared_during_the_scan(tmp_path, monkeypatch):
     root = tmp_path / "crops"
     write_prepared(root / "u937", U937)
