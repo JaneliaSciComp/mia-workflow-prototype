@@ -56,8 +56,25 @@ mypy = "*"
 types-PyYAML = "*"
 orjson = "*"  # mypy writes its cache with it; without the real package an empty site-packages dir shadows it
 
+[tool.pixi.feature.notebook.dependencies]
+pytorch = "*"
+ipykernel = "*"
+# mia-harness declares no runtime deps in its pyproject (they live in the harness pixi.toml); mirrored here
+numpy = "*"
+tifffile = "*"
+imagecodecs = "*"
+mrcfile = "*"
+h5py = "*"
+pypng = "*"
+zarr = "*"
+
+[tool.pixi.feature.notebook.pypi-dependencies]
+muvit = { git = "https://github.com/weigertlab/muvit" }
+mia-harness = { git = "https://github.com/JaneliaSciComp/mia-snippets", branch = "training-buffers", subdirectory = "harness" }
+
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }
+notebook = { features = ["notebook"] }  # the demo notebook's kernel: `pixi run -e notebook python -m ipykernel install --user --name mia-buffers`
 
 [tool.pixi.tasks]
 test = "pytest tests/"

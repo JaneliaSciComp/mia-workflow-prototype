@@ -25,8 +25,11 @@ except ImportError:  # the planner environment has no torch; samples stay numpy
 
 try:
     from mia_harness.tensorize import tensorize
-except ImportError:  # the harness is in the mia-snippets checkout's environment; local mode needs it
+
+    _harness_import_error: ImportError | None = None
+except ImportError as error:  # the harness is in the mia-snippets checkout's environment; local mode needs it
     tensorize = None
+    _harness_import_error = error
 
 TENSORIZERS_ENV = "MIA_BUFFERS_TENSORIZERS"
 
@@ -170,7 +173,9 @@ class BufferDataset(Base):
         if tensorizers is None:
             raise ValueError(f"local mode needs `tensorizers` (the mia-snippets checkout) or ${TENSORIZERS_ENV}")
         if tensorize is None:
-            raise ImportError("mia_harness is not importable; run under the mia-snippets harness environment")
+            raise ImportError(
+                f"mia_harness is not importable ({_harness_import_error}); run under the mia-snippets harness environment"
+            )
         self.client = BufferClient(url, buffer, timeout=timeout)
         self.split, self.mode, self.prefetch = split, mode, max(1, prefetch)
         self.tensorizers = Path(tensorizers)
