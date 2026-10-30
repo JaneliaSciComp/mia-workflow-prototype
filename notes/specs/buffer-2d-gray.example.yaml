@@ -1,0 +1,37 @@
+# Minimal buffer spec: 2D, one channel per crop, three pyramid levels. Everything omitted takes the grammar's default
+# (mia_buffers/spec.py); the full example with every field is tests/fixtures/buffers/spec.yaml.
+schema_version: 1
+name: microscopy-2d-gray
+
+catalog:
+  repo: AI-HHMI/mia-agentic-search
+  ref: ab6a013d5da39c80651ddc845915d034b2eae82a   # a commit, never a branch
+
+select:
+  paths: ["datasets/2D/**"]
+  where:
+    dims: {in: [2D]}
+    license:
+      in: [CC0-1.0, CC-BY-3.0, CC-BY-4.0, MIT, BSD-3-Clause]
+      allow_unknown: false
+    annotations:
+      required: false                   # unlabeled data is in scope for pretraining
+    min_size_voxels: 1.0e6
+  dedup:
+    by: [doi]
+
+sampling:
+  patch:
+    2D: {y: 256, x: 256}
+    c: 1                                # one channel per crop: gray recipe per dataset (spec v0.5 §2)
+  levels: [1, 2, 4]                     # 256 px at 1×, 2×, 4× around one centre
+  weighting:
+    scheme: temperature
+    over: [modality, dataset]
+    temperature: 0.5
+  normalize:
+    method: percentile
+    range: [1, 99]
+
+splits:
+  fractions: {train: 0.8, val: 0.1, test: 0.1}

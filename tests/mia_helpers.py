@@ -17,6 +17,7 @@ def make_cfg(tmp_path: Path, **overrides) -> Config:
             "state_dir": str(tmp_path / "state"),
             "work_root": str(tmp_path / "work"),
             "storage_root": str(tmp_path / "storage"),
+            "local_root": str(tmp_path / "local"),
         },
         "harness": {"dir": str(harness)},
     }
@@ -53,6 +54,9 @@ class FakeGH:
     async def list_issues(self, **params):
         return list(self.issues.values())
 
+    async def find_issue_by_marker(self, marker, labels=None):
+        return next((i for i in self.issues.values() if marker in (i.get("body") or "")), None)
+
     async def add_labels(self, n, labels):
         self.issues[n]["labels"] += [{"name": x} for x in labels]
 
@@ -67,6 +71,9 @@ class FakeGH:
 
     async def issue_comments(self, n):
         return self.comments.get(n, [])
+
+    async def permission(self, login):
+        return getattr(self, "permissions", {}).get(login, "none")
 
     async def comment(self, n, body, login="bot"):
         cs = self.comments.setdefault(n, [])

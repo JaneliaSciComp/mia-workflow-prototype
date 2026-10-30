@@ -12,7 +12,6 @@ from tests.mia_helpers import make_cfg
 
 API = "https://api.github.com"
 FIX = Path(__file__).parent / "fixtures" / "mia"
-LIC = ["CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "MIT"]
 PATHS = {
     "bbbc034-hipsc-nuclei-3d": "datasets/3D/fluorescence-other",
     "czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet": "datasets/3D/cryo-ET",
@@ -85,7 +84,7 @@ async def test_three_fixtures_make_three_issues(tmp_path, gh_data, gh_catalog):
     z = by_id["hf-pytc-zebrafinch-j0126-ffn-em"]
     assert z["title"] == "hf-pytc-zebrafinch-j0126-ffn-em: Zebra finch j0126 neuron segmentation (SBF-SEM)"
     assert z["body"].startswith("<!-- mia-data:record=hf-pytc-zebrafinch-j0126-ffn-em -->")
-    assert set(z["labels"]) == {"data:new", "modality:SBF-SEM", "has-labels", "maybe-small"}
+    assert set(z["labels"]) == {"data:new", "modality:SBF-SEM", "has-labels"}  # no size or licence verdict
 
 
 @respx.mock
@@ -109,22 +108,21 @@ async def test_record_missing_from_main_is_skipped(tmp_path, gh_data, gh_catalog
 
 
 @respx.mock
-async def test_maybe_small_and_licence_in_body(tmp_path, gh_data, gh_catalog):
+async def test_licence_in_body(tmp_path, gh_data, gh_catalog):
     route = mock_catalog(ids=set(PATHS))
     await seed(make_cfg(tmp_path), gh_data, gh_catalog, False)
     by_id = {b["title"].split(":")[0]: b for b in bodies(route)}
-    assert "maybe-small" in by_id["hf-pytc-zebrafinch-j0126-ffn-em"]["labels"]
-    assert "maybe-small" not in by_id["bbbc034-hipsc-nuclei-3d"]["labels"]
     assert "Licence: MIT" in by_id["hf-pytc-zebrafinch-j0126-ffn-em"]["body"]
 
 
 @respx.mock
-async def test_gpl_is_ineligible(tmp_path, gh_data, gh_catalog):
+async def test_gpl_is_seeded_like_any_other(tmp_path, gh_data, gh_catalog):
+    """The licence is a buffer spec's filter (spec §12); data preparation records it and judges nothing."""
     route = mock_catalog(ids={"synthetic-gpl"})
     await seed(make_cfg(tmp_path), gh_data, gh_catalog, False)
     (b,) = bodies(route)
-    assert "data:ineligible" in b["labels"] and "licence-excluded" in b["labels"] and "data:new" not in b["labels"]
-    assert "GPL-3.0" in b["body"] and "not in `crops.licences`" in b["body"]
+    assert "data:new" in b["labels"] and not {"data:ineligible", "licence-excluded"} & set(b["labels"])
+    assert "GPL-3.0" in b["body"] and "Ineligible" not in b["body"]
 
 
 @respx.mock
@@ -139,17 +137,6 @@ async def test_downloaded_union_keeps_newest_and_both_downloaders(gh_catalog):
     ]
     assert e["at"] == max(ats)
     assert d["czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet"]["downloaders"] == ["tensorswitch"]
-
-
-def test_shape_without_axes_uses_last_two_dims():
-    rec = {
-        "id": "x",
-        "title": "t",
-        "license": {"spdx": "MIT"},
-        "technical": {"arrays": [{"role": "raw", "axes": None, "shape": [10, 512, 512], "dtype": "uint8"}]},
-    }
-    entry = {"record_commit": "a" * 40, "dataset_dir": "/d", "downloaders": ["native"]}
-    assert "maybe-small" not in render_issue(rec, entry, LIC)[2]
 
 
 @respx.mock
@@ -210,3 +197,10 @@ def test_dataset_folder_follows_miao_layout(rid, folder):
     assert catalog.dataset_folder(rec, rid) == folder
     with pytest.raises(ValueError):
         catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "organism": []}}, rid)
+
+
+def test_render_issue_with_record_commit_only():
+    rec = yaml.safe_load((FIX / "records" / "bbbc034-hipsc-nuclei-3d.yaml").read_text())
+    title, body, labels = render_issue(rec, {"record_commit": "a" * 40}, "o/catalog", "datasets/x.yaml")
+    assert body.startswith("<!-- mia-data:record=bbbc034-hipsc-nuclei-3d -->")
+    assert "Downloaded by: none" in body and "Dataset dir" not in body and "data:new" in labels

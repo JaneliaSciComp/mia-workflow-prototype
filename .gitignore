@@ -4,6 +4,6 @@ __pycache__/
 .pytest_cache/
 .env
 autodev*.yaml
-!autodev.yaml.example
 mia_data.yaml
+mia_buffers.yaml
 mia.yaml

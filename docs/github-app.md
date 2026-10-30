@@ -71,7 +71,7 @@ the end is the **installation ID**.
 
 ## 4. Configure autodev
 
-In `autodev.yaml`:
+In the shared `github` section of `mia.yaml`:
 
 ```yaml
 github:

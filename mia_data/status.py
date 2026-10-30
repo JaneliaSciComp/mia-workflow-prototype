@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from autodev.activities import neutralize
+from mia_core.untrusted import neutralize
 
 
 def safe_text(value: Any) -> str:
@@ -19,8 +19,8 @@ def safe_text(value: Any) -> str:
     return " ".join(str(value).split()).replace("<!--", "&lt;!--").replace("|", "\\|")
 
 
-def render_stage(stage: str, detail: str = "") -> str:
-    return f"**Stage:** `data:{safe_text(stage)}`" + (f"\n\n{neutralize(detail)}" if detail else "") + "\n"
+def render_stage(stage: str, detail: str = "", prefix: str = "data") -> str:
+    return f"**Stage:** `{prefix}:{safe_text(stage)}`" + (f"\n\n{neutralize(detail)}" if detail else "") + "\n"
 
 
 def render_crops_table(rows: list[dict]) -> str:

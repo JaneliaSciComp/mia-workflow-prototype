@@ -1,15 +1,17 @@
+from pathlib import Path
+
 import pytest
 import yaml
 from autodev_helpers import make_cfg
 
 from autodev.config import PROJECT_DIR, load_config
 
-EXAMPLE = PROJECT_DIR / "autodev.yaml.example"
+EXAMPLE = PROJECT_DIR / "mia.yaml.example"
 
 
 def test_example_loads_and_derives_names(monkeypatch):
     monkeypatch.delenv("AUTODEV_DEPLOYMENT", raising=False)
-    cfg = load_config(EXAMPLE)
+    cfg = load_config(EXAMPLE, service="autodev")
     assert cfg.github.auth == "token"
     assert cfg.label("go") == "autodev:go"
     assert cfg.branch(12) == "autodev/issue-12"
@@ -22,7 +24,7 @@ def test_example_loads_and_derives_names(monkeypatch):
 
 def test_deployment_override_isolates_a_personal_instance(monkeypatch):
     monkeypatch.setenv("AUTODEV_DEPLOYMENT", "autodev-kr")
-    cfg = load_config(EXAMPLE)
+    cfg = load_config(EXAMPLE, service="autodev")
     assert cfg.task_queue == "autodev-kr"
     assert cfg.label("go") == "autodev-kr:go"
     assert cfg.branch(3) == "autodev-kr/issue-3"
@@ -91,12 +93,40 @@ def test_env_override_into_an_empty_section(tmp_path, monkeypatch):
     assert load_config(p).temporal.address == "example:7233"
 
 
-def test_trusted_bots_must_be_apps(tmp_path):
-    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]"]}).github.trusted_bots == ["x[bot]"]
+def test_trusted_bots_take_the_app_slug_and_add_the_bot_suffix(tmp_path):
+    assert make_cfg(tmp_path, github={"trusted_bots": ["x[bot]", "y"]}).github.trusted_bots == ["x[bot]", "y[bot]"]
     with pytest.raises(ValueError, match="trusted_bots"):
-        make_cfg(tmp_path, github={"trusted_bots": ["alice"]})
+        make_cfg(tmp_path, github={"trusted_bots": ["bad slug!"]})
 
 
 def test_max_budget_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="max_budget_usd"):
         make_cfg(tmp_path, agent={"max_budget_usd": 0})
+
+
+MIA_YAML = """
+temporal: {address: h:7233}
+github: {auth: token}
+paths: {state_root: ~/mia-state, work_root: /w}
+services:
+  snippets: {app: autodev, github: {repo: o/snips}, agent: {model: sonnet}}
+  mia-data: {app: mia-data, github: {data_repo: o/d}}
+"""
+
+
+def test_load_config_from_a_mia_yaml_service(tmp_path, monkeypatch):
+    (tmp_path / "mia.yaml").write_text(MIA_YAML)
+    monkeypatch.setenv("MIA_SERVICE", "snippets")
+    monkeypatch.setenv("MIA_CONFIG", str(tmp_path / "mia.yaml"))
+    monkeypatch.delenv("AUTODEV_DEPLOYMENT", raising=False)
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "env:1")
+    cfg = load_config()
+    assert cfg.deployment == "snippets" and cfg.github.repo == "o/snips" and cfg.temporal.address == "env:1"
+    assert cfg.paths.state_dir == (Path("~/mia-state").expanduser() / "snippets").resolve()
+
+
+def test_state_dir_from_state_root_is_expanded(tmp_path, monkeypatch):
+    (tmp_path / "mia.yaml").write_text(MIA_YAML.replace("~/mia-state", "rel/state"))
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(tmp_path / "mia.yaml", service="snippets")
+    assert cfg.paths.state_dir.is_absolute() and cfg.paths.state_dir.name == "snippets"

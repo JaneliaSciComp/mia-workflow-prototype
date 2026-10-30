@@ -146,7 +146,7 @@ class PrSnapshot:
     pr: int
     state: str  # open | closed | merged
     head_sha: str
-    approved: bool  # a qualifying human approval of head_sha exists
+    approved: bool  # a qualifying approval of head_sha exists (a human's, or a trusted bot's `/approve` comment)
     checks: str  # success | pending | failure | none
     feedback: list[Feedback] = field(default_factory=list)  # requests not yet handled, per GitHub markers
 

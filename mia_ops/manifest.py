@@ -1,5 +1,6 @@
-"""mia.yaml: the services on this host (name -> app + config), where agentic-sandbox is, and whether `mia`
-runs the Temporal dev server itself or depends on an external one (production: Temporal in k8s)."""
+"""mia.yaml as `mia` reads it: the services on this host (name -> app + its sections), where agentic-sandbox is,
+and whether `mia` runs the Temporal dev server itself or depends on an external one (production: Temporal in k8s).
+The applications validate the rest of the file themselves (`mia_core.config.service_config`)."""
 
 from __future__ import annotations
 
@@ -9,28 +10,33 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-import yaml
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR
+from mia_core.config import manifest_path, read_manifest
 
 NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,30}")
 
 
 class TemporalCfg(BaseModel):
+    model_config = ConfigDict(extra="allow")  # address, poll_minutes: shared with the applications, not read here
+
     managed: bool = False  # True: `mia` runs a local dev server (dev hosts); False: something else does (k8s)
     state_dir: Path = Path("~/.local/state/temporal")  # managed only: temporal.db, logs/, bin/temporal
 
 
 class ServiceCfg(BaseModel):
-    app: Literal["autodev", "mia-data"]
-    config: Path  # relative to the repo
+    model_config = ConfigDict(extra="allow")  # the service's own sections, validated by its application
+
+    app: Literal["autodev", "mia-data", "mia-buffers"]
+    config: Path | None = None  # deprecated: a separate per-app config file, relative to the repo
 
 
 class Manifest(BaseModel):
     sandbox_dir: Path = Path("../agentic-sandbox/scripts")  # relative to the repo
     temporal: TemporalCfg = TemporalCfg()
     services: dict[str, ServiceCfg]
+    path: Path | None = None  # the file this was loaded from (set by load_manifest)
 
     @model_validator(mode="after")
     def _finish(self) -> Manifest:
@@ -45,6 +51,8 @@ class Manifest(BaseModel):
         self.temporal.state_dir = self.temporal.state_dir.expanduser().resolve()
         seen: dict[Path, str] = {}
         for name, service in self.services.items():
+            if service.config is None:
+                continue
             service.config = (PROJECT_DIR / service.config).resolve()
             if service.config in seen:
                 raise ValueError(f"services: {name!r} and {seen[service.config]!r} use the same config file")
@@ -53,11 +61,12 @@ class Manifest(BaseModel):
 
 
 def load_manifest(path: str | os.PathLike | None = None) -> Manifest:
-    """Load and validate mia.yaml, exiting with a readable message if it is missing or invalid."""
-    path = Path(path or os.environ.get("MIA_MANIFEST") or PROJECT_DIR / "mia.yaml")
-    if not path.is_file():
-        sys.exit(f"mia: manifest not found at {path} (copy mia.yaml.example, or set $MIA_MANIFEST)")
+    """Load and validate mia.yaml ($MIA_CONFIG; $MIA_MANIFEST is the deprecated name), exiting with a readable
+    message if it is missing or invalid."""
+    # absolute: the worker runs from its state dir and mounts this file
+    path = manifest_path(path or os.environ.get("MIA_CONFIG") or os.environ.get("MIA_MANIFEST")).expanduser().resolve()
+    data = read_manifest(path)
     try:
-        return Manifest(**(yaml.safe_load(path.read_text()) or {}))
+        return Manifest(**{**data, "path": path})
     except ValidationError as e:
         sys.exit(f"mia: {path}: {e}")

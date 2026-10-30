@@ -12,14 +12,16 @@ import math
 import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 from urllib.parse import quote
 
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
+from mia_core.config import ServiceCfg, load_service_config, manifest_path
 
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
@@ -31,22 +33,22 @@ STAGES = {
     "new": ("ededed", "mia-data: dataset issue seen"),
     "matching": ("fbca04", "mia-data: matching the dataset to a snippet"),
     "developing": ("fbca04", "mia-data: agent writing a snippet"),
-    "testing": ("fbca04", "mia-data: testing the snippet"),
-    "pr-ready": ("1d76db", "mia-data: snippet PR ready for review"),
+    "testing": ("fbca04", "mia-data: making the crops to review"),
     "review": ("1d76db", "mia-data: waiting for review"),
-    "cropping": ("fbca04", "mia-data: producing crops"),
+    "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
-    "ineligible": ("cccccc", "mia-data: dataset not eligible"),
 }
 HUMAN_LABELS = {  # set by humans
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
-    "approve": ("0e8a16", "Approve the test crops; produce the full set"),
+    "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
+    "reject": (
+        "d93f0b",
+        "Reject the crops under review: your comments since the review go to the agent fixing the snippet",
+    ),
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
-    "maybe-small": ("c5def5", "Dataset may be too small for crops"),
-    "licence-excluded": ("cccccc", "Licence not in crops.licences"),
 }
 
 
@@ -62,17 +64,21 @@ class GitHubCfg(BaseModel):
     installation_id: int | None = None
     private_key_path: Path | None = None
     api_url: str = "https://api.github.com"
+    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label counts without a permission lookup
 
 
 class PathsCfg(BaseModel):
     """`work_root` and `storage_root` take a path, or `{path, url}` where `url` is where a browser (Fileglancer)
     shows that folder; issue comments then link the folders they mention."""
 
+    ROOTS: ClassVar[tuple[str, ...]] = ("work_root", "storage_root")  # the roots that take `{path, url}`
+
     state_dir: Path = Path("~/.local/state/mia-data")
     work_root: Path
     work_root_url: str | None = None
     storage_root: Path
     storage_root_url: str | None = None
+    local_root: Path | None = None  # a host-local directory; no `url`, so it is not one of ROOTS
 
     @model_validator(mode="before")
     @classmethod
@@ -80,14 +86,15 @@ class PathsCfg(BaseModel):
         """Accept `{path, url}` for a root and split it into the `<root>` and `<root>_url` fields."""
         if isinstance(data, dict):
             data = dict(data)
-            for key in ("work_root", "storage_root"):
+            for key in cls.ROOTS:
                 if isinstance(value := data.get(key), dict):
                     data[key], data[f"{key}_url"] = value.get("path"), value.get("url")
         return data
 
     def link(self, path: Path) -> str | None:
         """The browse URL of `path`, from the url of the root it is under; None when that root has none."""
-        for root, url in ((self.work_root, self.work_root_url), (self.storage_root, self.storage_root_url)):
+        for name in self.ROOTS:
+            root, url = getattr(self, name), getattr(self, f"{name}_url")
             if url and path.is_relative_to(root):
                 rel = path.relative_to(root)
                 return url.rstrip("/") + ("" if rel == Path() else "/" + quote(rel.as_posix()))
@@ -104,7 +111,6 @@ class CropsCfg(BaseModel):
     test_per_round: int = 4
     per_plane: int = 4
     per_file: int = 8
-    licences: list[str] = ["CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "MIT"]
 
 
 class LimitsCfg(BaseModel):
@@ -113,6 +119,9 @@ class LimitsCfg(BaseModel):
     agent_max_budget_usd: float = 5
     max_stage_attempts: int = 1
     max_pr_revisions: int = 5
+    fetch_bytes: float = 50e9
+    fetch_walltime_min: int = 480
+    fetch_attempts: int = 4
 
 
 class HarnessCfg(BaseModel):
@@ -122,6 +131,10 @@ class HarnessCfg(BaseModel):
 class NetworkCfg(BaseModel):
     package_hosts: list[str] = ["pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.prefix.dev"]
     redirect_hosts: dict[str, list[str]] = {}  # data host -> hosts it redirects to; exact names, no patterns
+
+
+class EvaluateCfg(BaseModel):
+    enabled: bool = False  # the evaluate job after cropping; a switch only, no job is built yet
 
 
 class Config(BaseModel):
@@ -137,18 +150,20 @@ class Config(BaseModel):
     agent: AgentCfg = AgentCfg()
     harness: HarnessCfg
     network: NetworkCfg = NetworkCfg()
+    service: ServiceCfg | None = None
+    evaluate: EvaluateCfg = EvaluateCfg()
 
     @model_validator(mode="after")
     def _finish(self) -> Config:
         """Cross-field checks and path normalization that pydantic's per-field validation cannot do."""
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", self.deployment):
             raise ValueError(f"deployment {self.deployment!r}: use 2-31 chars of a-z, 0-9, '-'")
+        if "namespace" not in self.temporal.model_fields_set:  # mia.yaml's shared temporal section has no namespace
+            self.temporal.namespace = type(self).model_fields["temporal"].default.namespace
         self._check_github()
         self._resolve_paths()
         self._check_limits()
         self._check_agent()
-        if not self.crops.licences:
-            raise ValueError("crops.licences must not be empty")
         self._check_network()
         return self
 
@@ -156,6 +171,11 @@ class Config(BaseModel):
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
+        # the slug as GitHub shows the App, or the login it acts under ("<slug>[bot]"); stored as the login
+        slugs = [login.removesuffix("[bot]") for login in github.trusted_bots]
+        if bad := [slug for slug in slugs if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", slug)]:
+            raise ValueError(f"github.trusted_bots: {bad} must be GitHub App slugs")
+        github.trusted_bots = [f"{slug}[bot]" for slug in slugs]
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())
@@ -167,6 +187,10 @@ class Config(BaseModel):
             for name, value in vars(section).items():
                 if isinstance(value, Path):
                     setattr(section, name, value.expanduser().resolve())
+        if self.service and self.service.token_file:
+            self.service.token_file = (
+                self.service.token_file.expanduser().absolute()
+            )  # not resolve(): follow no symlink
         for other in (paths.work_root, paths.storage_root):
             if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
                 raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")
@@ -217,22 +241,43 @@ class Config(BaseModel):
         return f"<!-- mia-data: {text} -->"
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
+def load_config(
+    path: str | os.PathLike | None = None,
+    *,
+    cls: type[Config] = Config,
+    env_var: str = "MIA_DATA_CONFIG",
+    default_name: str = "mia_data.yaml",
+    prog: str = "mia-data",
+    overrides: Mapping[str, tuple[str, ...]] = _ENV_OVERRIDES,
+    service: str | None = None,
+) -> Config:
+    """Load and validate the config file, exiting with a readable message if it is missing or invalid.
+
+    With a service name (or $MIA_SERVICE) the config is that service's block of mia.yaml instead of the file.
+    mia_buffers loads its `Config` subclass through the same function (`cls`, its own env var and file name)."""
     load_dotenv()
-    path = Path(path or os.environ.get("MIA_DATA_CONFIG") or PROJECT_DIR / "mia_data.yaml")
-    if not path.is_file():
-        sys.exit(f"mia-data: config not found at {path} (copy mia_data.yaml.example, or set $MIA_DATA_CONFIG)")
-    data = yaml.safe_load(path.read_text()) or {}
-    for env_var, key_path in _ENV_OVERRIDES.items():
-        if os.environ.get(env_var):
+    service = service or os.environ.get("MIA_SERVICE")
+    source: str | Path
+    if service:
+        source = f"{manifest_path(path)} (service {service})"
+        data = load_service_config(service, path)
+    else:
+        path = Path(path or os.environ.get(env_var) or PROJECT_DIR / default_name)
+        if not path.is_file():
+            sys.exit(
+                f"{prog}: config not found at {path} (copy mia.yaml.example to mia.yaml and set MIA_SERVICE, or set ${env_var})"
+            )
+        source = path
+        data = yaml.safe_load(path.read_text()) or {}
+    for env_name, key_path in overrides.items():
+        if os.environ.get(env_name):
             node = data
             for key in key_path[:-1]:
                 if node.get(key) is None:  # a bare `temporal:` in YAML parses as None
                     node[key] = {}
                 node = node[key]
-            node[key_path[-1]] = os.environ[env_var]
+            node[key_path[-1]] = os.environ[env_name]
     try:
-        return Config(**data)
+        return cls(**data)
     except ValidationError as err:
-        sys.exit(f"mia-data: invalid config {path}:\n{err}")
+        sys.exit(f"{prog}: invalid config {source}:\n{err}")

@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class LabelEvent:
-    """A human adding `data:go` or `data:approve` to a dataset issue, delivered to the workflow as a signal."""
+    """A human adding `data:go`, `data:approve` or `data:reject` to a dataset issue, delivered as a signal."""
 
-    kind: str  # go | approve
+    kind: str  # go | approve | reject; mia-buffers adds plan
     event_id: str
     actor: str
     at: str  # ISO-8601 from GitHub
@@ -63,6 +63,9 @@ class Test:
     finished_at: str | None = None
     gallery_prefix: str | None = None
     tree_sha: str | None = None
+    crop_workspace: str | None = None  # the round's set (spec §13): where its crops and verify report are
+    verify_workspace: str | None = None
+    approved_at: str | None = None  # the `data:approve` event's time, once a reviewer approved this set (spec §14)
 
 
 @dataclass
@@ -113,21 +116,21 @@ class JobArgs:
 class MatchResult:
     """What the match agent concluded about the dataset, after the worker checked its binding."""
 
-    outcome: str  # matched | needs_snippet | ineligible | blocked (blocked = needs-human, with the reason)
+    outcome: str  # matched | needs_snippet | blocked (blocked = needs-human, with the reason)
     reason: str = ""
-    binding_path: str | None = None  # matched/ineligible: the checked binding, under state_dir
+    binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None
-    shapes: dict | None = None  # ineligible
+    shapes: dict | None = None  # wire format: the `ineligible` outcome's shapes until spec §12; unused now
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
-    reasons: list[str] = field(default_factory=list)  # matched/ineligible: the binding's reasons
+    reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
 
 
 @dataclass
 class SmokeResult:
-    """The worker's own quick check of a binding: can the data be opened, and is it big enough to crop?"""
+    """The worker's own quick check of a binding: can the data be opened and read as the record says?"""
 
     ok: bool
-    eligible: bool = False
+    eligible: bool = True  # wire format: smoke's size verdict until spec §12; smoke.json no longer sends it
     shapes: dict | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -155,6 +158,15 @@ class RoundLimits:
     per_round: int
     walltime_min: int
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
+    poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
+
+
+@dataclass
+class LockTaken:
+    """The take_lock activity's answer: taken, or not, and then who holds the lock (its owner string)."""
+
+    ok: bool
+    holder: str = ""
 
 
 @dataclass

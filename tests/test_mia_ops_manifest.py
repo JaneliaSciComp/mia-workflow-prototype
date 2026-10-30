@@ -12,8 +12,17 @@ SERVICES = {
 
 def test_example_manifest_loads():
     m = load_manifest(PROJECT_DIR / "mia.yaml.example")
-    assert list(m.services) == ["autodev", "snippets", "mia-data"] and m.temporal.managed is True
-    assert m.services["snippets"].app == "autodev"
+    assert list(m.services) == ["autodev", "snippets", "mia-data", "mia-buffers"] and m.temporal.managed is True
+    assert m.services["snippets"].app == "autodev" and m.services["mia-data"].config is None
+    assert m.path == PROJECT_DIR / "mia.yaml.example"
+
+
+def test_service_blocks_carry_sections_and_legacy_config_is_optional():
+    m = Manifest(
+        services={"aa": {"app": "autodev", "github": {"repo": "o/r"}}, "bb": {"app": "mia-data", "config": "x.yaml"}}
+    )
+    assert m.services["aa"].model_extra == {"github": {"repo": "o/r"}}
+    assert m.services["bb"].config == PROJECT_DIR / "x.yaml"
 
 
 def test_omitted_temporal_section_means_external():
@@ -58,3 +67,18 @@ def test_load_manifest_env_default(tmp_path, monkeypatch):
     p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
     monkeypatch.setenv("MIA_MANIFEST", str(p))
     assert list(load_manifest().services) == ["autodev"]
+
+
+def test_load_manifest_prefers_mia_config_env(tmp_path, monkeypatch):
+    p = tmp_path / "m.yaml"
+    p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(p))
+    monkeypatch.delenv("MIA_MANIFEST", raising=False)
+    assert load_manifest().path == p
+
+
+def test_load_manifest_resolves_a_relative_path(tmp_path, monkeypatch):
+    (tmp_path / "m.yaml").write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
+    monkeypatch.chdir(tmp_path)
+    m = load_manifest("m.yaml")
+    assert m.path.is_absolute() and m.path == (tmp_path / "m.yaml").resolve()

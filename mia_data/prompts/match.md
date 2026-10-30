@@ -22,8 +22,18 @@ All in the current directory:
    `record_commit: ${record_commit}` and `snippets_commit: ${snippets_commit}`. List every raw array under
    `raw` and every label array under `labels`, each with a `snippet` from `catalog/`, its `urls` (https, from
    `record.yaml`) and its `params`. Labels also need `pairs_with`, `label_key` and `segmentation_type`.
-   `label_key` is the catalog's label name exactly as `downloads.json` lists it (e.g. `unknown-cell-labels`);
-   it becomes a file name, so never rename it.
+   `label_key` becomes the label's file name, so it is fixed by rule, never free text. When `downloads.json` has a
+   `labels` list, use those names exactly: a downloader already converted this dataset under them. Otherwise
+   compose it from the record the way the catalog's own tools do: `<provenance>-<class>-<kind>`.
+   `provenance` is `annotations.source` mapped manual → `manual_gt`, proofread → `proofread`, automatic →
+   `auto_pred`, anything else (unknown, mixed, missing) → `unknown`. `class` is what the mask marks, taken from
+   the array's `classes`, the record's text or the file names, as a lowercase slug with `_` between words; use
+   `cell`, `nucleus`, `mitochondria`, `synapse`, `vesicle`, `neurite`, `myelin` or `blood_vessel` when one fits.
+   `kind` is the array's `encoding` mapped instance-ids → `instance`, semantic-ids or binary → `semantic`,
+   points-table → `points` (the binding's own `segmentation_type` still says `binary` for a binary mask; only
+   the key folds it into `semantic`). So manually drawn cell instance masks are `manual_gt-cell-instance`, and a
+   binary nuclear mask of unknown provenance is `unknown-nucleus-semantic`. A class you cannot tell from the
+   inputs is `blocked`; an unlisted provenance is not, it is `unknown`.
 3. Test it:
 
        harness smoke binding.yaml --snippets ./snapshot --record record.yaml --out smoke.json
@@ -32,7 +42,7 @@ All in the current directory:
    several snippets and params.
 4. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
 
-   - The binding passes smoke and at least one raw array is eligible:
+   - The binding passes smoke:
 
          {"outcome": "matched", "binding": <binding.yaml as JSON>}
 
@@ -42,11 +52,6 @@ All in the current directory:
           "what_fails": "<what a new snippet must handle, with the smoke errors>",
           "tried": [{"snippet": "<name>", "params": {}, "error": "<smoke error>"}]}
 
-   - The binding passes smoke, but no raw array has Y >= 256 and X >= 256 (`"eligible": false` in
-     `smoke.json`). Stop here; there is nothing to crop. Keep the passing `binding.yaml`:
-
-         {"outcome": "ineligible", "shapes": <the "shapes" object from smoke.json>}
-
    - You can't decide, or something outside your control stops you (an undecidable label class, a dependency
      missing from the allowlist, a host the job may not reach):
 
@@ -54,8 +59,8 @@ All in the current directory:
 
 # Rules
 
-- Never invent values. Every axis, shape, dtype, voxel size, URL, label key and class comes from
-  `record.yaml`, the downloader's files or what the harness reports. If you would have to guess, report
+- Never invent values. Every axis, shape, dtype, voxel size, URL and label class comes from `record.yaml`,
+  the downloader's files or what the harness reports, and every label key from the rule above. If you would have to guess, report
   `blocked` and say what is unknown.
 - Give a reason in `reasons` for every non-default decision, and evidence for any axis override or transform
   (which metadata says so).
