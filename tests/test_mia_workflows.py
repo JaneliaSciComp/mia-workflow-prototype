@@ -101,6 +101,7 @@ class Mocks:
             issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
         ) -> None:
             if stage in self.slow_stages:
+                rec("stage_waits", stage)
                 await self.stage_gate.wait()
             rec("set_stage", stage, detail, extra)
 
@@ -341,6 +342,9 @@ async def test_a_stage_write_does_not_hold_the_round(env):
     async with started(env, m) as h:
         await until(lambda: m.of("submit"))
         assert m.stages == [] and m.of("submit")[0][1] == "match"
+        # open the gate once the final write waits: the matching write's cancel went first, so its completion
+        # cannot race the cancel (the test server answers that race with ACTIVITY_UNKNOWN and a failed task)
+        await until(lambda: ("needs-human",) in m.of("stage_waits"))
         m.stage_gate.set()
         await idle(h, m, "needs-human")
     assert m.stages == ["matching", "needs-human"]
