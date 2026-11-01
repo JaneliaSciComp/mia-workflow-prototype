@@ -24,10 +24,11 @@ Temporal is only orchestration state and can live anywhere the workers can reach
 
 | component | where | notes |
 |---|---|---|
-| Temporal server, UI, Postgres | Kubernetes | one cluster; one namespace per deployment (`autodev`, `snippets`, `mia-data`); TLS on the frontend; UI behind SSO |
+| Temporal server, UI, Postgres | Kubernetes | one cluster; one namespace per service (`autodev`, `snippets`, `mia-data`, `mia-buffers`); TLS on the frontend; UI behind SSO |
 | csub broker + sandboxed worker, one pair per service | cluster-attached host, service account | systemd user units with linger, `Restart=always`, logs in journald |
+| buffer-api (`mia-buffers serve`) and its read-only page | same host, beside the mia-buffers broker, unsandboxed | a third unit for that service; its SQLite ledger lives in the service's `state_dir`, backed up every `keeper.minutes` |
 | agent and harness jobs | LSF via csub | unchanged |
-| configs and secrets | the service account's home | `~svc/.config/mia/{mia,autodev,autodev-snippets,mia_data}.yaml`, the App PEM, token files; `$MIA_MANIFEST` names the manifest |
+| configs and secrets | the service account's home | one `~svc/.config/mia/mia.yaml` named by `$MIA_CONFIG`, every service a block under `services:`; the App PEM, token files |
 | code | a tagged checkout at a fixed path, with a `current` symlink | the sandbox binds it read-only; deploy = `pixi install` in the new checkout, flip the symlink, `mia restart <service>` |
 
 ### Which host
@@ -42,18 +43,18 @@ time, so it is a fallback, not the plan.
 
 ### mia.yaml stays
 
-`mia.yaml` is the per-host manifest: which services run here, where agentic-sandbox is, whether `mia` runs
-Temporal. Production uses it with `temporal.managed: false`, so `mia up` only verifies the cluster answers and
-never starts or stops it. The service configs keep their shape; only `temporal.address` and the new TLS fields
-change.
+`mia.yaml` is the one config file: which services run here, where agentic-sandbox is, whether `mia` runs
+Temporal, and each service's block (the per-app YAML files are deprecated). Production uses it with
+`temporal.managed: false`, so `mia up` only verifies the cluster answers and never starts or stops it. The service
+blocks keep their shape; only `temporal.address` and the new TLS fields change.
 
 ## Changes needed (todo)
 
 None of these touch `workflows.py`, so there is no replay risk.
 
 1. **systemd backend for `mia_ops`.** A `runner: systemd` key in `mia.yaml` (default `tmux`). `mia systemd
-   install` writes `~/.config/systemd/user/mia-<service>-broker.service` and `-worker.service` from the same
-   `Stack`/`Service` objects `services.py` uses for tmux; `up`, `down`, `restart`, `ps`, `logs` and `attach` then
+   install` writes `~/.config/systemd/user/mia-<service>-broker.service` and `-worker.service` (and `-api.service`
+   for a service with a `service:` block) from the same `Stack`/`Service` objects `services.py` uses for tmux; `up`, `down`, `restart`, `ps`, `logs` and `attach` then
    dispatch to `systemctl --user` and `journalctl --user`. The broker socket moves from `/scratch/$USER` (node-local,
    periodically cleaned) to `$XDG_RUNTIME_DIR`, which exists once `loginctl enable-linger svc` is set.
 2. **Temporal TLS and auth.** `TemporalCfg` gains `tls: bool = False` and either `client_cert`/`client_key` paths
@@ -65,9 +66,10 @@ None of these touch `workflows.py`, so there is no replay risk.
 4. **Agent billing from a file.** Production should not depend on an interactive OAuth login for the service
    account. Add `agent.api_key_file`, bind it read-only into the job and set `ANTHROPIC_API_KEY` from it (the
    broker policy's `env_allow` must cover it), and drop the `mia up` refusal of `api_key_env`.
-5. **State on backed-up storage.** `state_dir` is the durable record on the cluster side (job ids, mirrors,
-   logs); put it under `/groups`, which is backed up, not under `/nrs`. The Temporal database is the other half;
-   back up Postgres in Kubernetes.
+5. **State on backed-up storage.** `paths.state_root` is the durable record on the cluster side (job ids, mirrors,
+   logs, buffer-api's ledger); put it under `/groups`, which is backed up, not under `/nrs`. `paths.local_root`
+   is the exception: it holds the raw-cache locks and must be host-local disk, never NFS (`mia_core.locks`), so
+   the VM needs a local scratch volume. The Temporal database is the other half; back up Postgres in Kubernetes.
 6. **Release procedure.** Tag, `git clone` into `releases/<tag>`, `pixi install`, `pixi run mia exec <service>
    check` against production config, flip `current`, `mia restart <service>`. A worker restart mid-round is safe:
    job submission is idempotent and `wait` reattaches by job id. Changes to `workflows.py` or `decide.py` still
