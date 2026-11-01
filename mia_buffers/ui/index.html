@@ -1,0 +1,1806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIA Buffers</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* The buffer page: a top bar, then one of five views (datasets, buffers, cache, preparation, docs) chosen by the hash. */
+:root{
+  --bg:#f9f9f7; --surface:#fcfcfb; --fg:#0b0b0b; --fg2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --accent:#2a78d6; --accent-soft:#cde2fb; --warn:#ec835a; --warn-soft:#fbeedd;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0d0d0d; --surface:#1a1a19; --fg:#f0efec; --fg2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --accent:#3987e5; --accent-soft:#184f95; --warn:#ec835a; --warn-soft:#3a2812;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0d0d0d; --surface:#1a1a19; --fg:#f0efec; --fg2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --accent:#3987e5; --accent-soft:#184f95; --warn:#ec835a; --warn-soft:#3a2812;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; color-scheme:dark }
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14.5px;line-height:1.5;margin:0;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 64px}
+main{max-width:1500px;margin:0 auto}
+h1{font-size:20px;font-weight:600;margin:0;line-height:1.15}
+h2{font-size:17px;font-weight:600;margin:0 0 4px;text-wrap:balance}
+h3{font-size:14px;font-weight:600;margin:14px 0 4px}
+p{margin:0 0 8px;max-width:72ch}
+a{color:var(--accent)}
+code{font-family:var(--mono);font-size:.92em}
+button,select,input{font:inherit;color:inherit}
+.small{font-size:12.5px;color:var(--muted)}
+tr.superseded td{opacity:.55}
+.mono{font-family:var(--mono);font-size:12.5px}
+td.pills{white-space:nowrap}
+
+/* top bar: title, the five tabs, the catalog ref, the theme toggle */
+.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
+  position:sticky;top:0;z-index:6;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding; above the filter box */
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
+.tabs a:hover{color:var(--fg)}
+.tabs a[aria-current="page"]{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.catref{font-family:var(--mono);font-size:12.5px;color:var(--fg2);margin-left:auto}
+.btn{display:inline-block;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px;text-decoration:none;color:var(--fg)}
+.btn:hover:not(:disabled){background:var(--accent-soft)}
+.btn:disabled{color:var(--muted);cursor:not-allowed}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* errors: one dismissable line per failed fetch */
+.banner{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.banner div{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--warn);border-radius:8px;padding:6px 10px;background:var(--surface);font-size:13px}
+.banner span{flex:1;overflow-wrap:anywhere}
+.banner button{border:0;background:transparent;cursor:pointer;color:var(--fg2);font-size:16px;line-height:1}
+.notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
+pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
+.empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
+
+/* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
+   It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
+   the box-shadow fills that gap in the page colour while the content scrolls under. */
+.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin-bottom:10px;
+  position:sticky;top:calc(var(--topbar-h,0px) + 14px);z-index:5;box-shadow:0 -14px 0 var(--bg)}
+.filterbox:not([open]){padding-bottom:8px}
+.filterbox summary{cursor:pointer;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);user-select:none;width:max-content}
+.filterbox summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.filterbox[open] summary{margin-bottom:8px}
+.filters{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start}
+.filters fieldset{border:0;padding:0;margin:0;min-width:0}
+.filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--axis);border-radius:999px;padding:2px 9px;font-size:12.5px;cursor:pointer;user-select:none;background:transparent}
+.chip input{margin:0;accent-color:var(--accent)}
+.chip:has(input:checked){background:var(--accent-soft);border-color:var(--accent)}
+.chip:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:1px}
+.filters select,.filters input[type=text]{border:1px solid var(--axis);border-radius:6px;padding:3px 6px;background:var(--surface)}
+.filters label.inline{display:inline-flex;gap:6px;align-items:center;font-size:13px}
+.footprint{font-family:var(--mono);font-size:13px;color:var(--fg2)}
+input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
+.actions{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:16px}
+.actions > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+
+/* KPI row */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}
+@media (min-width:1280px){.kpis{grid-template-columns:repeat(8,minmax(0,1fr))}}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:10px 12px}
+.tile .label{font-size:12px;color:var(--fg2)}
+.tile .value{font-size:24px;font-weight:600;line-height:1.1;margin-top:2px;overflow-wrap:anywhere}
+.tile.hero .value{font-size:44px}
+.tile.text .value{font-size:15px;font-weight:500;line-height:1.35}
+.tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
+
+/* chart cards */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:14px;margin-bottom:14px}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
+.grid2 .card{margin-bottom:0}
+.card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
+.card svg{display:block;width:100%;height:auto;font-family:var(--sans)}
+.card svg text{fill:var(--fg2);font-size:12px}
+.card svg .lbl{fill:var(--fg)}
+.card svg .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.card svg .grid{stroke:var(--grid);stroke-width:1}
+.card svg .base{stroke:var(--axis);stroke-width:1}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--fg2);margin:0 0 6px}
+.legend span i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:5px}
+.toplist{list-style:none;padding:0;margin:6px 0 0;font-size:13px}
+.toplist li{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--grid)}
+.toplist li b{font-variant-numeric:tabular-nums;font-weight:500}
+.toplist li span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2)}
+dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;font-size:13px;margin:0}
+dl.kv dt{color:var(--fg2)}
+dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
+.meter{height:12px;background:var(--grid);border-radius:999px;overflow:hidden;margin:6px 0 4px}
+.meter i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.meter.over i{background:var(--warn)}
+.health{font-size:13px;font-weight:500}
+.health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
+.links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
+
+/* table */
+.tablebar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+.tablebar input[type=search]{border:1px solid var(--axis);border-radius:6px;padding:4px 8px;background:var(--surface);min-width:220px}
+.tablebar label.inline{display:inline-flex;gap:6px;align-items:center;font-size:13px}
+.tablewrap{overflow-x:auto;border:1px solid var(--ring);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:5px 8px;text-align:left;border-bottom:1px solid var(--grid);white-space:nowrap}
+th{position:sticky;top:0;background:var(--surface);cursor:pointer;color:var(--fg2);font-weight:500;user-select:none}
+th:hover{color:var(--fg)}
+table.plain th{cursor:default}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td.id{max-width:300px;overflow:hidden;text-overflow:ellipsis}
+td.wrap{white-space:normal;min-width:200px;max-width:520px;overflow-wrap:anywhere}
+tr.out td{color:var(--muted)}
+tr.click{cursor:pointer}
+tr.click:hover td{background:var(--accent-soft)}
+.pill{display:inline-block;border-radius:999px;padding:0 7px;font-size:11.5px;border:1px solid var(--axis)}
+.pill.pool{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.pill.warn{border-color:var(--warn);color:var(--warn)}
+img.thumb{display:block;width:36px;height:36px;object-fit:cover;border-radius:3px;background:var(--grid)}
+td:has(img.thumb){padding-top:2px;padding-bottom:2px}
+.tip img{display:block;width:256px;height:256px;margin-top:4px}
+.more{margin:10px 0 0;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer}
+
+/* tooltip */
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--fg);border:1px solid var(--ring);box-shadow:0 2px 10px rgba(0,0,0,.12);border-radius:6px;padding:6px 9px;font-size:12.5px;z-index:20;max-width:300px}
+.tip b{font-weight:600}
+.tip .k{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+@media (prefers-reduced-motion:no-preference){ .chip,.btn{transition:background .12s} }
+
+/* the Docs view: the two documents, in the artifact's reading-column style scoped under .docs */
+.docs{--panel:var(--surface);--line:var(--grid);max-width:980px;margin:0 auto}
+.docs .subtabs{margin-bottom:18px}
+.docs header{margin-bottom:24px}
+.docs .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.docs h1{font-size:26px;font-weight:600;line-height:1.15;margin:6px 0 12px;text-wrap:balance}
+.docs h2{font-size:19px;font-weight:600;margin:34px 0 6px;text-wrap:balance}
+.docs p{margin:0 0 10px}
+.docs code{font-family:var(--mono);font-size:.92em}
+.docs figure{margin:14px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 10px;overflow-x:auto}
+.docs figure svg{display:block;max-width:100%;height:auto;min-width:640px;color:var(--fg);font-family:var(--sans)}
+.docs figcaption{font-size:13.5px;color:var(--muted);margin-top:10px}
+.docs figcaption b{color:var(--fg);font-weight:600}
+.docs pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;overflow-x:auto;margin:14px 0 0}
+.docs pre .c{color:var(--muted)}
+.docs ul{padding-left:1.2em}
+.docs li{margin:2px 0}
+.docs a{color:var(--accent)}
+.docs table{border-collapse:collapse;font-size:13.5px;margin:14px 0 0;max-width:100%}
+.docs th, .docs td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.docs th{font-weight:600;font-size:12.5px;color:var(--muted)}
+.docs td code{white-space:nowrap}
+.docs .tw{overflow-x:auto}
+/* SVG vocabulary */
+.docs .b{fill:var(--panel);stroke:var(--fg);stroke-opacity:.55;stroke-width:1.2}
+.docs .bs{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.docs .un{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
+.docs .band{fill:var(--accent-soft);fill-opacity:.32;stroke:var(--line);stroke-dasharray:4 3}
+.docs .note{fill:var(--bg);stroke:var(--line)}
+.docs .t{font-size:12px;font-weight:500;fill:currentColor;font-family:var(--mono)}
+.docs .ts{font-size:12px;font-weight:600;fill:currentColor}
+.docs .s{font-size:10.5px;fill:var(--muted)}
+.docs .l{font-size:11px;fill:var(--muted)}
+.docs .lm{font-size:11px;fill:currentColor;font-family:var(--mono)}
+.docs .hd{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;fill:var(--muted)}
+.docs .e{stroke:currentColor;stroke-width:1.2;fill:none}
+.docs .ea{stroke:var(--accent);stroke-width:1.6;fill:none}
+.docs .ed{stroke:currentColor;stroke-width:1.1;fill:none;stroke-dasharray:5 4}
+.docs .em{stroke:var(--muted);stroke-width:.9;fill:none}
+.docs .ll{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
+.docs .join{stroke:currentColor;stroke-width:3}
+.docs .sq{fill:none;stroke:currentColor;stroke-width:1.2}
+.docs .sqa{fill:none;stroke:var(--accent);stroke-width:1.8}
+.docs .fa{fill:var(--accent)}
+.docs p{max-width:none}
+.docs table{width:auto}
+.docs th,.docs td{white-space:normal}
+.docs th{position:static;cursor:default;user-select:auto}
+</style>
+</head>
+<body>
+<main>
+<header class="topbar">
+  <h1>MIA Buffers</h1>
+  <nav class="tabs" aria-label="Views">
+    <a href="#datasets" data-tab="datasets">Datasets</a>
+    <a href="#buffers" data-tab="buffers">Buffers</a>
+    <a href="#cache" data-tab="cache">Cache</a>
+    <a href="#preparation" data-tab="preparation">Preparation</a>
+    <a href="#docs" data-tab="docs">Docs</a>
+  </nav>
+  <span class="catref" id="catref">no catalog synced</span>
+  <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme">theme</button>
+</header>
+<div class="banner" id="banner" role="alert"></div>
+<noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
+
+<section data-view="datasets" hidden>
+  <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
+  <div id="dsBody">
+  <details class="filterbox" id="filterBox" open>
+  <summary>Filters</summary>
+  <section class="filters" aria-label="Spec filters">
+    <fieldset><legend>Spec name</legend><input type="text" id="specName" size="22" aria-label="spec name"></fieldset>
+    <fieldset><legend>Paths (glob)</legend><input type="text" id="paths" size="18" aria-label="paths glob"></fieldset>
+    <fieldset><legend>Dimensionality</legend><div class="chips" id="dims"></div></fieldset>
+    <fieldset><legend>Licence allowlist</legend><div class="chips" id="lic"></div>
+      <label class="inline" style="margin-top:4px"><input type="checkbox" id="allowUnknown"> allow unknown</label></fieldset>
+    <fieldset><legend>Annotation source (labelled sets)</legend><div class="chips" id="src"></div>
+      <label class="inline" style="margin-top:4px"><input type="checkbox" id="annRequired"> annotations required</label></fieldset>
+    <fieldset><legend>Smallest array (voxels)</legend>
+      <select id="minVox"><option value="0">no minimum</option><option value="100000">100 K</option><option value="1000000">1 M</option><option value="10000000">10 M</option></select></fieldset>
+    <fieldset><legend>Crop geometry</legend>
+      <label class="inline">patch <select id="patch"><option>64</option><option>128</option><option>256</option><option>512</option></select></label>
+      <label class="inline">coarsest level <select id="level"><option>1</option><option>2</option><option>4</option><option>8</option><option>16</option><option>32</option></select></label>
+      <label class="inline">z patch <select id="patchZ"><option>8</option><option>16</option><option>32</option><option>64</option></select></label>
+      <div class="footprint" id="footprint"></div></fieldset>
+    <fieldset><legend>Dedup</legend>
+      <label class="inline"><input type="checkbox" id="dedup"> one record per DOI</label></fieldset>
+    <fieldset><legend>Weighting temperature <span id="tVal" class="footprint"></span></legend>
+      <input type="range" id="temp" min="0" max="1" step="0.05" aria-label="temperature"><div class="small">0 = uniform over modalities, then over datasets · 1 = proportional to capacity</div></fieldset>
+    <fieldset><legend>Registry (filters the view, not the spec)</legend>
+      <label class="inline"><input type="checkbox" id="preparedOnly"> prepared only</label><br>
+      <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label><br>
+      <label class="inline"><input type="checkbox" id="stagedGeom"> staged for this geometry <span class="mono" id="levelsKey"></span></label></fieldset>
+  </section>
+  </details>
+  <div id="planMsgs" aria-live="polite"></div>
+  <div class="actions">
+    <button type="button" class="btn" id="download">Download spec YAML</button>
+    <div id="bufferIssue"></div>
+    <div id="prepIssue"></div>
+    <span class="small" id="planStatus"></span>
+  </div>
+
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+  <section class="grid2">
+    <div class="card"><h2>Where datasets leave</h2><div class="sub">Rules in the planner's order; a dataset is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out until mia-data has prepared it.</div><div id="funnel"></div></div>
+    <div class="card"><h2>Fitting datasets by modality</h2><div class="sub">Datasets that fit the spec, prepared or not, by modality group.</div><div id="bymod"></div></div>
+  </section>
+  <section class="grid2">
+    <div class="card"><h2>Weight share by modality</h2><div class="sub">Share of crops over the prepared pool, as the plan weighs it: modality → dataset, measure = coarsest-crop positions.</div><div id="byweight"></div></div>
+    <div class="card"><h2>Heaviest datasets</h2><div class="sub">The prepared datasets that would supply the most crops.</div><ol class="toplist" id="top"></ol></div>
+  </section>
+  <section>
+    <div class="tablebar">
+      <h2 style="margin:0">Datasets</h2>
+      <input type="search" id="search" placeholder="search id, title, modality, licence" aria-label="search records">
+      <label class="inline"><input type="checkbox" id="fitOnly"> fitting only</label>
+      <span class="small" id="tableCount"></span>
+    </div>
+    <div class="tablewrap"><table id="table"><thead></thead><tbody></tbody></table></div>
+    <button type="button" class="more" id="more" hidden>Show more</button>
+  </section>
+  </div>
+</section>
+
+<section data-view="buffers" hidden><div id="buffersBody"></div></section>
+<section data-view="cache" hidden><div id="cacheBody"></div></section>
+<section data-view="preparation" hidden><div id="prepBody"></div></section>
+<section data-view="docs" class="docs" hidden>
+  <nav class="tabs subtabs" aria-label="Documents">
+    <a href="#docs" data-doc-tab="guide">Guide</a>
+    <a href="#docs/architecture" data-doc-tab="architecture">Architecture</a>
+  </nav>
+  <!-- guide: the loop from spec to training, for the person training a model -->
+  <article data-doc="guide">
+<header>
+  <div class="eyebrow">user guide · training on a buffer</div>
+  <h1>Training on a MIA buffer</h1>
+  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalization, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process. Starting a buffer and approving it are done with labels on a GitHub issue, and the system reports back in that issue's comments. This web UI is read-only: it shows the catalog, the buffers and the cache, and needs no login.</p>
+</header>
+
+<h2>The whole loop</h2>
+<figure>
+<svg viewBox="0 0 980 230" role="img" aria-label="Six steps: filter the catalog on the Datasets tab, open a buffer issue with the spec, add buffer:go, wait for the staged board, approve, train with BufferDataset; the issue carries every human action and the Buffers tab shows the state.">
+  <defs><marker id="g-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+  <rect x="14" y="14" width="952" height="200" rx="6" class="band"/>
+  <text x="26" y="34" class="hd">one buffer, start to finish</text>
+  <rect x="26" y="60" width="140" height="58" rx="5" class="b"/><text x="96" y="84" text-anchor="middle" class="ts">1 · filter</text><text x="96" y="102" text-anchor="middle" class="s">Datasets tab → spec YAML</text>
+  <rect x="190" y="60" width="140" height="58" rx="5" class="bs"/><text x="260" y="84" text-anchor="middle" class="ts">2 · issue</text><text x="260" y="102" text-anchor="middle" class="s">spec in the body</text>
+  <rect x="354" y="60" width="140" height="58" rx="5" class="bs"/><text x="424" y="84" text-anchor="middle" class="ts">3 · buffer:go</text><text x="424" y="102" text-anchor="middle" class="s">plan, download, stage</text>
+  <rect x="518" y="60" width="140" height="58" rx="5" class="b"/><text x="588" y="84" text-anchor="middle" class="ts">4 · buffer:staged</text><text x="588" y="102" text-anchor="middle" class="s">read the board</text>
+  <rect x="682" y="60" width="140" height="58" rx="5" class="bs"/><text x="752" y="84" text-anchor="middle" class="ts">5 · buffer:approve</text><text x="752" y="102" text-anchor="middle" class="s">serve what is there</text>
+  <rect x="846" y="60" width="108" height="58" rx="5" class="b"/><text x="900" y="84" text-anchor="middle" class="ts">6 · train</text><text x="900" y="102" text-anchor="middle" class="s">BufferDataset</text>
+  <line x1="166" y1="89" x2="188" y2="89" class="e" marker-end="url(#g-arrow)"/>
+  <line x1="330" y1="89" x2="352" y2="89" class="e" marker-end="url(#g-arrow)"/>
+  <line x1="494" y1="89" x2="516" y2="89" class="e" marker-end="url(#g-arrow)"/>
+  <line x1="658" y1="89" x2="680" y2="89" class="e" marker-end="url(#g-arrow)"/>
+  <line x1="822" y1="89" x2="844" y2="89" class="e" marker-end="url(#g-arrow)"/>
+  <rect x="190" y="150" width="302" height="44" rx="5" class="note"/><text x="341" y="169" text-anchor="middle" class="l">human actions: labels on the issue</text><text x="341" y="185" text-anchor="middle" class="s">steps 2, 3 and 5; the rest runs unattended</text>
+  <rect x="518" y="150" width="304" height="44" rx="5" class="note"/><text x="670" y="169" text-anchor="middle" class="l">state: the Buffers tab and the issue's comments</text><text x="670" y="185" text-anchor="middle" class="s">every stage change is a comment and a label</text>
+  <line x1="260" y1="118" x2="260" y2="150" class="ed"/><line x1="424" y1="118" x2="424" y2="150" class="ed"/><line x1="588" y1="118" x2="588" y2="150" class="ed"/><line x1="752" y1="118" x2="752" y2="150" class="ed"/>
+</svg>
+<figcaption><b>The six steps of one buffer.</b> The accented boxes are the human actions: open the issue, add <code>buffer:go</code>, add <code>buffer:approve</code>. The other steps run on their own, and each stage change is reported as a label and a comment on the issue.</figcaption>
+</figure>
+
+<h2>Step 1. The spec</h2>
+<p>The <a href="#datasets">Datasets</a> tab builds a spec from its filters: dimensionality, modality, licence, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
+<ul>
+  <li><b>Where records leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
+  <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>
+  <li><b>Request preparation</b> opens an issue that hands every unprepared dataset in the table below, after its search box and fitting-only toggle, to the preparation pipeline. Each one is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a human. Progress is on the <a href="#preparation">Preparation</a> tab. A buffer plans over prepared datasets only, so a buffer started now uses what is prepared now, and a later round picks up the rest.</li>
+  <li><b>Download spec YAML</b> saves the spec as a file, for editing by hand or for keeping with an experiment.</li>
+</ul>
+<p>The fields of a spec that are usually edited:</p>
+<pre>name: my-2d-nuclei                      <span class="c"># free; names the buffer on the page</span>
+catalog: {repo: …, ref: &lt;commit&gt;}       <span class="c"># pinned by the page: the plan is reproducible</span>
+select:
+  where:
+    dims: {in: [2D]}
+    modality: {in: [fluorescence, brightfield]}
+    license: {in: [CC0-1.0, CC-BY-4.0], allow_unknown: false}
+    annotations: {required: true}
+sampling:
+  patch: {2D: {y: 256, x: 256}, c: 1}   <span class="c"># crop edges in pixels at level 1; one channel per crop</span>
+  levels: [1, 2, 4]                     <span class="c"># the pyramid levels each crop is served at</span>
+  weighting: {scheme: temperature, over: [modality, dataset], temperature: 0.5}
+  normalize: {method: percentile, range: [1, 99], scope: volume}
+splits:
+  fractions: {train: 0.8, val: 0.1, test: 0.1}
+ready:
+  min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the board says "ready"</span></pre>
+
+<h2>Step 2. Start the buffer</h2>
+<p><b>Open buffer issue</b> on the Datasets tab opens a prefilled issue in the buffers repository: the spec in a YAML block, with the catalog commit pinned. Creating the issue runs nothing.</p>
+<p>Adding the label <code>buffer:go</code> starts the buffer. The poller picks the label up within a couple of minutes and removes it once the signal is accepted; the first comment follows. From then on every stage change is a label the system sets and a comment that says what happened and what, if anything, it needs from a human.</p>
+<div class="tw"><table>
+<tr><th>label a human adds</th><th>what it does</th></tr>
+<tr><td><code>buffer:go</code></td><td>Plan, download, stage, then stop once at <code>buffer:staged</code>. Also how a round is started over after editing the spec: the earlier round's buffer is retired.</td></tr>
+<tr><td><code>buffer:plan</code></td><td>Like <code>buffer:go</code>, but also stop after the plan, before any job runs.</td></tr>
+<tr><td><code>buffer:approve</code></td><td>Continue from whichever gate the issue is at: the plan, or the staged board.</td></tr>
+<tr><td><code>buffer:keep</code></td><td>An idle buffer stays; back to ready.</td></tr>
+<tr><td><code>buffer:retire</code></td><td>Release the buffer's staged data now. Closing the issue does the same.</td></tr>
+</table></div>
+<div class="tw"><table>
+<tr><th>the system sets</th><th>the buffer is</th></tr>
+<tr><td><code>buffer:planning</code> → <code>buffer:plan-review</code></td><td>resolving the spec; the plan is posted (the pool, one row per dataset, with weights). A <code>buffer:plan</code> round waits here for <code>buffer:approve</code>.</td></tr>
+<tr><td><code>buffer:sourcing</code></td><td>downloading and converting, several datasets at a time. One comment per dataset as it lands or fails.</td></tr>
+<tr><td><code>buffer:staged</code></td><td>no job left to run; the board is posted. Waiting for <code>buffer:approve</code>.</td></tr>
+<tr><td><code>buffer:ready</code></td><td>serving. The comment holds the Python cell with the buffer id filled in.</td></tr>
+<tr><td><code>buffer:idle</code> · <code>buffer:retired</code></td><td>nobody drew from it for a while (default 72 hours) · its data is released.</td></tr>
+<tr><td><code>buffer:needs-human</code></td><td>stopped. The comment says why; the usual answer is an edited spec and <code>buffer:go</code> again.</td></tr>
+</table></div>
+<p>Only someone with write access to the repository can drive an issue; a label from anyone else is removed with a note.</p>
+
+<h2>Step 3. Read the board, then approve</h2>
+<p>Sourcing runs until no dataset has a job left. The issue then moves to <code>buffer:staged</code> and gets the board: each dataset's outcome (with the error of one that failed), each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, bytes on disk, and which datasets are still waiting on something.</p>
+<p><b>Approve.</b> <code>buffer:approve</code> serves the buffer as the board shows it. A dataset that failed stays out; one that is waiting keeps its place and joins when it lands, with a new board comment. The share each group has at the approve becomes the floor it is judged against afterwards, so a partial buffer accepted on purpose is not later reported as degraded. No job runs between the approve and <code>buffer:ready</code>.</p>
+<p><b>Or edit and go again.</b> Editing the YAML in the issue body and adding <code>buffer:go</code> retires the staged buffer and plans a new round from the edited spec. Converted pyramids stay in the shared cache, so a second round over the same datasets skips the conversion.</p>
+<ul>
+  <li><b>Waiting on a drop.</b> Some datasets sit on hosts no job may reach. The comment lists the files to place by hand in the dataset's <code>incoming/</code> directory; once the listing stops changing, the worker takes them into the cache.</li>
+  <li><b>Waiting for a quota or a lock.</b> The cache is full, or another buffer is converting the same dataset. Both clear on their own.</li>
+  <li><b>Day limit.</b> A group with nothing servable after <code>sourcing.dataset_timeout_days</code> (default 14) drops its waiters; with nothing servable at all the issue stops at <code>buffer:needs-human</code>.</li>
+  <li><b>Automatic approve.</b> <code>plan: {auto_approve: true}</code> in the spec approves without a human when every group meets <code>min_fraction</code>. A short group still waits for one.</li>
+</ul>
+
+<h2>Step 4. Train</h2>
+<p>The <code>buffer:ready</code> comment names the buffer id (<code>i&lt;issue&gt;-e&lt;event&gt;</code>) and gives this cell. It runs in the harness environment of the mia-snippets checkout, with this repository on the Python path and torch and muvit installed:</p>
+<pre>from mia_buffers.client import BufferDataset
+
+URL, TENSORIZERS = "&lt;service url&gt;", "&lt;mia-snippets checkout&gt;"   <span class="c"># or export MIA_BUFFERS_TENSORIZERS</span>
+train_ds = BufferDataset(URL, "&lt;buffer id&gt;", "train", n_samples=4000, tensorizers=TENSORIZERS)
+val_ds = BufferDataset(URL, "&lt;buffer id&gt;", "val", tensorizers=TENSORIZERS)
+
+loader = DataLoader(train_ds, batch_size=32, num_workers=8, collate_fn=BufferDataset.collate)
+model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)</pre>
+<ul>
+  <li><b>Train is a stream.</b> Each item is a fresh crop drawn by the service under the spec's weighting; <code>n_samples</code> is the length of one virtual epoch and the index is ignored. <b>Val and test replay a frozen list</b> that is the same every epoch and every run.</li>
+  <li><b>The service serves descriptors, not pixels.</b> A descriptor names the pyramid, the window, the channels and the normalisation bounds. The training process reads the OME-Zarr pyramid from shared storage and tensorises it, so the load of a DataLoader with many workers falls on the training node. Each worker registers itself as a consumer, listed on the <a href="#buffers">Buffers</a> tab.</li>
+  <li><b>What a sample holds.</b> The image at each level in <code>sampling.levels</code>, the label layers the dataset has, and <code>meta</code> with the record, the voxel size and the crop's position in physical units. A buffer mixes datasets whose label layers differ, which is why the custom collate is needed: a batch keeps the keys every sample has.</li>
+  <li><b>What is pinned.</b> The buffer records the catalog commit, the spec hash, the plan hash and the commit of the conversion code. A checkout at a different commit raises on construction; <code>allow_recipe_mismatch=True</code> turns that into a warning.</li>
+  <li><b>Before the approve</b> the service answers 409 and the client raises <code>BufferNotApproved</code>. <b>After a retire</b> it answers 410. A split with nothing servable yet raises <code>BufferEmpty</code>.</li>
+</ul>
+
+<h2>Step 5. During training, and afterwards</h2>
+<p>The <a href="#buffers">Buffers</a> tab lists every buffer with its latest event; a buffer's own page has the board, the volumes per split, the consumers seen, the draws per day and a health line. After <code>buffer:ready</code> the issue changes only when one of these happens:</p>
+<ul>
+  <li><b>Degraded.</b> When a group's servable share falls under the floor set at the approve (a pyramid was evicted or lost), the issue says so and the worker stages the missing datasets again from the cache.</li>
+  <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) puts <code>buffer:idle</code> on the issue; <code>buffer:keep</code> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the buffer and its space is reclaimed.</li>
+  <li><b>Closed.</b> Closing the issue stops its workflow and retires its buffer; the label becomes <code>buffer:retired</code>. Reopening it and adding <code>buffer:go</code> runs the same spec again, reusing what is still in the cache.</li>
+</ul>
+
+<h2>Symptoms and their causes</h2>
+<div class="tw"><table>
+<tr><th>symptom</th><th>cause</th><th>what to do</th></tr>
+<tr><td>the label stays, nothing happens</td><td>the poller runs every couple of minutes; or the account lacks write access (the label comes off with a note)</td><td>wait two minutes; ask for write access</td></tr>
+<tr><td>approve refused: older than the plan or the board</td><td>the approve predates the comment it refers to, or a newer round exists</td><td>read the newest comment, then add <code>buffer:approve</code> again</td></tr>
+<tr><td>approve refused: jobs still running</td><td>the round is between gates</td><td>wait for <code>buffer:staged</code></td></tr>
+<tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; edit the spec or request preparation, then <code>buffer:go</code></td></tr>
+<tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td><b>Request preparation</b> on the Datasets tab, then a new round later</td></tr>
+<tr><td><code>BufferNotApproved</code> (409)</td><td>the round is staged but not approved</td><td>add <code>buffer:approve</code> on the issue</td></tr>
+<tr><td>410 buffer retired</td><td>the buffer was retired: by a label, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
+<tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
+<tr><td>the issue seems stuck for hours with no comment</td><td>the run may be frozen</td><td>close the issue, wait for its "issue closed" comment, reopen, <code>buffer:go</code></td></tr>
+</table></div>
+
+<h2>Words the pages use</h2>
+<div class="tw"><table>
+<tr><th>word</th><th>meaning</th></tr>
+<tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
+<tr><td>prepared</td><td>a record with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared records enter a plan.</td></tr>
+<tr><td>buffer, round</td><td>one served pool of crops for one spec. An issue runs one round at a time; each <code>buffer:go</code> starts a new round with a new buffer id, and the earlier buffer is retired.</td></tr>
+<tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
+<tr><td>staged</td><td>converted: a dataset's volumes rewritten once as immutable OME-Zarr pyramids in the shared cache, reused by every buffer that needs the same geometry.</td></tr>
+<tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the spec lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
+<tr><td>split</td><td>train, val or test. Volumes are assigned by the spec's fractions and seed; a record in <code>holdout_ids</code> is all test.</td></tr>
+<tr><td>keeper</td><td>the background pass that watches quotas, idle buffers and lost pyramids. It is the only thing that deletes.</td></tr>
+</table></div>
+<p>How the services, workflows and storage fit together is in <a href="#docs/architecture">Architecture</a>.</p>
+  </article>
+  <!-- architecture: the overview, same source as the published explainer -->
+  <article data-doc="architecture" hidden>
+
+<header>
+  <div class="eyebrow">prep &amp; buffering spec v0.6 · milestones A–F and H–K built · branch training-buffers</div>
+  <h1>MIA Training Buffers</h1>
+  <p>The system is two pipelines that share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset, which means an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops. It plans over prepared datasets only, fetches the raw files once into a shared cache, stages each volume as an immutable OME-Zarr pyramid, and registers each pyramid with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors from the service and read the pyramids themselves. GitHub issues and labels remain the way a human starts or approves anything. A read-only <b>web UI</b>, served by buffer-api at its own address, shows the whole state in four views (datasets, buffers, cache and preparation) and carries these documents as a fifth.</p>
+</header>
+
+<h2>1. System layout</h2>
+<p>One host runs everything that holds a credential: Temporal, the two workers and buffer-api. Jobs run on the cluster and see only files. In the figure, lines run in the gutters between columns, and each later figure drills into one part of this one.</p>
+<figure>
+<svg viewBox="0 0 960 540" role="img" aria-label="Components of the system: GitHub repositories on the left, one host with the two workers and buffer-api in the middle, cluster jobs and shared storage below, the web UI and the training job on the right. Lines run in the gutters between columns.">
+<defs><marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- top route: the web UI's new-issue links -->
+<path class="e" d="M840 62 V22 H10 V167 H20" marker-end="url(#f1)"/>
+<text class="l" x="425" y="16" text-anchor="middle">new-issue links: the only click that needs an identity leaves the web UI</text>
+<!-- GitHub column -->
+<rect class="b" x="20" y="62" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="82">mia-workflow-data</text>
+<text class="s" x="28" y="98">one issue per dataset · data:*</text>
+<rect class="b" x="20" y="140" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="160">mia-buffers issues</text>
+<text class="s" x="28" y="176">buffer specs · prep requests</text>
+<rect class="b" x="20" y="225" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="245">mia-snippets</text>
+<text class="s" x="28" y="261">readers · tensorizers · harness</text>
+<rect class="b" x="20" y="305" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="325">mia-agentic-search</text>
+<text class="s" x="28" y="341">catalog records, pinned by commit</text>
+<!-- the host -->
+<rect class="band" x="250" y="40" width="410" height="215" rx="6"/>
+<text class="hd" x="262" y="56">one host · mia.yaml · local disk for locks and SQLite</text>
+<rect class="b" x="280" y="66" width="175" height="55" rx="4"/>
+<text class="t" x="288" y="86">mia-data worker</text>
+<text class="s" x="288" y="102">match · smoke · crops · publish</text>
+<rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
+<text class="t" x="288" y="160">mia-buffers worker</text>
+<text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
+<rect class="bs" x="480" y="66" width="170" height="129" rx="4"/>
+<text class="t" x="488" y="86">buffer-api</text>
+<text class="s" x="488" y="104">the registry: an index of</text>
+<text class="s" x="488" y="118">what is on disk</text>
+<text class="s" x="488" y="140">workers write with a token</text>
+<text class="s" x="488" y="154">everyone reads</text>
+<text class="s" x="488" y="168">deletes nothing</text>
+<text class="s" x="488" y="186">also serves the web UI</text>
+<text class="s" x="262" y="243">Temporal runs the workflows on the same host</text>
+<!-- jobs -->
+<rect class="b" x="280" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="288" y="320">mia-data jobs</text>
+<text class="s" x="288" y="337">match · smoke · crop</text>
+<rect class="b" x="410" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="418" y="320">fetch job</text>
+<text class="s" x="418" y="337">files → raw cache</text>
+<rect class="b" x="540" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="548" y="320">stage job</text>
+<text class="s" x="548" y="337">cache → pyramid</text>
+<!-- storage band -->
+<rect class="band" x="250" y="385" width="410" height="140" rx="6"/>
+<text class="hd" x="262" y="401">shared storage · the truth the registry indexes</text>
+<rect class="b" x="280" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="288" y="431">crops/</text>
+<text class="s" x="288" y="448">binding · manifest</text>
+<rect class="un" x="410" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="418" y="431">raw/</text>
+<text class="s" x="418" y="448">untrusted bytes</text>
+<rect class="b" x="540" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="548" y="431">staged/</text>
+<text class="s" x="548" y="448">pyramids by id</text>
+<text class="s" x="262" y="486">plus state/ per service: rounds, plans, backups, the draws archive</text>
+<text class="s" x="262" y="502">tinted: bytes no reviewed code has read yet</text>
+<!-- right column -->
+<rect class="b" x="735" y="62" width="205" height="55" rx="4"/>
+<text class="t" x="743" y="82">web UI</text>
+<text class="s" x="743" y="98">served by buffer-api · read-only</text>
+<rect class="bs" x="735" y="140" width="205" height="55" rx="4"/>
+<text class="t" x="743" y="160">training job</text>
+<text class="s" x="743" y="176">descriptors in, reads the pyramid</text>
+<!-- GitHub ↔ workers -->
+<line class="e" x1="195" y1="90" x2="280" y2="90" marker-start="url(#f1)" marker-end="url(#f1)"/>
+<text class="l" x="237" y="83" text-anchor="middle">labels</text>
+<line class="e" x1="195" y1="167" x2="280" y2="167" marker-start="url(#f1)" marker-end="url(#f1)"/>
+<text class="l" x="237" y="160" text-anchor="middle">labels</text>
+<path class="e" d="M195 252 H225 V330"/>
+<path class="e" d="M195 332 H225"/>
+<path class="e" d="M225 290 H262 V200 H280" marker-end="url(#f1)"/>
+<text class="l" x="232" y="285">pinned</text>
+<text class="l" x="232" y="299">snapshots</text>
+<!-- workers → buffer-api -->
+<line class="e" x1="455" y1="93" x2="480" y2="93" marker-end="url(#f1)"/>
+<line class="e" x1="455" y1="167" x2="480" y2="167" marker-end="url(#f1)"/>
+<text class="l" x="467" y="208" text-anchor="middle">token</text>
+<!-- workers → jobs (csub), in the left gutter and below the band -->
+<path class="e" d="M280 110 H262 V325 H280" marker-end="url(#f1)"/>
+<text class="l" x="258" y="365" text-anchor="end">csub</text>
+<path class="e" d="M400 195 V270 H465 V300" marker-end="url(#f1)"/>
+<path class="e" d="M430 195 V260 H595 V300" marker-end="url(#f1)"/>
+<text class="l" x="520" y="254" text-anchor="middle">csub</text>
+<!-- jobs → storage -->
+<line class="e" x1="335" y1="350" x2="335" y2="412" marker-end="url(#f1)"/>
+<line class="e" x1="465" y1="350" x2="465" y2="412" marker-end="url(#f1)"/>
+<line class="e" x1="595" y1="350" x2="595" y2="412" marker-end="url(#f1)"/>
+<text class="l" x="400" y="385" text-anchor="middle">read · write</text>
+<!-- right column ↔ buffer-api, training job → staged -->
+<line class="e" x1="735" y1="90" x2="650" y2="90" marker-end="url(#f1)"/>
+<text class="l" x="692" y="83" text-anchor="middle">GET</text>
+<line class="e" x1="735" y1="167" x2="650" y2="167" marker-start="url(#f1)" marker-end="url(#f1)"/>
+<text class="l" x="692" y="160" text-anchor="middle">next · status</text>
+<path class="ea" d="M837 195 V437 H650" marker-end="url(#f1)"/>
+<text class="l" x="745" y="430" text-anchor="middle">reads pyramids</text>
+</svg>
+<figcaption><b>Figure 1.</b> The workers are the only components that talk to GitHub, submit jobs and write to the registry. Jobs see files and nothing else: they hold no token, see no lock directory and call no service. buffer-api is an index that its sync commands can rebuild from the files. It holds no credentials and deletes nothing. The training job and the web UI both read from it, but only the training job touches the pyramids.</figcaption>
+</figure>
+
+<h2>2. Two workflows around shared resources</h2>
+<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the published crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
+<figure>
+<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, published crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset issue.">
+<defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- bands -->
+<rect class="band" x="20" y="30" width="920" height="140" rx="6"/>
+<text class="hd" x="32" y="46">data preparation · mia-data worker, its agent and jobs</text>
+<rect class="band" x="20" y="250" width="920" height="120" rx="6"/>
+<text class="hd" x="32" y="266">shared resources</text>
+<rect class="band" x="20" y="450" width="920" height="150" rx="6"/>
+<text class="hd" x="32" y="466">buffering · mia-buffers worker, its jobs and the keeper</text>
+<!-- top boxes -->
+<rect class="b" x="40" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="48" y="78">dataset issue</text>
+<text class="s" x="48" y="96">data:go from a human</text>
+<text class="s" x="48" y="110">or a preparation request</text>
+<text class="s" x="48" y="124">ends data:done</text>
+<rect class="b" x="225" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="233" y="78">match · smoke</text>
+<text class="s" x="233" y="96">an agent writes the binding;</text>
+<text class="s" x="233" y="110">a job opens every array</text>
+<text class="s" x="233" y="124">and reads one patch</text>
+<rect class="b" x="410" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="418" y="78">crops · review</text>
+<text class="s" x="418" y="96">one set, verified, shown; approve</text>
+<text class="s" x="418" y="110">publishes it, reject loops (fig. 3b);</text>
+<text class="s" x="418" y="124">downloads land in the raw cache</text>
+<path class="ea" d="M545 58 V44 H425 V58" marker-end="url(#f2)"/>
+<text class="l" x="485" y="40" text-anchor="middle">data:reject: the agent fixes the snippet, new crops</text>
+<rect class="bs" x="595" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="603" y="78">publish</text>
+<text class="s" x="603" y="96">the reviewed crops, binding.yaml</text>
+<text class="s" x="603" y="110">and a manifest naming the</text>
+<text class="s" x="603" y="124">binding: this is "prepared"</text>
+<rect class="b" x="780" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="788" y="78">report the stage</text>
+<text class="s" x="788" y="96">every label change writes</text>
+<text class="s" x="788" y="110">the dataset's registry row,</text>
+<text class="s" x="788" y="124">best effort</text>
+<!-- the data preparation workflow, left to right -->
+<line class="e" x1="190" y1="103" x2="225" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="375" y1="103" x2="410" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="560" y1="103" x2="595" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="745" y1="103" x2="780" y2="103" marker-end="url(#f2)"/>
+<text class="l" x="762" y="48" text-anchor="middle">at each step</text>
+<!-- middle boxes -->
+<rect class="b" x="40" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="48" y="297">locks/raw/&lt;record&gt;</text>
+<text class="s" x="48" y="314">host-local disk</text>
+<text class="s" x="48" y="328">one cache writer at a time</text>
+<rect class="un" x="225" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="233" y="297">raw/&lt;record&gt;/</text>
+<text class="s" x="233" y="314">original files, files.json</text>
+<text class="s" x="233" y="328">shared by both pipelines</text>
+<rect class="b" x="410" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="418" y="297">staged/…/&lt;artifact&gt;/</text>
+<text class="s" x="418" y="314">immutable pyramids</text>
+<text class="s" x="418" y="328">id = hash of every input</text>
+<rect class="b" x="595" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="603" y="297">crops/&lt;folder&gt;/</text>
+<text class="s" x="603" y="314">binding · manifest · crops</text>
+<text class="s" x="603" y="328">mia-data's output lives here</text>
+<rect class="bs" x="780" y="278" width="150" height="70" rx="4"/>
+<text class="t" x="788" y="297">registry (buffer-api)</text>
+<text class="s" x="788" y="314">datasets · assets · buffers</text>
+<text class="s" x="788" y="328">volumes · refs · draws</text>
+<!-- bottom boxes -->
+<rect class="b" x="40" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="48" y="498">issue · plan</text>
+<text class="s" x="48" y="516">buffer:go plans over the</text>
+<text class="s" x="48" y="530">prepared rows (fig. 3), a</text>
+<text class="s" x="48" y="544">human approves; prep:go</text>
+<text class="s" x="48" y="558">asks mia-data for records</text>
+<rect class="b" x="225" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="233" y="498">fetch</text>
+<text class="s" x="233" y="516">harness fetch fills the</text>
+<text class="s" x="233" y="530">raw cache under the lock,</text>
+<text class="s" x="233" y="544">resuming until complete</text>
+<rect class="b" x="410" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="418" y="498">stage</text>
+<text class="s" x="418" y="516">cache read-only, no network;</text>
+<text class="s" x="418" y="530">the worker publishes the</text>
+<text class="s" x="418" y="544">pyramid by rename</text>
+<rect class="bs" x="595" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="603" y="498">register</text>
+<text class="s" x="603" y="516">volumes with refs to the</text>
+<text class="s" x="603" y="530">raw and the artifact; ready</text>
+<text class="s" x="603" y="544">once each group meets</text>
+<text class="s" x="603" y="558">the spec's floor</text>
+<rect class="b" x="780" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="788" y="498">keeper</text>
+<text class="s" x="788" y="516">syncs rows with the files,</text>
+<text class="s" x="788" y="530">evicts free assets under</text>
+<text class="s" x="788" y="544">quota, watches ready buffers</text>
+<!-- the buffering workflow, left to right (the keeper is a schedule beside it) -->
+<line class="e" x1="190" y1="528" x2="225" y2="528" marker-end="url(#f2)"/>
+<line class="e" x1="375" y1="528" x2="410" y2="528" marker-end="url(#f2)"/>
+<line class="e" x1="560" y1="528" x2="595" y2="528" marker-end="url(#f2)"/>
+<text class="l" x="762" y="590" text-anchor="middle">every 30 min</text>
+<!-- top → middle arrows -->
+<line class="ed" x1="300" y1="148" x2="300" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="306" y="206">reads · writes</text>
+<text class="l" x="306" y="220">under the lock</text>
+<line class="ed" x1="240" y1="148" x2="140" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="150" y="190" text-anchor="end">takes</text>
+<line class="ed" x1="430" y1="148" x2="360" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="420" y="226" text-anchor="start">reads the original files; a file not</text>
+<text class="l" x="420" y="240" text-anchor="start">cached yet is downloaded into place</text>
+<line class="ed" x1="670" y1="148" x2="670" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="676" y="214">writes</text>
+<line class="ed" x1="855" y1="148" x2="855" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="861" y="206">PUT datasets</text>
+<text class="l" x="861" y="220">in-progress → prepared</text>
+<!-- bottom → middle arrows -->
+<line class="ed" x1="300" y1="478" x2="300" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="306" y="418">writes, locked</text>
+<line class="ed" x1="240" y1="478" x2="140" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="150" y="440" text-anchor="end">takes</text>
+<line class="ed" x1="370" y1="348" x2="430" y2="478" marker-end="url(#f2)"/>
+<text class="l" x="408" y="396" text-anchor="start">reads</text>
+<line class="ed" x1="485" y1="478" x2="485" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="491" y="440">publishes by rename</text>
+<line class="ed" x1="670" y1="478" x2="670" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="676" y="418">binding hash</text>
+<line class="ed" x1="730" y1="478" x2="820" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="752" y="463" text-anchor="start">volumes · refs</text>
+<line class="ed" x1="870" y1="478" x2="870" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="876" y="418">asset rows</text>
+<text class="l" x="876" y="432">syncs</text>
+<!-- prep request: bottom-left up to the dataset issue -->
+<path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
+<text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">prep:go opens dataset issues, adds data:go</text>
+</svg>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a human validates it (a vision-language model may take this over later). If the set is approved, that very set is published together with the dataset's registry row. If it is rejected, the reviewer's comments go to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+</figure>
+
+<h2>3. How a dataset becomes prepared</h2>
+<p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer (spec §12). The only place preparation stops is a <code>needs-human</code> state.</p>
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: the dataset issue in mia-data moves data labels to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a prep request issue bridges unprepared records to mia-data.">
+<defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="36">mia-data · dataset issue</text>
+<rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">data:go</text>
+<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match · smoke</text>
+<rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
+<path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">reject → fix → new crops (fig. 3b)</text>
+<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">publish · data:done</text>
+<line class="e" x1="130" y1="68" x2="160" y2="68" marker-end="url(#f2)"/>
+<line class="e" x1="290" y1="68" x2="320" y2="68" marker-end="url(#f2)"/>
+<line class="e" x1="470" y1="68" x2="500" y2="68" marker-end="url(#f2)"/><text class="l" x="485" y="100" text-anchor="middle">approve</text>
+<text class="s" x="660" y="64">binding.yaml + manifest.json</text>
+<text class="s" x="660" y="78">land in crops/&lt;folder&gt;/</text>
+<!-- registry lane -->
+<text class="hd" x="20" y="136">registry · datasets row</text>
+<rect class="note" x="20" y="148" width="110" height="40" rx="8"/><text class="t" x="75" y="173" text-anchor="middle">unprepared</text>
+<rect class="b" x="160" y="148" width="310" height="40" rx="8"/><text class="t" x="315" y="167" text-anchor="middle">in-progress</text><text class="s" x="315" y="181" text-anchor="middle">every stage change is written, best effort</text>
+<rect class="bs" x="500" y="148" width="150" height="40" rx="8"/><text class="t" x="575" y="173" text-anchor="middle">prepared</text>
+<rect class="un" x="690" y="148" width="130" height="40" rx="8"/><text class="t" x="755" y="167" text-anchor="middle">needs-human</text><text class="s" x="755" y="181" text-anchor="middle">the only other end</text>
+<line class="e" x1="130" y1="168" x2="160" y2="168" marker-end="url(#f2)"/>
+<line class="e" x1="470" y1="168" x2="500" y2="168" marker-end="url(#f2)"/>
+<line class="ed" x1="75" y1="88" x2="75" y2="148" marker-end="url(#f2)"/>
+<line class="ed" x1="575" y1="88" x2="575" y2="148" marker-end="url(#f2)"/>
+<line class="ed" x1="470" y1="88" x2="700" y2="148" marker-end="url(#f2)"/>
+<text class="s" x="840" y="168">a sync rebuilds the</text>
+<text class="s" x="840" y="182">rows from the files</text>
+<!-- buffers lane -->
+<text class="hd" x="20" y="236">mia-buffers</text>
+<rect class="b" x="20" y="248" width="200" height="40" rx="8"/><text class="t" x="120" y="267" text-anchor="middle">prep:go issue</text><text class="s" x="120" y="281" text-anchor="middle">records, or a select block</text>
+<rect class="bs" x="500" y="248" width="150" height="40" rx="8"/><text class="t" x="575" y="267" text-anchor="middle">buffer plan</text><text class="s" x="575" y="281" text-anchor="middle">prepared rows only</text>
+<path class="e" d="M120 248 V210 H75 V188" marker-end="url(#f2)"/>
+<text class="l" x="200" y="222">opens the dataset issue, adds data:go</text>
+<line class="e" x1="575" y1="188" x2="575" y2="248" marker-end="url(#f2)"/>
+<text class="l" x="582" y="222">in the pool</text>
+<path class="ed" d="M320 188 V268 H500"/>
+<text class="l" x="410" y="262" text-anchor="middle">"not prepared": out of the pool,</text>
+<text class="l" x="410" y="276" text-anchor="middle">listed under its own heading</text>
+</svg>
+<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the published files. A buffer never asks mia-data for a dataset. A <code>prep:go</code> issue does that instead: it follows the rows until each record is <code>prepared</code> or <code>needs-human</code>, then closes itself. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
+</figure>
+
+<h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
+<p>Every set of crops waits at <code>data:review</code>, including a set made from a snippet PR. <code>data:approve</code> publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <code>data:reject</code> sends every comment the reviewer wrote on the issue since the crops report to the agent. When the round is following a PR, the comments go as <code>/revise</code> on that PR. Otherwise they go as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves (spec §14).</p>
+<figure>
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset issue's stages: data:go, match and smoke, crops and verify, data:review, data:merging, data:done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published; a merge whose snippet differs from the approved head is caught in the caption.">
+<defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="18">mia-data · dataset issue</text>
+<rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">data:go</text>
+<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match · smoke</text>
+<rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
+<rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">data:review</text>
+<rect class="b" x="650" y="44" width="120" height="40" rx="8"/><text class="t" x="710" y="69" text-anchor="middle">data:merging</text>
+<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">data:done</text><text class="s" x="870" y="77" text-anchor="middle">the reviewed crops published</text>
+<line class="e" x1="120" y1="64" x2="150" y2="64" marker-end="url(#f3b)"/>
+<line class="e" x1="280" y1="64" x2="310" y2="64" marker-end="url(#f3b)"/><text class="l" x="295" y="100" text-anchor="middle">matched</text>
+<line class="e" x1="460" y1="64" x2="490" y2="64" marker-end="url(#f3b)"/><text class="l" x="475" y="100" text-anchor="middle">≥ half verified</text>
+<line class="ea" x1="620" y1="64" x2="650" y2="64" marker-end="url(#f3b)"/><text class="l" x="635" y="100" text-anchor="middle">approve, PR head:</text><text class="lm" x="635" y="113" text-anchor="middle">/approve &lt;head&gt;</text>
+<line class="ea" x1="770" y1="64" x2="800" y2="64" marker-end="url(#f3b)"/><text class="l" x="785" y="100" text-anchor="middle">autodev merges</text>
+<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">approve, matched binding: publish</text>
+<!-- mia-snippets lane -->
+<text class="hd" x="20" y="170">mia-snippets · autodev</text>
+<rect class="b" x="150" y="190" width="130" height="44" rx="8"/><text class="t" x="215" y="209" text-anchor="middle">snippets issue</text><text class="s" x="215" y="224" text-anchor="middle">snippets:go</text>
+<rect class="un" x="310" y="190" width="150" height="44" rx="8"/><text class="t" x="385" y="209" text-anchor="middle">PR head</text><text class="s" x="385" y="224" text-anchor="middle">autodev's agent wrote it</text>
+<rect class="b" x="490" y="190" width="160" height="44" rx="8"/><text class="t" x="570" y="209" text-anchor="middle">feedback to autodev</text><text class="s" x="570" y="224" text-anchor="middle">/revise the PR, or a new issue</text>
+<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">data:needs-human</text><text class="s" x="870" y="224" text-anchor="middle">a new data:go resumes</text>
+<line class="e" x1="215" y1="84" x2="215" y2="190" marker-end="url(#f3b)"/><text class="l" x="221" y="140">no snippet fits</text>
+<line class="e" x1="280" y1="212" x2="310" y2="212" marker-end="url(#f3b)"/>
+<line class="ea" x1="490" y1="212" x2="460" y2="212" marker-end="url(#f3b)"/><text class="l" x="475" y="250" text-anchor="middle">a new head</text>
+<line class="e" x1="370" y1="190" x2="370" y2="84" marker-end="url(#f3b)"/><text class="l" x="364" y="130" text-anchor="end">each head: the set,</text><text class="l" x="364" y="143" text-anchor="end">private cache</text>
+<line class="ea" x1="430" y1="84" x2="430" y2="190" marker-end="url(#f3b)"/><text class="l" x="436" y="130">crops failed:</text><text class="lm" x="436" y="143">/revise + report</text>
+<line class="ea" x1="570" y1="84" x2="570" y2="190" marker-end="url(#f3b)"/><text class="l" x="576" y="130">reject: your comments</text><text class="l" x="576" y="143">since the crops report</text>
+<text class="l" x="570" y="248" text-anchor="middle">no PR yet: an issue to supersede the snippet</text>
+<line class="ed" x1="650" y1="212" x2="800" y2="212" marker-end="url(#f3b)"/><text class="l" x="725" y="206" text-anchor="middle">revision limit,</text><text class="l" x="725" y="228" text-anchor="middle">PR closed</text>
+</svg>
+<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no human in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with comments, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the published crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed.</figcaption>
+</figure>
+
+<h2>4. Lifecycle of a buffer issue</h2>
+<p>A buffer issue carries one <code>buffer:*</code> label at a time. Humans add five of the labels, and the worker and the keeper set every other transition. Since v0.6 a round is staged before it asks for approval. <code>buffer:go</code> asks once, at <code>staged</code>, and <code>buffer:plan</code> asks after the plan as well.</p>
+<figure>
+<svg viewBox="0 0 1040 330" role="img" aria-label="State machine of a buffer issue: new, planning, plan-review, sourcing, staged, ready, idle, retired, with needs-human as the recovery state; buffer:go skips plan-review; approve at staged serves the buffer, partial or not; the keeper signals degraded, idle and retire, and retires a staged buffer nobody approves.">
+<defs><marker id="f3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="20" y="60" width="90" height="50" rx="10"/>
+<text class="t" x="65" y="82" text-anchor="middle">new</text><text class="s" x="65" y="98" text-anchor="middle">issue filed</text>
+<rect class="b" x="150" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="205" y="82" text-anchor="middle">planning</text><text class="s" x="205" y="98" text-anchor="middle">registry records</text>
+<rect class="b" x="300" y="60" width="130" height="50" rx="10"/>
+<text class="t" x="365" y="82" text-anchor="middle">plan-review</text><text class="s" x="365" y="98" text-anchor="middle">plan rounds only</text>
+<rect class="b" x="470" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="525" y="82" text-anchor="middle">sourcing</text><text class="s" x="525" y="98" text-anchor="middle">per dataset, parallel</text>
+<rect class="b" x="630" y="60" width="130" height="50" rx="10"/>
+<text class="t" x="695" y="82" text-anchor="middle">staged</text><text class="s" x="695" y="98" text-anchor="middle">the board · waits</text>
+<rect class="bs" x="810" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="865" y="82" text-anchor="middle">ready</text><text class="s" x="865" y="98" text-anchor="middle">serving · watched</text>
+<rect class="b" x="810" y="220" width="110" height="50" rx="10"/>
+<text class="t" x="865" y="242" text-anchor="middle">idle</text><text class="s" x="865" y="258" text-anchor="middle">no consumer</text>
+<rect class="b" x="560" y="220" width="150" height="50" rx="10"/>
+<text class="t" x="635" y="242" text-anchor="middle">retired</text><text class="s" x="635" y="258" text-anchor="middle">refs released · draws archived</text>
+<rect class="un" x="135" y="200" width="140" height="50" rx="10"/>
+<text class="t" x="205" y="222" text-anchor="middle">needs-human</text><text class="s" x="205" y="238" text-anchor="middle">the comment says why</text>
+<line class="e" x1="110" y1="85" x2="150" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="130" y="77" text-anchor="middle">go / plan</text>
+<line class="e" x1="260" y1="85" x2="300" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="280" y="77" text-anchor="middle">plan</text>
+<path class="e" d="M260 70 C 330 20, 400 20, 470 70" marker-end="url(#f3)"/>
+<text class="l" x="365" y="36" text-anchor="middle">buffer:go: the plan is posted, sourcing starts</text>
+<line class="e" x1="430" y1="85" x2="470" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="450" y="77" text-anchor="middle">approve</text>
+<line class="e" x1="580" y1="85" x2="630" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="605" y="77" text-anchor="middle">no job left</text>
+<line class="e" x1="760" y1="85" x2="810" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="785" y="77" text-anchor="middle">approve</text>
+<text class="l" x="785" y="124" text-anchor="middle">partial accepted;</text>
+<text class="l" x="785" y="138" text-anchor="middle">no job in between</text>
+<path class="ed" d="M700 60 C 740 20, 800 20, 850 60" marker-end="url(#f3)"/>
+<text class="l" x="780" y="30" text-anchor="middle">plan.auto_approve, every group ≥ min_fraction</text>
+<path class="e" d="M680 110 V160 H225 V110" marker-end="url(#f3)"/>
+<text class="l" x="450" y="154" text-anchor="middle">spec edited + buffer:go or buffer:plan, from either gate (the staged buffer is retired)</text>
+<line class="e" x1="225" y1="110" x2="225" y2="200" marker-end="url(#f3)"/>
+<text class="l" x="231" y="185">invalid spec</text>
+<line class="e" x1="175" y1="200" x2="175" y2="110" marker-end="url(#f3)"/>
+<text class="l" x="169" y="185" text-anchor="end">go / plan</text>
+<line class="e" x1="500" y1="110" x2="275" y2="205" marker-end="url(#f3)"/>
+<text class="l" x="405" y="192" text-anchor="middle">nothing servable after</text>
+<text class="l" x="405" y="206" text-anchor="middle">the day limit</text>
+<line class="e" x1="710" y1="110" x2="660" y2="220" marker-end="url(#f3)"/>
+<text class="l" x="700" y="178" text-anchor="start">keeper: unapproved for</text>
+<text class="l" x="700" y="192" text-anchor="start">retire_after_days</text>
+<line class="e" x1="830" y1="110" x2="830" y2="220" marker-end="url(#f3)"/>
+<text class="l" x="824" y="166" text-anchor="end">keeper: idle</text>
+<text class="l" x="824" y="180" text-anchor="end">after idle.hours</text>
+<line class="e" x1="900" y1="220" x2="900" y2="110" marker-end="url(#f3)"/>
+<text class="l" x="906" y="170">buffer:keep</text>
+<line class="e" x1="810" y1="245" x2="710" y2="245" marker-end="url(#f3)"/>
+<text class="l" x="760" y="237" text-anchor="middle">retire_after_days</text>
+<text class="l" x="760" y="260" text-anchor="middle">or buffer:retire</text>
+<path class="e" d="M635 270 V302 H140 V100 H150" marker-end="url(#f3)"/>
+<text class="l" x="400" y="295" text-anchor="middle">buffer:go starts a new round (a serving buffer stays registered until the keeper retires it)</text>
+<path class="ea" d="M905 60 C 940 30, 960 80, 920 90" marker-end="url(#f3)"/>
+<text class="l" x="1030" y="100" text-anchor="end">degraded: a pyramid went</text>
+<text class="l" x="1030" y="114" text-anchor="end">missing → rebuilt in place</text>
+</svg>
+<figcaption><b>Figure 4.</b> The human labels are <code>buffer:go</code>, <code>buffer:plan</code>, <code>buffer:approve</code>, <code>buffer:keep</code> and <code>buffer:retire</code>. The round stages before it asks. The staged comment is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the <code>ready</code> event. The keeper, a scheduled pass every thirty minutes, watches ready buffers as before and retires a staged buffer that nobody approves. Every way out of a dead end is a new <code>buffer:go</code>.</figcaption>
+</figure>
+
+<h2>5. Sourcing one dataset</h2>
+<p>Once a round is planned, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 5, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, publish by rename, register the volumes, release the lock.">
+<defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="20" y="40" width="150" height="56" rx="4"/>
+<text class="ts" x="28" y="62">binding + pins →</text><text class="ts" x="28" y="79">artifact id</text>
+<text class="s" x="20" y="116">sha256(binding, levels,</text>
+<text class="s" x="20" y="130">voxel size, harness, env)</text>
+<rect class="bs" x="20" y="250" width="150" height="50" rx="4"/>
+<text class="t" x="28" y="270">artifact on disk?</text><text class="s" x="28" y="288">reuse: no job at all</text>
+<line class="e" x1="95" y1="96" x2="95" y2="250" marker-end="url(#f4)"/>
+<text class="l" x="101" y="200">registry says ready</text>
+<line class="e" x1="170" y1="68" x2="220" y2="68" marker-end="url(#f4)"/>
+<rect class="b" x="220" y="40" width="130" height="56" rx="4"/>
+<text class="t" x="228" y="62">take the lock</text><text class="s" x="228" y="79">locks/raw/&lt;record&gt;</text>
+<text class="s" x="228" y="92">wait while held</text>
+<line class="e" x1="350" y1="68" x2="400" y2="68" marker-end="url(#f4)"/>
+<rect class="b" x="400" y="40" width="150" height="56" rx="4"/>
+<text class="t" x="408" y="62">raw cache complete?</text><text class="s" x="408" y="79">files.json vs the binding</text>
+<text class="s" x="408" y="92">quota checked first</text>
+<rect class="un" x="400" y="140" width="150" height="56" rx="4"/>
+<text class="t" x="408" y="162">fetch job</text><text class="s" x="408" y="179">harness fetch · cache rw</text>
+<text class="s" x="408" y="192">resumes until complete</text>
+<line class="e" x1="475" y1="96" x2="475" y2="140" marker-end="url(#f4)"/>
+<text class="l" x="481" y="122">no</text>
+<line class="e" x1="550" y1="68" x2="610" y2="68" marker-end="url(#f4)"/>
+<text class="l" x="580" y="60" text-anchor="middle">yes</text>
+<path class="e" d="M550 168 H580 V68" />
+<rect class="b" x="610" y="40" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="62">stage job</text><text class="s" x="618" y="79">cache read-only, no network</text>
+<text class="s" x="618" y="92">writes .building-&lt;id&gt;-…</text>
+<line class="e" x1="685" y1="96" x2="685" y2="140" marker-end="url(#f4)"/>
+<rect class="b" x="610" y="140" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="162">worker publishes</text><text class="s" x="618" y="179">verify stage.json, add the</text>
+<text class="s" x="618" y="192">artifact block, rename to &lt;id&gt;</text>
+<line class="e" x1="685" y1="196" x2="685" y2="250" marker-end="url(#f4)"/>
+<rect class="bs" x="610" y="250" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="272">register volumes</text><text class="s" x="618" y="289">split from the plan row</text>
+<text class="s" x="618" y="302">refs to the artifact and the raw</text>
+<line class="e" x1="170" y1="275" x2="610" y2="275" marker-end="url(#f4)"/>
+<text class="l" x="390" y="268" text-anchor="middle">yes: read the published stage.json and register</text>
+<rect class="note" x="790" y="40" width="150" height="266" rx="4"/>
+<text class="hd" x="800" y="60">while locked</text>
+<text class="s" x="800" y="82">the lock is heartbeated</text>
+<text class="s" x="800" y="96">from every job poll;</text>
+<text class="s" x="800" y="110">a dead worker's lock</text>
+<text class="s" x="800" y="124">goes stale in 15 min</text>
+<text class="s" x="800" y="150">blocked on raw quota:</text>
+<text class="s" x="800" y="164">release, wait for the</text>
+<text class="s" x="800" y="178">keeper, take again</text>
+<text class="s" x="800" y="204">a second buffer on the</text>
+<text class="s" x="800" y="218">same record waits here,</text>
+<text class="s" x="800" y="232">then finds the artifact</text>
+<text class="s" x="800" y="246">and reuses it</text>
+<text class="s" x="800" y="272">released when servable,</text>
+<text class="s" x="800" y="286">failed or dropped</text>
+<line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
+<text class="l" x="775" y="298" text-anchor="middle">release</text>
+</svg>
+<figcaption><b>Figure 5.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only. The one exception is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A published pyramid is never written again. A new binding, harness or voxel size produces a new artifact id beside the old one. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+</figure>
+
+<h2>6. The cache and its keeper</h2>
+<p>The cache is two shared roots, the raw root and the staged root, and both are reference-counted through the registry. Nothing in the service deletes. Only the keeper, which runs inside the buffers worker, removes a directory.</p>
+<figure>
+<svg viewBox="0 0 960 280" role="img" aria-label="The keeper's pass: sync the registry with the files, reset rows whose job died, sweep abandoned build directories, then evict free assets under the quota; an asset is free when it has no references, is ready, has not been used for the hold period, and its record is neither in a mia-data round nor locked.">
+<defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="34">every keeper.minutes (30)</text>
+<rect class="b" x="20" y="46" width="150" height="50" rx="4"/><text class="t" x="28" y="66">sync</text><text class="s" x="28" y="83">datasets · assets (sizes, missing)</text>
+<rect class="b" x="200" y="46" width="150" height="50" rx="4"/><text class="t" x="208" y="66">stale builds</text><text class="s" x="208" y="83">job gone → partial / missing</text>
+<rect class="b" x="380" y="46" width="150" height="50" rx="4"/><text class="t" x="388" y="66">sweep .building-*</text><text class="s" x="388" y="83">older than hold_hours</text>
+<rect class="bs" x="560" y="46" width="150" height="50" rx="4"/><text class="t" x="568" y="66">evict per root</text><text class="s" x="568" y="83">until under quota − headroom</text>
+<rect class="b" x="740" y="46" width="200" height="50" rx="4"/><text class="t" x="748" y="66">watch ready buffers</text><text class="s" x="748" y="83">missing → degraded · idle · retire</text>
+<line class="e" x1="170" y1="71" x2="200" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="350" y1="71" x2="380" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="530" y1="71" x2="560" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="710" y1="71" x2="740" y2="71" marker-end="url(#f5)"/>
+<text class="s" x="20" y="120">then the catalog's main head once a day; the pass and what it evicted are posted to the registry for the web UI</text>
+<rect class="note" x="20" y="140" width="920" height="120" rx="6"/>
+<text class="hd" x="32" y="160">an asset is free, hence evictable, when all of these hold</text>
+<text class="t" x="32" y="186">refs = ∅</text><text class="s" x="32" y="202">no registered volume uses it</text>
+<text class="t" x="200" y="186">state = ready</text><text class="s" x="200" y="202">not fetching, staging, waiting</text>
+<text class="t" x="400" y="186">unused for hold_hours</text><text class="s" x="400" y="202">last_used: jobs touch raw, draws touch staged</text>
+<text class="t" x="650" y="186">record not busy</text><text class="s" x="650" y="202">no mia-data round in progress on it</text>
+<text class="t" x="650" y="226">lock not held</text><text class="s" x="650" y="242">the keeper takes it before deleting</text>
+<text class="s" x="32" y="226">quota 0 = unlimited (the default); a blocked fetch records its demand so the keeper frees enough room for it;</text>
+<text class="s" x="32" y="242">when nothing is evictable and a root is still over, one comment on the newest buffer issue</text>
+</svg>
+<figcaption><b>Figure 6.</b> Sizes come from the keeper's scan and are reused until a directory's mtime changes. A raw asset shared by several buffers keeps one reference per buffer. A retire drops that buffer's references, so its pyramids become evictable and its raw files stay until the space is needed. <code>mia-buffers assets sync --dry-run</code> runs the same pass by hand and only reports.</figcaption>
+</figure>
+
+<h2>7. Serving</h2>
+<p>Train consumers get a stream of crops, and val and test consumers get a frozen list. Both kinds read the pixels from shared storage themselves.</p>
+<figure>
+<svg viewBox="0 0 940 440" role="img" aria-label="Sequence of calls between the worker, the buffer service, a train consumer and a val consumer: volumes registered, train descriptors streamed by weight, val descriptors served from a frozen list, a late dataset renormalising train weights only.">
+<defs><marker id="f6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="35" y="14" width="150" height="34" rx="4"/><text class="t" x="110" y="36" text-anchor="middle">mia-buffers worker</text>
+<rect class="b" x="295" y="14" width="150" height="34" rx="4"/><text class="t" x="370" y="36" text-anchor="middle">buffer-api</text>
+<rect class="bs" x="545" y="14" width="150" height="34" rx="4"/><text class="t" x="620" y="36" text-anchor="middle">train consumer</text>
+<rect class="b" x="775" y="14" width="150" height="34" rx="4"/><text class="t" x="850" y="36" text-anchor="middle">val consumer</text>
+<line class="ll" x1="110" y1="48" x2="110" y2="432"/>
+<line class="ll" x1="370" y1="48" x2="370" y2="432"/>
+<line class="ll" x1="620" y1="48" x2="620" y2="432"/>
+<line class="ll" x1="850" y1="48" x2="850" y2="432"/>
+<line class="e" x1="110" y1="80" x2="370" y2="80" marker-end="url(#f6)"/>
+<text class="l" x="240" y="73" text-anchor="middle">PUT buffers/&lt;id&gt; · levels, patch, recipe, plan hash</text>
+<line class="e" x1="110" y1="106" x2="370" y2="106" marker-end="url(#f6)"/>
+<text class="l" x="240" y="99" text-anchor="middle">PUT volumes/&lt;vol&gt; · artifact, splits, weight; refs in one transaction</text>
+<line class="e" x1="620" y1="140" x2="370" y2="140" marker-end="url(#f6)"/>
+<text class="l" x="495" y="133" text-anchor="middle">POST consumers {split: train, rank}</text>
+<line class="e" x1="370" y1="162" x2="620" y2="162" marker-end="url(#f6)"/>
+<text class="l" x="495" y="155" text-anchor="middle">consumer_id · the config names the recipe; a different harness commit is refused</text>
+<line class="e" x1="620" y1="194" x2="370" y2="194" marker-end="url(#f6)"/>
+<text class="l" x="495" y="187" text-anchor="middle">GET next?n=128</text>
+<rect class="note" x="380" y="204" width="230" height="32" rx="3"/>
+<text class="s" x="388" y="217">volume by weight (missing ones skipped),</text>
+<text class="s" x="388" y="230">plane and centre uniform, recorded first</text>
+<line class="ea" x1="370" y1="254" x2="620" y2="254" marker-end="url(#f6)"/>
+<text class="l" x="495" y="247" text-anchor="middle">128 descriptors · seq, volume, plane, centre_nm</text>
+<rect class="note" x="630" y="264" width="210" height="32" rx="3"/>
+<text class="s" x="638" y="277">reads the pyramid, runs the tensorizer</text>
+<text class="s" x="638" y="290">img, bbox, label → prefetch queue</text>
+<line class="ed" x1="620" y1="312" x2="370" y2="312" marker-end="url(#f6)"/>
+<text class="l" x="495" y="305" text-anchor="middle">each call is a heartbeat; last_seen drives idle</text>
+<line class="e" x1="850" y1="342" x2="370" y2="342" marker-end="url(#f6)"/>
+<text class="l" x="610" y="335" text-anchor="middle">GET split/val?from=0&amp;n=64</text>
+<line class="e" x1="370" y1="366" x2="850" y2="366" marker-end="url(#f6)"/>
+<text class="l" x="610" y="359" text-anchor="middle">frozen list, items 0–63 · generated once from the seed, identical every epoch</text>
+<line class="e" x1="110" y1="398" x2="370" y2="398" marker-end="url(#f6)"/>
+<text class="l" x="240" y="391" text-anchor="middle">PUT volumes/&lt;late dataset&gt;</text>
+<rect class="note" x="380" y="406" width="230" height="28" rx="3"/>
+<text class="s" x="388" y="418">train weights renormalise on the next draw;</text>
+<text class="s" x="388" y="430">the val list does not change for this run</text>
+</svg>
+<figcaption><b>Figure 7.</b> The service is the only sampler, so every consumer of a buffer sees one distribution. <code>next</code> records a draw before it returns it, which makes the ledger a complete record of a run. A retire archives the draws to shared storage, and the service answers 410 from then on. The daily usage rows and the empty-response rate are what the web UI's health line shows.</figcaption>
+</figure>
+
+<h2>8. What a crop is</h2>
+<p>The service hands out descriptors, not pixels. Whoever tensorises a crop derives one pixel box per level from the descriptor and reads it from the pyramid. The example in figure 8 uses the U937 confocal record, with 45 nm pixels, 256-pixel patches and levels 1, 2 and 4.</p>
+<figure>
+<svg viewBox="0 0 940 345" role="img" aria-label="One crop descriptor becomes three 256-pixel patches at pyramid levels 1, 2 and 4 around the same world point, stacked into the img tensor with a physical bounding box per level.">
+<rect class="b" x="30" y="30" width="280" height="280" rx="3"/>
+<text class="s" x="38" y="47">staged plane · 2048 × 2048 px · 45 nm/px</text>
+<rect class="ed" x="100" y="100" width="140" height="140"/>
+<text class="s" x="236" y="112" text-anchor="end">valid centres</text>
+<rect class="sq" x="60" y="130" width="140" height="140"/>
+<rect class="sq" x="95" y="165" width="70" height="70"/>
+<rect class="sqa" x="112.5" y="182.5" width="35" height="35"/>
+<circle class="fa" cx="130" cy="200" r="2.6"/>
+<text class="s" x="64" y="143">level 4 · 1024 px</text>
+<line class="em" x1="200" y1="130" x2="500" y2="75"/>
+<line class="em" x1="165" y1="165" x2="500" y2="165"/>
+<line class="em" x1="147.5" y1="182.5" x2="500" y2="255"/>
+<text class="s" x="535" y="30" text-anchor="middle">256 × 256 px at each level</text>
+<rect class="sq" x="500" y="40" width="70" height="70"/>
+<rect class="sqa" x="517.5" y="57.5" width="35" height="35"/>
+<rect class="sq" x="500" y="130" width="70" height="70"/>
+<rect class="sqa" x="517.5" y="147.5" width="35" height="35"/>
+<rect class="sqa" x="500" y="220" width="70" height="70" fill="var(--accent-soft)"/>
+<text class="ts" x="585" y="60">level 4</text><text class="s" x="585" y="76">180 nm/px · 46 µm field</text><text class="s" x="585" y="91">bbox = [y0, x0], [y1, x1] in nm</text>
+<text class="ts" x="585" y="150">level 2</text><text class="s" x="585" y="166">90 nm/px · 23 µm field</text><text class="s" x="585" y="181">same centre, half the field</text>
+<text class="ts" x="585" y="240">level 1</text><text class="s" x="585" y="256">45 nm/px · 11.5 µm field</text><text class="s" x="585" y="271">native resolution</text>
+<path class="em" d="M735 42 H742 V288 H735 M742 165 H749"/>
+<text class="t" x="758" y="130">img   (L=3, C=3, 256, 256)</text>
+<text class="t" x="758" y="152">bbox  (L=3, 2, 2)  nm</text>
+<text class="t" x="758" y="174">label (L=3, 256, 256)</text>
+<text class="s" x="758" y="190">only when a label layer exists</text>
+<text class="s" x="758" y="216">one world point per sample;</text>
+<text class="s" x="758" y="231">bbox values feed the rotary</text>
+<text class="s" x="758" y="246">embedding, so the unit is fixed</text>
+<text class="lm" x="30" y="332">descriptor = (buffer, seq, volume, plane, centre_nm, levels=[1, 2, 4], normalize)</text>
+</svg>
+<figcaption><b>Figure 8.</b> The centre is drawn uniformly inside the region where the coarsest box still fits, so the three patches are always co-centred and never clamped. Each coarser patch covers twice the field of the one below it. The coarsest footprint is 1024 level-0 pixels, which is why a 224-pixel dataset fails this spec's fit rule at plan time. A spec with a 32-pixel patch admits the same dataset, and preparation itself refuses no dataset for its size.</figcaption>
+</figure>
+
+<h2>9. Where things live</h2>
+<p>One configuration file serves every service on the host. Anything that needs a working lock lives on host-local disk, and everything a job or a consumer reads lives on shared storage.</p>
+<pre>mia.yaml                                 <span class="c">one file: shared sections, then services.&lt;name&gt; overlays</span>
+
+&lt;local_root&gt;/                            <span class="c">host-local disk (file locks and SQLite do not work on NFS)</span>
+  locks/raw/&lt;record&gt;                     <span class="c">one writer per raw cache · owner, heartbeat, TTL 15 min</span>
+  locks/snapshot/&lt;sha&gt;                   <span class="c">one extraction per pinned commit</span>
+  service/buffers.sqlite                 <span class="c">the registry · backed up every 30 min to state/</span>
+  temporal/temporal.db                   <span class="c">the dev Temporal server</span>
+
+&lt;storage_root&gt;/&lt;dataset folder&gt;/        <span class="c">mia-data's output · what "prepared" means</span>
+  binding.yaml · manifest.json           <span class="c">the manifest names the binding it was verified with</span>
+  &lt;crop id&gt;/                             <span class="c">verified crops</span>
+
+&lt;raw_root&gt;/&lt;record&gt;/                     <span class="c">original files · shared by both pipelines · untrusted bytes</span>
+  files.json                             <span class="c">url → cache key, validators, source: download | drop</span>
+  incoming/                              <span class="c">human drop zone for files no job may fetch</span>
+
+&lt;staged_root&gt;/&lt;levels key&gt;/&lt;record&gt;/&lt;artifact id&gt;/
+  stage.json                             <span class="c">the job's report plus the artifact block the worker adds</span>
+  v0.zarr/raw · v0.zarr/labels/&lt;key&gt;     <span class="c">OME-Zarr pyramid · scale and translation in nm</span>
+  ../.building-&lt;id&gt;-&lt;job&gt;/               <span class="c">a build in progress; swept by the keeper if abandoned</span>
+
+&lt;state_root&gt;/&lt;service&gt;/                 <span class="c">per worker: rounds/&lt;id&gt;/{spec, pins, plan, bindings}</span>
+  backups/ · archive/ · keeper/          <span class="c">SQLite copies · retired buffers' draws · the catalog sync mark</span></pre>
+
+<h2>10. The web UI</h2>
+<p>buffer-api serves the web UI at <code>/</code>. The page reads only the open routes and holds no token. Its three actions are prefilled GitHub links, so the one click that needs an identity leaves the web UI.</p>
+<div class="tw"><table>
+<tr><th>view</th><th>shows</th><th>reads</th></tr>
+<tr><td>Datasets</td><td>the catalog filtered by spec fields and planned by the server, with each record's preparation state, a crop preview, raw and staged state and the buffers that use it. Its actions download the spec, open the buffer issue and request preparation</td><td><code>POST /plan</code> · <code>/datasets</code> · <code>/assets/*</code> · <code>/crops/*</code></td></tr>
+<tr><td>Buffers</td><td>every buffer with its latest event, and for one buffer its board, volumes, consumers, daily usage and health line</td><td><code>/buffers</code> · <code>/status</code> · <code>/events</code> · <code>/usage</code></td></tr>
+<tr><td>Cache</td><td>raw by record, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/*</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
+<tr><td>Preparation</td><td>datasets in progress with their mia-data stage and issue, those needing a human, open requests</td><td><code>/datasets</code></td></tr>
+<tr><td>Docs</td><td>the user guide (the loop from spec to training, as the person training a model sees it) and this architecture overview</td><td>nothing: static</td></tr>
+</table></div>
+
+<h2>What is not built</h2>
+<ul>
+  <li><b>Remote mode:</b> crop workers beside the service that tensorise and return tensors over HTTP. Local mode, where the training job reads the pyramid, is the only mode.</li>
+  <li><b>The evaluation step:</b> an agent that writes <code>evaluation.yaml</code> (voxel size, channel meanings, a quality verdict) beside the binding. The config switch exists, but the job does not.</li>
+  <li><b>Identity on the service:</b> the web UI cannot start a buffer or a request by itself. When a proxy or token layer lands in front of buffer-api, the same buttons can call the API directly.</li>
+  <li><b>Several worker hosts:</b> the lock directory assumes one host. The upgrade is a lease table in the registry with the same four calls.</li>
+</ul>
+<p>Source: <code>notes/specs/2026-10-25-prep-and-buffering.md</code> (v0.6, where §12 removes the eligibility verdict, §13 removes the production crop phase, §15 stages a round before it asks and §14 adds the review loop) and the "Built in" notes under its build order. <code>docs/development.md</code> walks through each milestone.</p>
+  </article>
+</section>
+
+</main>
+
+<div class="tip" id="tip" hidden></div>
+<script>
+(function(){
+"use strict";
+// Everything here is a GET (plus POST /plan, which writes nothing); the page holds no token. Actions that need an
+// identity are GitHub new-issue links. All hosts and repos come from GET /meta.
+const DIMS = ["2D","2D+t","3D","3D+t"];
+const LIC = ["CC0-1.0","CC-BY-4.0","CC-BY-3.0","MIT","BSD-3-Clause","Apache-2.0","CC-BY-SA-4.0","CC-BY-NC-4.0","CC-BY-NC-SA-4.0","CC-BY-NC-ND-4.0","GPL-3.0-or-later"];
+const SRC = ["manual","proofread","automatic","mixed","unknown"];
+const LEVELS = [1,2,4,8,16,32];
+const NOT_PREPARED = "not prepared";  // mia_buffers.plan.NOT_PREPARED
+const MAX_URL = 8000;                 // GitHub refuses new-issue links much longer than this
+const PLAN_DEBOUNCE_MS = 300;
+const $ = id => document.getElementById(id);
+const fmt = n => n >= 1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n >= 1e3 ? (n/1e3).toFixed(n>=1e4?0:1)+"K" : String(n);
+const num = n => n == null || n === "" ? "" : Number(n).toLocaleString();
+const fmtBytes = b => { b = Number(b) || 0; for (const [s, u] of [[1e12,"TB"],[1e9,"GB"],[1e6,"MB"],[1e3,"KB"]]) if (b >= s) return (b/s).toFixed(1)+" "+u; return b+" B"; };
+const short = (s, n) => s ? String(s).slice(0, n || 8) : "";
+const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
+const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for (const [k,v] of Object.entries(attrs||{})) { if (v == null || v === false) continue; if (k==="class") n.className=v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? "" : v); } for (const k of kids) if (k != null && k !== false) n.append(k); return n; };
+const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k,v] of Object.entries(attrs||{})) n.setAttribute(k,v); return n; };
+// catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
+const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
+// what each pill means, by its text; the tooltip shows it (a decision pill adds the planner's exact reason)
+const PILL_HELP = {
+  // the planner's decision for a dataset against the current spec
+  "pool": "Fits the spec and is prepared: the dataset is in the plan's pool and would supply crops.",
+  "path not selected": "The record's path in the catalog is not under the spec's select.paths globs.",
+  "excluded by path": "The record's path matches one of the spec's exclude.paths globs.",
+  "excluded by id": "The record's id is listed in the spec's exclude.ids.",
+  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the spec's where.dims.",
+  "modality": "None of the dataset's modalities is in the spec's where.modality.",
+  "organism": "The dataset's organism is not in the spec's where.organism.",
+  "licence unknown": "The record names no SPDX licence and the spec does not allow unknown licences.",
+  "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
+  "annotations required": "The spec requires annotations and the record has none.",
+  "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
+  "annotation source": "The record's annotation source (manual, model, …) is not among those the spec asks for.",
+  "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
+  "no mia-data folder": "The record does not name exactly one modality family and one organism, which is how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
+  "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
+  "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
+  "no patch for dims": "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
+  "no array shape": "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it.",
+  "footprint too large": "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
+  "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",
+  "voxel size unknown": "The record gives no voxel size and the spec does not allow assuming one (sampling.assume_voxel_size).",
+  "not prepared": "Fits the spec, but no reader exists for the dataset's files yet; request preparation, and a later round will pick it up.",
+  // the preparation pipeline's view of a dataset
+  "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
+  "in-progress": "The preparation pipeline is working on it; the stage column or the dataset issue says where it is.",
+  "unprepared": "Nobody has asked for this dataset to be prepared.",
+  "needs-human": "Stopped. The issue's latest comment says what it needs from a person.",
+  // a cache directory or a staged pyramid
+  "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
+  "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
+  "staging": "A stage job is converting the raw files into an OME-Zarr pyramid.",
+  "waiting-drop": "The files cannot be fetched by a job; a person has to place them in the dataset's incoming/ directory.",
+  "partial": "A fetch ended before the cache was complete; the next fetch resumes it.",
+  "missing": "Expected on disk but not found by the last scan.",
+  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
+  "staged": "At least one pyramid of this dataset exists in the staged cache.",
+  // a buffer's stage (its issue's label)
+  "new": "The issue is seen; nothing has run yet.",
+  "planning": "Resolving the spec against the catalog.",
+  "plan-review": "The plan is posted; a buffer:plan round waits here for buffer:approve.",
+  "sourcing": "Fetching and converting the pool's datasets, several at a time.",
+  "ready": "Serving: consumers can draw crops.",
+  "idle": "No consumer has drawn for a while; buffer:keep returns it to ready, otherwise the keeper retires it later.",
+  "retired": "Its references are released; consumers get 410, and the keeper may reclaim the space.",
+  "superseded": "A newer round of the same issue replaced this buffer.",
+  // a dataset of a buffer's pool during sourcing (the board)
+  "pending": "Not started yet; waits for a sourcing slot.",
+  "waiting-dataset": "No approved binding yet; the preparation pipeline is working on the dataset.",
+  "waiting-lock": "Another job holds the dataset's raw-cache lock; this one waits for it.",
+  "blocked": "The raw cache is over its quota; the fetch waits for the keeper to make room.",
+  "servable": "Its volumes are registered and the service can draw crops from them.",
+  "failed": "The fetch or stage job failed; the reason is in the row and on the issue.",
+  "dropped": "Left out of the round: still waiting when the day limit passed.",
+  // the preparation pipeline's stages (mia-data)
+  "matching": "Looking for an existing reader snippet that fits the dataset's files.",
+  "developing": "An agent is writing a reader snippet for the dataset.",
+  "testing": "Making the sample crops a reviewer will look at.",
+  "review": "Sample crops are posted on the dataset issue; waiting for a reviewer to approve or reject them.",
+  "merging": "The crops were approved; the reader's pull request is being merged.",
+  "done": "The dataset is prepared: its crops and binding are published.",
+  // odds and ends
+  "stale": "This consumer has not been seen for longer than expected.",
+};
+function tipOn(node, lines) {  // the page's tooltip on hover (no tab stop: tables hold hundreds of pills)
+  node.addEventListener("pointerenter", e => showTip(e, lines)); node.addEventListener("pointermove", moveTip); node.addEventListener("pointerleave", hideTip);
+  return node;
+}
+// a pill explains itself on hover: PILL_HELP by its text, plus any extra lines (a count pill passes its own)
+const pill = (text, kind, extra) => {
+  const node = el("span", { class: "pill" + (kind ? " " + kind : "") }, text);
+  const help = PILL_HELP[text];
+  const lines = [...(help ? [{ b: text, t: help }] : []), ...(extra || [])];
+  return lines.length ? tipOn(node, lines) : node;
+};
+const GOOD = new Set(["prepared","ready","servable","pool","cached"]);
+const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale"]);
+const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
+// an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
+const assetPill = s => statePill(s === "ready" ? "cached" : s);
+
+// ---- times: the ledger stores epoch seconds; keep ISO strings working too
+function toEpoch(t) { if (t == null || t === "") return null; if (typeof t === "number") return t; const ms = Date.parse(t); return isNaN(ms) ? null : ms / 1000; }
+function ago(t) {
+  const s = toEpoch(t); if (s == null) return "";
+  const d = Date.now() / 1000 - s, a = Math.abs(d);
+  if (a < 10) return "just now";
+  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "min"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
+  return d >= 0 ? `${Math.round(v)} ${u} ago` : `in ${Math.round(v)} ${u}`;
+}
+const when = t => { const s = toEpoch(t); return s == null ? "" : el("span", { title: new Date(s * 1000).toISOString() }, ago(t)); };
+
+// ---- fetch: errors go to the banner, the caller gets null
+class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+async function api(path, options) {
+  let res;
+  try { res = await fetch(path, options); } catch (e) { throw new HttpError(0, e.message); }
+  const text = await res.text(); let data = null;
+  if (text) { try { data = JSON.parse(text); } catch { data = { error: text.slice(0, 300) }; } }
+  if (!res.ok) throw new HttpError(res.status, (data && data.error) || res.statusText);
+  return data;
+}
+function banner(message) {  // at most 3 lines, a repeat bumps its count instead of adding one, and each fades after 20 s
+  const box = $("banner"), same = [...box.children].find(d => d.dataset.message === message);
+  if (same) { same.count = (same.count || 1) + 1; same.firstChild.textContent = `${message} (×${same.count})`; clearTimeout(same.timer); }
+  const line = same || el("div", { "data-message": message }, el("span", {}, message), el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"));
+  line.timer = setTimeout(() => line.remove(), 20000);
+  if (!same) { box.append(line); while (box.children.length > 3) box.firstChild.remove(); }
+}
+async function load(path, quiet404) {  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
+  try { return await api(path); }
+  catch (e) { if (!(quiet404 && e.status === 404)) banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`); return null; }
+}
+
+// ---- tooltip (the explorer's)
+const tip = $("tip");
+function showTip(evt, lines) { tip.replaceChildren(); for (const l of lines) { const d = el("div"); if (l.k) d.append(Object.assign(el("span",{class:"k"}), {style:`background:${l.k}`})); if (l.b) d.append(el("b",{}, l.b), " "); if (l.t) d.append(l.t); if (l.img) d.append(el("img", { src: l.img, alt: "" })); tip.append(d); } tip.hidden = false; moveTip(evt); }
+function moveTip(evt) { const x = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8); tip.style.left = x + "px"; tip.style.top = (evt.clientY + 14) + "px"; }
+function hideTip() { tip.hidden = true; }
+function hoverable(node, lines) { node.addEventListener("pointerenter", e => showTip(e, lines)); node.addEventListener("pointermove", moveTip); node.addEventListener("pointerleave", hideTip); node.setAttribute("tabindex","0"); node.addEventListener("focus", () => { const b = node.getBoundingClientRect(); showTip({clientX:b.left+b.width/2, clientY:b.top}, lines); }); node.addEventListener("blur", hideTip); }
+
+// ---- horizontal bars (the explorer's: single series, sequential hue)
+function barPath(x, y, w, h, r) { if (w <= r) return `M${x} ${y}h${w}v${h}h${-w}z`; return `M${x} ${y}h${w-r}a${r} ${r} 0 0 1 ${r} ${r}v${h-2*r}a${r} ${r} 0 0 1 ${-r} ${r}h${-(w-r)}z`; }
+function hbars(container, items, opts) {
+  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "nothing to show")); return; }
+  const W = 560, labelW = opts.labelW || 170, rowH = 26, barH = 16, pad = 8;
+  const H = items.length * rowH + pad * 2;
+  const max = Math.max(1e-12, ...items.map(i => i.value));
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.aria || "" });
+  const plotW = W - labelW - 70;
+  items.forEach((it, i) => {
+    const y = pad + i * rowH;
+    const g = svgEl("g");
+    const lbl = svgEl("text", { x: labelW - 8, y: y + barH - 3, "text-anchor": "end", class: "lbl" }); lbl.textContent = it.label.length > 26 ? it.label.slice(0, 25) + "…" : it.label; g.append(lbl);
+    const w = Math.max(0, it.value / max * plotW);
+    g.append(svgEl("path", { d: barPath(labelW, y, w, barH, 4), fill: it.color || "var(--accent)" }));
+    const v = svgEl("text", { x: labelW + w + 6, y: y + barH - 3, class: "tick" }); v.textContent = it.text || num(it.value); g.append(v);
+    const hit = svgEl("rect", { x: 0, y: y - 4, width: W, height: rowH, fill: "transparent" }); g.append(hit);
+    hoverable(hit, [{ b: it.text || num(it.value), t: " " + it.label }, ...(it.sub ? [{ t: it.sub }] : [])]);
+    svg.append(g);
+  });
+  svg.append(svgEl("line", { x1: labelW, x2: labelW, y1: pad - 4, y2: H - pad + 4, class: "base" }));
+  container.replaceChildren(svg);
+}
+
+// ---- small helpers for the plain tables, tiles and cards
+function table(cols, rows, empty, rowAttrs) {
+  if (!rows.length) return el("div", { class: "empty" }, empty);
+  const head = el("tr", {}, ...cols.map(c => el("th", { class: c.num ? "num" : "" }, c.label)));
+  const body = rows.map(r => el("tr", rowAttrs ? rowAttrs(r) : {}, ...cols.map(c => { const v = c.cell(r); return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v); })));
+  return el("div", { class: "tablewrap" }, el("table", { class: "plain" }, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+const tile = (label, value, sub, kind) => el("div", { class: "tile" + (kind ? " " + kind : "") }, el("div", { class: "label" }, label), el("div", { class: "value" }, value), sub ? el("div", { class: "sub" }, sub) : null);
+const card = (title, sub, ...kids) => el("div", { class: "card" }, el("h2", {}, title), sub ? el("div", { class: "sub" }, sub) : null, ...kids);
+const kv = pairs => el("dl", { class: "kv" }, ...pairs.filter(p => p).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v == null || v === "" ? "—" : v)]));
+const ghIssue = (repo, n) => repo && n ? link(`https://github.com/${repo}/issues/${n}`, `#${n}`) : (n ? `#${n}` : "");
+const code = (v, n) => v ? el("code", { title: String(v) }, n ? short(v, n) : String(v)) : null;
+const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) }, id);
+// a prepared dataset's first crop overlay, served by buffer-api from the dataset folder (`previews` lists the crops that have one); hover enlarges, click opens
+const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
+const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
+  return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
+    [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+const dsIssue = record => { const d = S.datasets.get(record); return d?.issue ? ghIssue(S.meta.datasets_repo, d.issue) : ""; };
+// a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
+const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "open") : "";
+
+// ---- shared state: the service's meta, the newest catalog, and the registry rows the views join
+const S = { meta: {}, catalogs: [], ref: null, records: new Map(), recordsRef: null, datasets: new Map(),
+  rawAssets: [], raw: new Map(), rawBytes: 0, stagedAssets: [], stagedByRecord: new Map(), stagedBytes: 0, plan: null, planError: null };
+
+async function loadRegistry() {
+  const [ds, raw, staged] = await Promise.all([load("/datasets"), load("/assets/raw"), load("/assets/staged")]);
+  S.datasets = new Map((ds?.datasets || []).map(d => [d.id, d]));
+  S.rawAssets = raw?.assets || []; S.rawBytes = raw?.bytes || 0;
+  S.raw = new Map(S.rawAssets.map(a => [a.key, a]));
+  S.stagedAssets = staged?.assets || []; S.stagedBytes = staged?.bytes || 0;
+  S.stagedByRecord = new Map();
+  for (const a of S.stagedAssets) { const r = a.data?.record; if (!r) continue; if (!S.stagedByRecord.has(r)) S.stagedByRecord.set(r, []); S.stagedByRecord.get(r).push(a); }
+}
+async function loadRecords() {
+  if (!S.ref || S.recordsRef === S.ref) return;
+  const out = await load("/records?ref=" + encodeURIComponent(S.ref));
+  if (!out) return;
+  S.records = new Map((out.records || []).map(r => [String(r.record?.id ?? r.path), r]));
+  S.recordsRef = S.ref;
+}
+
+// ---- the spec the controls describe
+const C = { name: "microscopy-2d-gray", paths: "datasets/**", dims: new Set(["2D"]), lic: new Set(["CC0-1.0","CC-BY-3.0","CC-BY-4.0","MIT","BSD-3-Clause"]),
+  allowUnknown: false, annRequired: false, sources: new Set(SRC), minVox: 1e6, patch: 256, level: 4, patchZ: 32, dedup: true, T: 0.5,
+  preparedOnly: false, rawCached: false, stagedGeom: false };
+const levelsOf = coarsest => LEVELS.filter(l => l <= coarsest);
+const levelsKey = c => `p${c.patch}-l${levelsOf(c.level).join("-")}`;  // mia_buffers.jobspec.levels_key
+
+// A YAML scalar: plain when YAML reads it back as the same string, double-quoted (JSON is valid YAML) otherwise.
+function yq(value) {
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const s = String(value ?? "");
+  const risky = s === "" || /[:#,\[\]{}&!|>'"%@`\u0000-\u001f\u007f]/.test(s) || /^[\s*?-]/.test(s) || /\s$/.test(s)
+    || /^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s)
+    || /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) || /^0[xob]/i.test(s) || /^[-+]?\.(inf|nan)$/i.test(s);
+  return risky ? JSON.stringify(s) : s;
+}
+const flow = xs => `[${xs.map(yq).join(", ")}]`;
+function toSpecYaml(c, ref, repo) {
+  const p = c.patch, z = c.patchZ, sources = SRC.filter(s => c.sources.has(s));
+  return [
+    "schema_version: 1",
+    `name: ${yq(c.name.trim() || "buffer")}`,
+    "",
+    "catalog:",
+    `  repo: ${yq(repo || "")}`,
+    `  ref: ${yq(ref || "")}`,
+    "",
+    "select:",
+    `  paths: ${flow(c.paths.split(/[\s,]+/).filter(Boolean))}`,
+    "  where:",
+    `    dims: {in: ${flow(DIMS.filter(d => c.dims.has(d)))}}`,
+    "    license:",
+    `      in: ${flow(LIC.filter(l => c.lic.has(l)))}`,
+    `      allow_unknown: ${c.allowUnknown}`,
+    "    annotations:",
+    `      required: ${c.annRequired}`,
+    `      source: ${sources.length === SRC.length ? "any" : `{in: ${flow(sources)}}`}`,
+    `    min_size_voxels: ${c.minVox}`,
+    "  dedup:",
+    `    by: ${flow(c.dedup ? ["doi"] : [])}`,
+    "",
+    "sampling:",
+    "  patch:",
+    `    2D: {y: ${p}, x: ${p}}`,
+    ...(c.dims.has("2D+t") ? [`    2D+t: {y: ${p}, x: ${p}}`] : []),
+    ...(c.dims.has("3D") ? [`    3D: {z: ${z}, y: ${p}, x: ${p}}`] : []),
+    ...(c.dims.has("3D+t") ? [`    3D+t: {z: ${z}, y: ${p}, x: ${p}}`] : []),
+    "    c: 1",
+    `  levels: ${flow(levelsOf(c.level))}`,
+    "  weighting:",
+    "    scheme: temperature",
+    "    over: [modality, dataset]",
+    `    temperature: ${c.T}`,
+    "",
+    "splits:",
+    "  fractions: {train: 0.8, val: 0.1, test: 0.1}",
+    "",
+    "plan:",
+    "  auto_approve: true",
+    "",
+  ].join("\n");
+}
+function toPrepYaml(records, ref, repo) {
+  return ["schema_version: 1", "kind: preparation", `catalog: {repo: ${yq(repo || "")}, ref: ${yq(ref || "")}}`, "records:", ...records.map(r => `  - ${yq(r)}`), ""].join("\n");
+}
+
+// ---- GitHub links: a prefilled new-issue page, or "copy YAML" when the link would be too long
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    const area = el("textarea", { style: "position:fixed;opacity:0" }); area.value = text; document.body.append(area); area.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch { ok = false; } area.remove(); return ok;
+  }
+}
+function issueAction(container, label, repo, title, intro, yaml, disabledReason) {
+  const disabled = reason => container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: reason }, label), el("span", { class: "small" }, reason));
+  if (disabledReason) return disabled(disabledReason);
+  if (!repo) return disabled("GET /meta names no repo");
+  const body = `${intro}\n\n\`\`\`yaml\n${yaml}\`\`\`\n`;
+  // no label is prefilled: nothing runs until the human adds the go label, after reading what the issue says
+  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}`;
+  const url = `${base}&body=${encodeURIComponent(body)}`;
+  if (url.length <= MAX_URL) { container.replaceChildren(el("a", { class: "btn", href: url, target: "_blank", rel: "noopener" }, label)); return; }
+  const status = el("span", { class: "small" });
+  container.replaceChildren(
+    el("a", { class: "btn", href: `${base}&body=${encodeURIComponent(intro + "\n\n(paste the copied YAML here)")}`, target: "_blank", rel: "noopener" }, label),
+    el("button", { type: "button", class: "btn", title: "the YAML is too long for a prefilled link: copy it, open the issue, paste it into the body",
+      onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
+    status);
+}
+
+// ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
+const RULE_GROUPS = [
+  [/^path not in/, "path not selected"], [/^excluded by path/, "excluded by path"], [/^excluded by id/, "excluded by id"],
+  [/^dims /, "dims not selected"], [/^modality /, "modality"], [/^organism /, "organism"],
+  [/^license .*unknown/, "licence unknown"], [/^license /, "licence not allowed"],
+  [/^annotations required/, "annotations required"], [/^annotation types/, "annotation types"], [/^annotation source/, "annotation source"],
+  [/^largest raw array under/, "array below minimum"], [/^no dataset folder/, "no mia-data folder"], [/^dedup/, "duplicate DOI"],
+  [/^record unreadable/, "record unreadable"], [/^no patch for dims/, "no patch for dims"], [/^no array shape/, "no array shape"],
+  [/^footprint/, "footprint too large"], [/^patch z/, "too few z slices"], [/^voxel size unknown/, "voxel size unknown"],
+  [new RegExp("^" + NOT_PREPARED + "$"), NOT_PREPARED],
+];
+const ruleGroup = rule => (RULE_GROUPS.find(([re]) => re.test(rule || "")) || [null, rule || "unknown"])[1];
+const ruleRank = group => { const i = RULE_GROUPS.findIndex(([, g]) => g === group); return i < 0 ? RULE_GROUPS.length : i; };
+function decisionOf(r) {
+  if (r.admitted && r.fit && r.fit.ok) return { group: "pool", reason: r.fit.reason };
+  if (r.rule === NOT_PREPARED) return { group: NOT_PREPARED, reason: `fits; dataset is ${r.prepared || "unprepared"}` };
+  if (r.admitted && r.fit) return { group: ruleGroup(r.fit.reason), reason: r.fit.reason };
+  return { group: ruleGroup(r.rule), reason: r.rule };
+}
+function joinRow(r) {
+  const rec = S.records.get(r.id)?.record || {};
+  const ds = S.datasets.get(r.id) || null;
+  return { ...r, title: rec.title || "", lic: rec.license?.spdx || "", url: rec.landing_url || null,
+    bytes: r.bytes ?? rec.data?.size_bytes ?? null, ds, raw: S.raw.get(r.id) || null, staged: S.stagedByRecord.get(r.id) || [],
+    fits: !!(r.fit && r.fit.ok), inPool: !!(r.admitted && r.fit && r.fit.ok), decision: decisionOf(r) };
+}
+const stagedUsable = a => !["evicted","missing"].includes(a.data?.state);
+
+// ---- the records table (the explorer's, with the registry columns)
+let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
+const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
+const COLS = [
+  { key: "id", label: "dataset", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
+  { key: "preview", label: "preview", get: x => (x.ds?.previews || []).length, cell: x => el("td", {}, thumb(x.ds)) },
+  { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", {}, pill(x.decision.group, x.inPool ? "pool" : "", x.decision.reason && x.decision.reason !== x.decision.group ? [{ t: x.decision.reason }] : [])) },
+  { key: "dims", label: "dims", get: x => x.dims || "" },
+  { key: "mod", label: "modality", get: x => x.modality_group || "" },
+  { key: "lic", label: "licence", get: x => x.lic },
+  { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
+    get: x => `${x.prepared === "prepared" ? 0 : 1}${x.raw?.data ? 0 : 1}${x.staged.some(stagedUsable) ? 0 : 1}`,
+    cell: x => { const td = el("td", { class: "pills" }, statePill(x.prepared));
+      if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool")); return td; } },
+  { key: "issue", label: "issue", num: true, get: x => x.ds?.issue || 0, cell: x => el("td", { class: "num" }, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : "") },
+  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data?.bytes ? fmtBytes(x.raw.data.bytes) : "") },
+  { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
+  { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
+  { key: "w", label: "weight", num: true, get: x => x.weight || 0, cell: x => el("td", { class: "num" }, x.weight ? pct(x.weight) : "") },
+  { key: "split", label: "split", get: splitText },
+];
+function renderTableHead() {
+  const tr = el("tr");
+  for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", title: c.title || null, onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
+  $("table").tHead.replaceChildren(tr);
+}
+function tableRows() {  // the results list: the view rows after the search box and the fitting-only toggle
+  const q = $("search").value.trim().toLowerCase(), fitOnly = $("fitOnly").checked;
+  return currentRows.filter(x => (!fitOnly || x.fits) && (!q || [x.id, x.title, x.modality_group, x.lic, x.decision.group, x.prepared].join(" ").toLowerCase().includes(q)));
+}
+function renderTable() {
+  renderTableHead();
+  const rows = tableRows();
+  const col = COLS.find(c => c.key === sortKey);
+  rows.sort((a, b) => { const va = col.get(a), vb = col.get(b); return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir || (a.path < b.path ? -1 : 1); });
+  $("tableCount").textContent = `${num(rows.length)} rows` + (rows.length > shown ? `, showing ${num(shown)}` : "");
+  const tb = $("table").tBodies[0];
+  tb.replaceChildren(...rows.slice(0, shown).map(x => el("tr", { class: x.inPool ? "" : "out" }, ...COLS.map(c => c.cell ? c.cell(x) : el("td", { class: c.num ? "num" : "" }, String(c.get(x)))))));
+  if (!rows.length) tb.append(el("tr", {}, el("td", { colspan: COLS.length, class: "empty" }, currentRows.length ? "no row matches the search or the registry toggles" : "the spec admits no record")));
+  $("more").hidden = rows.length <= shown;
+  renderActions();  // the preparation request follows the list
+}
+
+// ---- datasets: controls → YAML → POST /plan (debounced) → KPIs, funnel, charts, table, actions
+function chips(container, values, set, onchange) {
+  container.replaceChildren(...values.map(v => { const input = el("input", { type: "checkbox" }); input.checked = set.has(v); input.addEventListener("change", () => { if (input.checked) set.add(v); else set.delete(v); onchange(); }); return el("label", { class: "chip" }, input, v); }));
+}
+let planTimer = 0, planSeq = 0;
+function schedulePlan(ms) { clearTimeout(planTimer); planTimer = setTimeout(runPlan, ms ?? PLAN_DEBOUNCE_MS); renderActions(); }
+async function runPlan() {
+  if (!S.ref) return;
+  const seq = ++planSeq;
+  $("planStatus").textContent = "planning…";
+  try {
+    const plan = await api("/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: toSpecYaml(C, S.ref, S.meta.catalog_repo) }) });
+    if (seq !== planSeq) return;
+    S.plan = plan; S.planError = null;
+  } catch (e) {
+    if (seq !== planSeq) return;
+    S.plan = null; S.planError = e;
+    if (e.status !== 422 && e.status !== 409) banner(`POST /plan → ${e.status || "network error"}: ${e.message}`);
+  }
+  $("planStatus").textContent = "";
+  renderDatasets();
+}
+function bindControls() {
+  const replan = () => schedulePlan();
+  chips($("dims"), DIMS, C.dims, replan); chips($("lic"), LIC, C.lic, replan); chips($("src"), SRC, C.sources, replan);
+  const bind = (id, key, parse, after) => { const n = $(id); if (n.type === "checkbox") n.checked = C[key]; else n.value = String(C[key]);
+    n.addEventListener(n.type === "range" || n.type === "text" ? "input" : "change", () => { C[key] = n.type === "checkbox" ? n.checked : parse(n.value); after(); }); };
+  const text = v => v, int = v => +v;
+  bind("specName", "name", text, renderActions); bind("paths", "paths", text, replan);
+  bind("allowUnknown", "allowUnknown", null, replan); bind("annRequired", "annRequired", null, replan);
+  bind("minVox", "minVox", int, replan); bind("patch", "patch", int, replan); bind("level", "level", int, replan); bind("patchZ", "patchZ", int, replan);
+  bind("dedup", "dedup", null, replan); bind("temp", "T", int, replan);
+  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, renderDatasets);  // registry state: no new plan
+  $("download").addEventListener("click", () => {
+    const blob = new Blob([toSpecYaml(C, S.ref, S.meta.catalog_repo)], { type: "application/yaml" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: `${C.name.trim() || "buffer"}.yaml` }); document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  $("search").addEventListener("input", () => { shown = 150; renderTable(); });
+  $("fitOnly").addEventListener("change", () => { shown = 150; renderTable(); });
+  $("more").addEventListener("click", () => { shown += 300; renderTable(); });
+}
+function viewRows() {
+  if (!S.plan) return [];
+  const key = levelsKey(C);
+  return (S.plan.rows || []).map(joinRow).filter(x => (!C.preparedOnly || x.prepared === "prepared")
+    && (!C.rawCached || x.raw?.data?.state === "ready")
+    && (!C.stagedGeom || x.staged.some(a => a.data?.levels_key === key && stagedUsable(a))));
+}
+// Why a buffer issue for the current spec would be refused by the planner, or null when the plan is clean.
+function bufferBlocker() {
+  if (!S.ref) return "no catalog synced";
+  if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;
+  if (!S.plan) return "planning…";
+  const errors = S.plan.errors || [];
+  if (!errors.length) return null;
+  const waiting = (S.plan.rows || []).filter(r => r.rule === NOT_PREPARED).length;
+  if (errors.includes("no dataset admitted") && waiting) return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared: request preparation first`;
+  return "the plan has errors: " + errors.join("; ");
+}
+function renderActions() {
+  const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
+  issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
+    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Nothing runs until you add the \`buffer:go\` label.`, yaml, bufferBlocker());
+  // every unprepared record in the results list below (search and fitting-only applied); in progress is already on its way
+  const todo = tableRows().filter(x => x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
+  const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records" : "every record in the list is prepared or in progress";
+  const q = $("search").value.trim(), scope = `\`${name}\`` + (q ? `, search "${q}"` : "") + ($("fitOnly").checked ? ", fitting only" : "");
+  issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
+    `Preparation request from the Datasets tab: the ${todo.length} unprepared records in its list (${scope}). Nothing runs until you add the \`prep:go\` label; each record then costs an agent run.`
+    + (todo.length > 25 ? ` Before that, add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
+    toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : none);
+}
+function renderPlanMessages() {
+  const box = $("planMsgs"); box.replaceChildren();
+  const e = S.planError;
+  if (e) box.append(el("div", { class: "notice" }, e.status === 422 ? "The service refused the spec (422):" : e.status === 409 ? "The catalog is not synced (409):" : `The plan failed (${e.status || "network error"}):`, el("pre", { class: "err" }, e.message)));
+  for (const msg of S.plan?.errors || []) box.append(el("div", { class: "notice" }, "plan error: " + msg));
+  for (const msg of S.plan?.warnings || []) box.append(el("div", { class: "notice" }, "warning: " + msg));
+}
+function renderDatasets() {
+  const F = C.patch * C.level;
+  $("footprint").textContent = `footprint ${num(F)} px = ${C.patch} × ${C.level} · levels ${levelsOf(C.level).join(", ")}`;
+  $("tVal").textContent = C.T.toFixed(2);
+  $("levelsKey").textContent = levelsKey(C);
+  renderPlanMessages();
+  const plan = S.plan, rows = viewRows(); currentRows = rows;
+  const fitting = rows.filter(x => x.fits), pool = rows.filter(x => x.inPool);
+  const count = state => fitting.filter(x => x.prepared === state).length;
+  const prepared = count("prepared"), inProgress = count("in-progress"), unprepared = fitting.length - prepared - inProgress;
+  const bytes = fitting.reduce((a, x) => a + (x.bytes || 0), 0), poolBytes = pool.reduce((a, x) => a + (x.bytes || 0), 0);
+  const toFetch = fitting.filter(x => x.raw?.data?.state !== "ready").reduce((a, x) => a + (x.bytes || 0), 0);
+  const dimsIn = [...new Set(fitting.map(x => x.dims))].sort();
+  const top = pool.reduce((m, x) => Math.max(m, x.weight || 0), 0);
+  $("kpis").replaceChildren(
+    tile("Datasets that fit", plan ? num(fitting.length) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
+    tile("Prepared", num(prepared), "the buffer's pool today"),
+    tile("In progress", num(inProgress), "mia-data is preparing them"),
+    tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human`),
+    tile("Raw bytes", `${fmtBytes(poolBytes)} / ${fmtBytes(bytes)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(toFetch)} not in the raw cache`),
+    tile("Dimensionalities", dimsIn.length ? dimsIn.join(" · ") : "none", dimsIn.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
+    tile("Capacity", fmt(fitting.reduce((a, x) => a + (x.positions || 0), 0)), "non-overlapping coarsest crops in the fitting datasets"),
+    tile("Top dataset share", pool.length ? pct(top) : "—", "of the crops drawn from the prepared pool"));
+  // funnel: the plan's own counts, so it ignores the registry toggles
+  const groups = new Map();
+  const add = (g, n) => groups.set(g, (groups.get(g) || 0) + n);
+  for (const [rule, n] of Object.entries(plan?.excluded || {})) add(ruleGroup(rule), n);
+  for (const r of plan?.rows || []) { const d = decisionOf(r); if (d.group !== "pool") add(d.group, 1); }
+  let remaining = plan?.n_seen || 0;
+  const funnel = [...groups].sort((a, b) => ruleRank(a[0]) - ruleRank(b[0])).map(([label, value]) => { remaining -= value; return { label, value, sub: `${num(remaining)} remain after this rule`, color: label === NOT_PREPARED ? "var(--s4)" : "var(--accent)" }; });
+  if (plan) funnel.push({ label: "in the pool", value: (plan.rows || []).filter(r => r.admitted && r.fit && r.fit.ok).length, color: "var(--s3)" });
+  hbars($("funnel"), funnel, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
+  const byMod = new Map(); fitting.forEach(x => byMod.set(x.modality_group || "none", (byMod.get(x.modality_group || "none") || 0) + 1));
+  hbars($("bymod"), [...byMod].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value })), { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
+  const share = new Map(); pool.forEach(x => share.set(x.modality_group || "none", (share.get(x.modality_group || "none") || 0) + (x.weight || 0)));
+  hbars($("byweight"), [...share].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value, text: pct(value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
+  const heavy = pool.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 8);
+  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
+  shown = 150; renderTable();
+}
+async function viewDatasets() {
+  $("dsEmpty").hidden = !!S.ref; $("dsBody").hidden = !S.ref;
+  if (!S.ref) return;
+  await Promise.all([loadRegistry(), loadRecords()]);
+  renderDatasets();
+  schedulePlan(0);
+}
+
+// ---- buffers
+function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
+const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
+// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS
+const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", approved: "sourcing", staged: "staged", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
+const stageOf = ev => ev ? STAGE_OF[ev.kind] || ev.kind : "";
+async function viewBuffers(id, refresh) {
+  const root = $("buffersBody"), hash = location.hash;
+  if (id) return viewBuffer(root, id, refresh);
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const out = await load("/buffers");
+  if (location.hash !== hash) return;  // the reader moved on while this loaded
+  // newest round first within an issue, newest issue first; every older round of an issue is superseded by its newest
+  const eventOf = id => Number((id.match(/-e(\d+)$/) || [])[1] || 0);
+  const buffers = (out?.buffers || []).slice().sort((a, b) => (issueOf(b.id) - issueOf(a.id)) || (eventOf(b.id) - eventOf(a.id)));
+  const current = new Map();
+  for (const b of buffers) if (!current.has(issueOf(b.id))) current.set(issueOf(b.id), b.id);
+  const supersededBy = b => { const c = current.get(issueOf(b.id)); return c !== b.id ? c : null; };
+  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its issue and stage, the issue's newest round first; an older round is superseded by it. Open one for its events, status board, volumes, consumers and usage."),
+    table([
+      { label: "buffer", cell: b => bufferLink(b.id) },
+      { label: "issue", cell: b => ghIssue(S.meta.buffers_repo, issueOf(b.id)) },
+      { label: "spec", cell: b => b.config?.spec_name || "" },
+      { label: "state", cell: b => el("span", {}, ...(supersededBy(b) ? [pill("superseded", ""), " "] : []),
+        ...(b.latest_event ? [statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)]
+        : [el("span", { class: "small", title: "registered before buffers recorded lifecycle events; the issue has the stage" }, "no events")])) },
+      { label: "volumes", num: true, cell: b => num(b.volumes) },
+      { label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn", [{ b: "missing", t: PILL_HELP.missing + " These are volumes registered to the buffer whose pyramid the last scan did not find." }]) : "0" },
+      { label: "servable", cell: b => servableText(b.servable) },
+      { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
+      { label: "draws today", num: true, cell: b => num(b.draws_today) },
+    ], buffers, out ? "No buffers yet: open a buffer issue from the Datasets view." : "The buffer list did not load.",
+    b => ({ class: "click" + (supersededBy(b) ? " superseded" : ""), title: supersededBy(b) ? `superseded by ${supersededBy(b)}, the issue's newest round` : "",
+      onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
+}
+function sparkline(days) {
+  if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");
+  const W = 560, H = 130, left = 40, right = 8, top = 10, bottom = 22, plotW = W - left - right, plotH = H - top - bottom;
+  const max = Math.max(1, ...days.map(d => Math.max(d.draws || 0, d.empty || 0)));
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Crops drawn per day, and requests answered empty per day" });
+  svg.append(svgEl("line", { x1: left, x2: W - right, y1: top + plotH, y2: top + plotH, class: "base" }));
+  const t = svgEl("text", { x: left - 6, y: top + 8, "text-anchor": "end", class: "tick" }); t.textContent = fmt(max); svg.append(t);
+  const slot = plotW / days.length, bw = Math.max(2, Math.min(18, slot * 0.7));
+  days.forEach((d, i) => {
+    const x = left + slot * i + (slot - bw) / 2, h = (d.draws || 0) / max * plotH, he = (d.empty || 0) / max * plotH;
+    svg.append(svgEl("rect", { x, y: top + plotH - h, width: bw, height: h, fill: "var(--accent)", rx: 2 }));
+    if (d.empty) svg.append(svgEl("rect", { x: x + bw / 2 - 1, y: top + plotH - he, width: 2, height: he, fill: "var(--warn)" }));
+    const hit = svgEl("rect", { x: left + slot * i, y: top, width: slot, height: plotH + bottom, fill: "transparent" }); svg.append(hit);
+    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: " requests answered empty" }, { t: `${num(d.consumers || 0)} consumers` }]);
+  });
+  for (const [i, anchor] of [[0, "start"], [days.length - 1, "end"]]) { const l = svgEl("text", { x: i ? W - right : left, y: H - 6, "text-anchor": anchor, class: "tick" }); l.textContent = days[i].day; svg.append(l); }
+  return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "crops drawn"), el("span", {}, el("i", { style: "background:var(--warn)" }), "requests answered empty (204)")), svg);
+}
+function healthLine(usage) {
+  if (!usage) return el("div", { class: "small" }, "usage did not load");
+  const h = usage.last_hour || {}, total = (h.requests ?? h.draws ?? 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
+  if (!total) return el("div", { class: "health" }, `no requests in the last hour (degraded above ${pct(limit)} empty)`);
+  const frac = (h.empty || 0) / total, bad = frac > limit;
+  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${num(total)} requests were empty (limit ${pct(limit)})`);
+}
+async function viewBuffer(root, id, refresh) {
+  const hash = location.hash, e = encodeURIComponent(id);
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  // status, board and usage exist from sourcing on (create_buffer writes the config); a planned buffer has only events
+  const [status, board, events, usage, ds] = await Promise.all([load(`/buffers/${e}/status`, true), load(`/buffers/${e}/datasets`, true), load(`/buffers/${e}/events`), load(`/usage/${e}`, true), load("/datasets")]);
+  if (location.hash !== hash) return;  // a slow load of a buffer the reader already left
+  const meta = S.meta, cfg = status?.config || {}, evs = (events?.events || []).slice().sort((a, b) => b.seq - a.seq);
+  const retired = evs.find(x => x.kind === "retired");
+  const archive = retired && (/archive (\S+)/.exec(retired.detail || "") || [])[1];
+  const n = issueOf(id), roots = meta.roots || {};
+  const draws = status?.draws || {}, missing = new Set(status?.missing || []);
+  const volumes = [...new Set([...Object.keys(draws), ...missing])].sort().map(v => ({ id: v, draws: draws[v] || 0, missing: missing.has(v) }));
+  const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
+  const datasets = new Map((ds?.datasets || []).map(d => [d.id, d])), dsOf = x => datasets.get(x.record) || {};
+  const levelsKey = cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null;  // jobspec.levels_key
+  root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
+    el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
+    el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
+    el("div", { class: "links" },
+      n && meta.buffers_repo ? link(`https://github.com/${meta.buffers_repo}/issues/${n}`, `issue #${n}`) : null,
+      ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
+    retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
+    status && evs[0]?.kind === "staged" ? el("div", { class: "notice" }, "Staged, waiting for ", el("code", {}, "buffer:approve"), " on the issue: the approve serves what the board shows as servable, partial or not; consumers are refused until then.") : null,
+    !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: the buffer is registered when sourcing starts, at once for a ", el("code", {}, "buffer:go"), " round, after ", el("code", {}, "buffer:approve"), " for a ", el("code", {}, "buffer:plan"), " round. Until then it has only its events.") : null,
+    !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
+    el("section", { class: "grid2" },
+      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", healthLine(usage), sparkline(days.slice(-60)),
+        retired ? table([{ label: "day", cell: d => d.day }, { label: "draws", num: true, cell: d => num(d.draws) }, { label: "consumers", num: true, cell: d => num(d.consumers) }, { label: "empty", num: true, cell: d => num(d.empty) }], days, "no usage rows") : null),
+      card("Config", null, status ? kv([
+        ["spec", cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog", code(cfg.catalog_ref, 12)],
+        ["levels", (cfg.levels || []).join(", ")], ["patch", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
+        ["recipe", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} @ ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
+        ["plan hash", code(cfg.plan_hash, 12)], ["splits", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
+        ["servable", servableText(status.servable)], ["volumes", num(status.volumes)], ["max empty", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
+      ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
+    card("Events", null, table([
+      { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },
+      { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
+    ], evs, "no events yet")),
+    card("Data set pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason. Links: the dataset issue and its mia-data workflow, the crops and stage folders.", table([
+      { label: "dataset", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
+      { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
+      { label: "issue", cell: x => dsOf(x).issue ? ghIssue(meta.datasets_repo, dsOf(x).issue) : "" },
+      { label: "workflow", cell: x => dsOf(x).issue && meta.datasets_workflow_url ? link(meta.datasets_workflow_url + dsOf(x).issue, "temporal") : "" },
+      { label: "preview", cell: x => thumb(dsOf(x)) },
+      { label: "crops", cell: x => folderLink(roots.storage_root, dsOf(x).folder) },
+      { label: "stage", cell: x => folderLink(roots.staged_root, levelsKey && `${levelsKey}/${x.record}`) },
+    ], board?.datasets || [], "no dataset on the board yet")),
+    el("section", { class: "grid2" },
+      card("Volumes", `${num(status?.volumes || 0)} registered; listed here are the ones drawn from or flagged missing.`, table([
+        { label: "volume", cell: v => el("code", {}, v.id) }, { label: "draws", num: true, cell: v => num(v.draws) }, { label: "", cell: v => v.missing ? pill("missing", "warn") : "" },
+      ], volumes, "no draws and nothing missing")),
+      card("Consumers", null, table([
+        { label: "name", cell: c => c.name }, { label: "host", cell: c => c.host }, { label: "pid", num: true, cell: c => String(c.pid ?? "") },
+        { label: "rank", num: true, cell: c => c.rank == null ? "" : String(c.rank) }, { label: "split", cell: c => c.split },
+        { label: "last seen", cell: c => when(c.last_seen) }, { label: "", cell: c => c.stale ? pill("stale", "warn") : "" },
+      ], status?.consumers || [], "no consumer has registered"))),
+  ].filter(Boolean));
+}
+
+// ---- cache
+function meter(label, used, quota) {
+  const over = quota > 0 && used > quota;
+  return el("div", {}, el("div", { class: "label small" }, label),
+    el("div", { class: "meter" + (over ? " over" : ""), role: "meter", "aria-valuemin": "0", "aria-valuemax": String(quota > 0 ? quota : used || 1), "aria-valuenow": String(used || 0), "aria-label": label },
+      el("i", { style: `width:${quota > 0 ? Math.min(100, used / quota * 100) : 0}%` })),
+    el("div", { class: "small" }, quota > 0 ? `${fmtBytes(used)} of ${fmtBytes(quota)} (${pct(used / quota)})` : `${fmtBytes(used)} · unlimited`));
+}
+const list = xs => xs && xs.length ? el("div", {}, ...xs.map(x => el("div", { class: "mono" }, x))) : "none";
+async function viewCache() {
+  const root = $("cacheBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const [, locks, keeper] = await Promise.all([loadRegistry(), load("/locks"), load("/keeper")]);
+  const quota = S.meta.quota || {}, roots = S.meta.roots || {};
+  const k = keeper;
+  root.replaceChildren(
+    el("section", { class: "grid2" },
+      card("Totals against the quotas", quota.hold_hours ? `A free asset is held ${num(quota.hold_hours)} h before the keeper may evict it.` : null,
+        meter("raw cache", S.rawBytes, quota.raw_bytes), meter("staged pyramids", S.stagedBytes, quota.staged_bytes),
+        quota.headroom_bytes ? el("div", { class: "small" }, `headroom kept free: ${fmtBytes(quota.headroom_bytes)}`) : null),
+      card("The keeper's last pass", S.meta.keeper?.minutes ? `Runs every ${num(S.meta.keeper.minutes)} min; syncs the catalog every ${num(S.meta.keeper.catalog_sync_hours)} h.` : null,
+        k ? kv([
+          ["at", el("span", {}, when(k.at), k.dry_run ? " (dry run)" : "")], ["scanned / missing / new", `${num(k.scanned)} / ${num(k.missing)} / ${num(k.new)}`],
+          ["evicted", list(k.evicted)], ["reset stale", list(k.stale)], ["removed building", list(k.removed_building)], ["removed empty", list(k.removed_empty)], ["spared (locked)", list(k.locked)],
+          ["over quota", Object.keys(k.over_quota || {}).length ? Object.entries(k.over_quota).map(([kind, b]) => `${kind} ${fmtBytes(b)}`).join(" · ") : "none"],
+          ["signalled", list(k.signalled)], ["catalog", k.catalog || "not due"], ["errors", list(k.errors)],
+        ]) : el("div", { class: "empty" }, "The keeper has not reported a pass yet."))),
+    card("Raw cache", "One row per dataset's download; \"open\" browses its directory when the raw root has a URL.", table([
+      { label: "dataset", cell: a => a.key }, { label: "issue", cell: a => dsIssue(a.key) }, { label: "open", cell: a => folderLink(roots.raw_root, a.key) }, { label: "state", cell: a => assetPill(a.data?.state) }, { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" },
+      { label: "last used", cell: a => when(a.data?.last_used) }, { label: "buffers", num: true, cell: a => num((a.refs || []).length) },
+      { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" }, { label: "streams", num: true, cell: a => Array.isArray(a.data?.stream) ? num(a.data.stream.length) : "" },
+    ], S.rawAssets, "Nothing in the raw cache yet.")),
+    card("Staged pyramids", "One row per staged artifact.", table([
+      { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.data?.levels_key && a.data?.record && `${a.data.levels_key}/${a.data.record}/${a.key}`) }, { label: "dataset", cell: a => a.data?.record || "" }, { label: "issue", cell: a => dsIssue(a.data?.record) },
+      { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
+      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => assetPill(a.data?.state) },
+      { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },
+      { label: "buffers", cell: a => { const s = el("span"); (a.refs || []).forEach((b, i) => s.append(i ? " " : "", bufferLink(b))); return s; } },
+      { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" },
+    ], S.stagedAssets, "Nothing staged yet.")),
+    card("Lock holders", "The workers' lock files, read-only.", table([
+      { label: "kind", cell: l => l.kind }, { label: "key", cell: l => el("code", {}, l.key) }, { label: "owner", cell: l => el("code", {}, l.owner) },
+      { label: "taken", cell: l => when(l.taken_at) }, { label: "heartbeat", cell: l => when(l.heartbeat_at) }, { label: "", cell: l => l.stale ? pill("stale", "warn") : "" },
+    ], locks?.locks || [], "No locks held.")));
+}
+
+// ---- preparation
+async function viewPreparation() {
+  const root = $("prepBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  await loadRegistry();
+  const meta = S.meta, rows = [...S.datasets.values()];
+  const by = state => rows.filter(d => d.state === state).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  const issue = d => d.issue ? ghIssue(meta.datasets_repo, d.issue) : "";
+  const q = label => `https://github.com/${meta.buffers_repo}/issues?q=${encodeURIComponent(`is:issue is:open label:${label}`)}`;
+  root.replaceChildren(
+    el("div", { class: "links" }, meta.buffers_repo ? link(q("prep:requested"), "open preparation requests") : el("span", { class: "small" }, "GET /meta names no buffers repo"),
+      meta.buffers_repo ? link(q("prep:needs-human"), "requests that need a human") : null),
+    card("In progress", "Datasets mia-data is preparing, with the stage it reached.", table([
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+    ], by("in-progress"), "Nothing in progress.")),
+    card("Needs a human", "Stopped datasets; the dataset issue says why.", table([
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+    ], by("needs-human"), "Nothing needs a human.")));
+}
+
+// ---- shell: top bar, theme, hash routing
+function viewDocs(arg) {  // static: show one of the two documents and mark its sub-tab
+  const doc = arg === "architecture" ? "architecture" : "guide";
+  document.querySelectorAll("[data-doc]").forEach(a => { a.hidden = a.dataset.doc !== doc; });
+  document.querySelectorAll("[data-doc-tab]").forEach(a => { if (a.dataset.docTab === doc) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+}
+const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, docs: viewDocs };
+const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
+let refreshTimer = 0;
+function route() {
+  const [name, ...rest] = location.hash.slice(1).split("/");
+  const view = VIEWS[name] ? name : "datasets";
+  let arg = rest.join("/");
+  try { arg = decodeURIComponent(arg); } catch { /* a malformed escape: use the raw text */ }
+  document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
+  document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  hideTip();
+  clearInterval(refreshTimer);
+  if (view === "buffers") refreshTimer = setInterval(() => { hideTip(); VIEWS.buffers(arg, true); }, REFRESH_MS);
+  VIEWS[view](arg);
+}
+function renderTopbar() {
+  const c = S.catalogs[0];
+  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} datasets · synced `, when(c.synced_at)) : "no catalog synced");
+}
+function setupFilterBox() {  // the fold is a per-viewer convenience, remembered in this browser
+  const box = $("filterBox");
+  try { if (localStorage.getItem("mia-filters") === "closed") box.open = false; } catch { /* storage blocked: open */ }
+  box.addEventListener("toggle", () => { try { localStorage.setItem("mia-filters", box.open ? "open" : "closed"); } catch { /* not remembered */ } });
+}
+function setupTheme() {
+  const root = document.documentElement;
+  try { const saved = localStorage.getItem("mia-theme"); if (saved) root.dataset.theme = saved; } catch { /* storage blocked: follow the system */ }
+  new ResizeObserver(() => root.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px")).observe(document.querySelector(".topbar"));
+  $("theme").addEventListener("click", () => {
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("mia-theme", root.dataset.theme); } catch { /* not remembered */ }
+  });
+}
+async function boot() {
+  setupTheme(); setupFilterBox(); bindControls();
+  const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
+  S.meta = meta || {};
+  S.catalogs = (catalogs?.catalogs || []).slice().sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
+  S.ref = S.catalogs[0]?.ref || null;
+  renderTopbar();
+  window.addEventListener("hashchange", route);
+  // a click on the current tab changes no hash: reload the view by hand
+  document.querySelectorAll("[data-tab]").forEach(a => a.addEventListener("click", () => { if (a.getAttribute("href") === location.hash) route(); }));
+  route();
+}
+boot();
+})();
+</script>
+</body>
+</html>

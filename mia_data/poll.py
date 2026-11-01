@@ -2,7 +2,8 @@
 
 Three jobs, each done per item so one bad issue or PR never skips the rest (the next poll retries it):
 
-- deliver a `data:go` / `data:approve` label on a dataset issue as a signal, starting the dataset workflow if needed;
+- deliver a `data:go` / `data:approve` / `data:reject` label on a dataset issue as a signal, starting the dataset
+  workflow if needed;
 - wake the dataset workflow whose snippet PR changed (head, state, merge, needs-human);
 - pass the `mia-data/crops` status on snippet PRs that add no snippet, so it never blocks them.
 
@@ -13,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from autodev.review import WRITE_PERMISSIONS
 
@@ -56,15 +58,28 @@ async def run_poll(activities: Activities) -> list[str]:
     return done
 
 
-async def deliver_label(activities: Activities, kind: str, label: str, issue: dict) -> bool:
-    """Turn one human label on a dataset issue into a signal, or remove it with a comment saying why not.
+async def deliver_label(
+    activities: Any,
+    kind: str,
+    label: str,
+    issue: dict,
+    *,
+    workflow: str = "MiaDataDataset",
+    make_state: Callable[[int], Any] = DatasetState,
+    guard: Callable[[str, dict], str | None] | None = None,
+    workflow_id: Callable[[int], str] | None = None,
+) -> bool:
+    """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
 
-    Only a person with write access counts; `go` on a licence-excluded dataset is refused. The label is removed
+    Only a person with write access, or a bot login listed in `github.trusted_bots` (the buffer worker, spec §6.2),
+    counts; `guard` may name a reason to refuse the label. The label is removed
     only once Temporal has accepted the signal, so a crash in between leaves it for the next poll. Returns True
-    when a signal was delivered."""
+    when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard, and for its
+    preparation requests with their own `workflow_id` (default: `cfg.workflow_id`)."""
     cfg, gh_data, number = activities.cfg, activities.gh_data, issue["number"]
     actor, event_id, labeled_at = await gh_data.label_event(number, label)
-    if not actor or await gh_data.permission(actor) not in WRITE_PERMISSIONS:
+    trusted = actor in getattr(cfg.github, "trusted_bots", [])
+    if not actor or not (trusted or await gh_data.permission(actor) in WRITE_PERMISSIONS):
         await gh_data.remove_label(number, label)
         marker = cfg.marker(f"ignored {label} {event_id}")
         await activities._comment_once(
@@ -78,16 +93,14 @@ async def deliver_label(activities: Activities, kind: str, label: str, issue: di
     if not (event_id and labeled_at):
         log.warning("poll: #%s %s: label event has no id or time", number, label)
         return False
-    if kind == "go" and "licence-excluded" in {entry["name"] for entry in issue.get("labels", [])}:
-        await activities.refuse_label(
-            number, label, "the dataset's licence is not in `crops.licences` (`licence-excluded`)", event_id
-        )
+    if guard and (reason := guard(kind, issue)):
+        await activities.refuse_label(number, label, reason, event_id)
         return False
     # start_signal: starts the workflow if needed and delivers the label as a signal either way
     await activities.temporal.start_workflow(
-        "MiaDataDataset",
-        DatasetState(number),
-        id=cfg.workflow_id(number),
+        workflow,
+        make_state(number),
+        id=(workflow_id or cfg.workflow_id)(number),
         task_queue=cfg.task_queue,
         start_signal=kind,
         start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)],

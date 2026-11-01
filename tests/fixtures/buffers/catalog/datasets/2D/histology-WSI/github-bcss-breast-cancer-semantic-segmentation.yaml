@@ -1,0 +1,186 @@
+schema_version: '1.2'
+id: github-bcss-breast-cancer-semantic-segmentation
+title: Breast Cancer Semantic Segmentation (BCSS) dataset
+short_name: Breast cancer H&E tissue regions (BCSS)
+description: Crowdsourced pixel-level tissue-region segmentation of 151 TCGA triple-negative breast cancer H&E regions of
+  interest (tumor, stroma, lymphocytic infiltrate, necrosis and other classes), annotated by 25 participants with pathologist
+  review.
+landing_url: https://github.com/PathologyDataScience/BCSS
+doi: null
+repository: GitHub
+accession: null
+authors:
+- Amgad, Mohamed
+- Elfandy, Habiba
+- Hussein, Hagar
+- Cooper, Lee A. D.
+- Gutman, David A.
+publications:
+- title: Structured crowdsourcing enables convolutional segmentation of histology images
+  doi: 10.1093/bioinformatics/btz083
+  url: https://doi.org/10.1093/bioinformatics/btz083
+date_published: '2019-02-06'
+imaging:
+  modality:
+  - histology-WSI
+  dimensionality: 2D
+  voxel_size_nm:
+    x: 250
+    y: 250
+    z: null
+  channels: 3
+  organism:
+  - Homo sapiens
+  sample: formalin-fixed paraffin-embedded H&E-stained triple-negative breast cancer slides from TCGA (151 cases)
+  labels_stains:
+  - hematoxylin and eosin
+data:
+  formats:
+  - png
+  size_bytes: 5057290792
+  n_items: 151
+  access: open
+  download_url: https://drive.google.com/drive/folders/1zqbdkQF8i5cEmZOGmbdQm-EP8dRYtvss
+  download_method: other
+annotations:
+  present: true
+  types:
+  - semantic-segmentation
+  coverage: dense
+  format: PNG masks (uint8, one per ROI, same name as the RGB) with class codes from meta/gtruth_codes.tsv (0 = outside ROI,
+    ignore); per-slide JSON polygon annotations are only available via the download script (DSA), not in the Drive folder
+  source: manual
+ml:
+  tasks:
+  - segmentation
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: https://github.com/CancerDataScience/CrowdsourcingDataset-Amgadetal2019
+license:
+  spdx: CC0-1.0
+  url: https://creativecommons.org/publicdomain/zero/1.0/
+provenance:
+  discovered_by: harvest-websearch
+  discovered_at: '2026-10-10T21:19:36Z'
+  evidence_urls:
+  - https://github.com/PathologyDataScience/BCSS
+  - https://www.ebi.ac.uk/europepmc/webservices/rest/PMC6748796/fullTextXML
+  - https://drive.google.com/drive/folders/1zqbdkQF8i5cEmZOGmbdQm-EP8dRYtvss
+  - https://drive.google.com/uc?export=download&id=1sRXAby6PNu0CRwsMN0Ej8t12J38nw8cC
+  - https://drive.google.com/uc?export=download&id=1DaQDK5qN-OmNEseHmweZSUrPI-HNVCsK
+  confidence: 0.8
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-10T22:58:00Z'
+notes: 'GitHub README states CC0 1.0 for the dataset (MIT for code) and 0.25 microns per pixel (x,y = 250 nm; file names end
+  MPP-0.2500). License conflict: the README.md inside the Drive meta/ folder says CC BY 4.0; the record keeps the GitHub landing
+  page value (CC0-1.0). The paper (Bioinformatics 2019) describes 151 ROIs, 20,340 polygonal annotations by 25 participants,
+  reviewed and corrected by senior participants. enricher: Drive folder listed: masks/ (151 PNG), rgbs_colorNormalized/ (151
+  PNG), meta/ (gtruth_codes.tsv, README.md, configs.py, roiBounds_BaseMagnification.csv), logs/; class codes read from gtruth_codes.tsv.
+  enricher: annotations_verified after sampling one mask; RGBs in the Drive release are colour-normalized (folder name; paper:
+  Reinhard normalization).'
+technical:
+  method: sample
+  size_source: estimated
+  layout:
+    tree: "0.25 MPP release (Google Drive folder)/\n  masks/                 151 files  TCGA-<case>-DX1_xmin<X>_ymin<Y>_MPP-0.2500.png\n\
+      \  rgbs_colorNormalized/  151 files  same names as masks/\n  meta/                  gtruth_codes.tsv, README.md, configs.py,\
+      \ roiBounds_BaseMagnification.csv\n  logs/                  (not opened)\n"
+    n_files: null
+    listing_complete: false
+  sample:
+    urls:
+    - https://drive.google.com/uc?export=download&id=1dxaGPJTMlCkgSjDP6pVdxkk8w08hrFiq
+    - https://drive.google.com/uc?export=download&id=1XKOuTTm7Jx77Htgza6iQjfnYVNlyqyDB
+    size_bytes: 15788707
+    description: 'TCGA-A1-A0SK-DX1_xmin45749_ymin25055_MPP-0.2500.png: colour-normalized RGB (15.7 MB) and its mask (80 KB).'
+  arrays:
+  - role: raw
+    path_pattern: rgbs_colorNormalized/*.png
+    format: png
+    axes: yxs
+    shape:
+    - 2467
+    - 3394
+    - 3
+    shape_varies: true
+    dtype: uint8
+    compression: deflate
+    value_range:
+    - 3
+    - 255
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: RGB ROI crops at 0.25 um/px; colour-normalized per the folder name (the paper used Reinhard colour normalization),
+      which is not one of the schema normalization values. ROI size varies per slide.
+  - role: label
+    path_pattern: masks/*.png
+    format: png
+    axes: yx
+    shape:
+    - 2467
+    - 3394
+    shape_varies: true
+    dtype: uint8
+    compression: deflate
+    value_range:
+    - 1
+    - 9
+    encoding: semantic-ids
+    classes:
+    - id: 0
+      name: outside_roi
+    - id: 1
+      name: tumor
+    - id: 2
+      name: stroma
+    - id: 3
+      name: lymphocytic_infiltrate
+    - id: 4
+      name: necrosis_or_debris
+    - id: 5
+      name: glandular_secretions
+    - id: 6
+      name: blood
+    - id: 7
+      name: exclude
+    - id: 8
+      name: metaplasia_NOS
+    - id: 9
+      name: fat
+    - id: 10
+      name: plasma_cells
+    - id: 11
+      name: other_immune_infiltrate
+    - id: 12
+      name: mucoid_material
+    - id: 13
+      name: normal_acinus_or_duct
+    - id: 14
+      name: lymphatics
+    - id: 15
+      name: undetermined
+    - id: 16
+      name: nerve
+    - id: 17
+      name: skin_adnexa
+    - id: 18
+      name: blood_vessel
+    - id: 19
+      name: angioinvasion
+    - id: 20
+      name: dcis
+    - id: 21
+      name: other
+    alignment: same-grid
+    alignment_notes: 'Pairing: identical file name in masks/ and rgbs_colorNormalized/; sampled pair has the same 2467x3394
+      grid. 0 = outside ROI (do not care, zero weight), not an other class (README). Sample values 1,2,3,4,9.'
+  notes: 'Drive folder listed through its public embedded folder view (file names only, no sizes), so size and file count
+    are not confirmed; logs/ not opened. Probed and sampled one pair (value ranges are from that one sample). Voxel size 250
+    nm from the GitHub and Drive READMEs (0.25 MPP release) and the MPP-0.2500 file-name suffix; PNGs carry no calibration.
+    Direct links: drive.google.com/uc?export=download&id=<file id> works with range requests, but drive.google.com is not
+    on the TensorSwitch allowlist. No single archive is offered (folder only), so data.download_url stays the folder. size
+    estimated (uncompressed): raw 151 x 2467x3394x3 uint8 + label 151 x 2467x3394 uint8 = 5,057,290,792 B (5.1 GB); shapes
+    vary, so approximate (counts: 151 files per folder in the Drive listing; PNGs download smaller).'

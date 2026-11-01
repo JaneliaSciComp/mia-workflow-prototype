@@ -19,6 +19,9 @@ from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
+from mia_core.untrusted import SECRET_RE as SECRET_RE
+from mia_core.untrusted import neutralize as neutralize
+
 from .agent import log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
@@ -61,18 +64,6 @@ log = logging.getLogger(__name__)
 # carry invalid_request. transport_error, lsf_error etc. may pass on retry, so they are left retryable.
 PERMANENT_CSUB = {"policy_violation", "invalid_request"}
 PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside the GitHub client
-# ponytail: known secret shapes plus our own token (see neutralize); not a general secret scanner.
-SECRET_RE = re.compile(r"sk-ant-[\w-]+|gh[pousr]_\w+|github_pat_\w+|eyJ[\w-]+\.[\w-]+\.[\w-]+")
-
-
-def neutralize(text: str, token: str | None = None) -> str:
-    """Make agent-written text safe to post on GitHub.
-
-    It must not be able to forge our `<!-- autodev: ... -->` markers, nor leak a credential that a
-    prompt-injected agent printed (e.g. from ~/.claude/.credentials.json)."""
-    if token:
-        text = text.replace(token, "[redacted]")
-    return SECRET_RE.sub("[redacted]", text).replace("<!--", "&lt;!--")
 
 
 def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
@@ -110,7 +101,8 @@ def render_pr_body(cfg: Config, issue: int, lead: str = "") -> str:
 Implemented by **{cfg.deployment}**: Claude Code running in a sandboxed job on the cluster. The agent's own
 summary is the first comment.
 
-- **Merge:** approve this PR, or comment `/approve <head sha>` (needed when running under a personal token).
+- **Merge:** approve this PR, or comment `/approve <head sha>` (needed when running under a personal token; a
+  trusted worker posts it when the output of this head is approved).
   {cfg.deployment} merges once an approval matches the current head and checks are not failing.
 - **Request changes:** submit a review with *Request changes*, or comment `/revise <what to change>`.
   Up to {cfg.agent.max_revisions} revision rounds.
@@ -319,7 +311,13 @@ class Activities:
         # ponytail: one permission lookup per participant per poll; cache if the rate limit ever matters.
         permissions = {login: await self.gh.permission(login) for login in logins}
         # under a personal token the reviewer and the bot are the same user
-        reviewers = Reviewers(permissions, self.bot, self.cfg.github.auth == "token", self.cfg.marker_prefix)
+        reviewers = Reviewers(
+            permissions,
+            self.bot,
+            self.cfg.github.auth == "token",
+            self.cfg.marker_prefix,
+            frozenset(self.cfg.github.trusted_bots),
+        )
         handled = handled_ids(comments, reviewers)
         pending = [item for item in feedback(reviews, inline_comments, comments, reviewers) if item.id not in handled]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))

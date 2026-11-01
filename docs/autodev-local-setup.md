@@ -14,7 +14,7 @@ testing autodev. For the shared service account, see "Run it as the group servic
 | `<service>` | `broker` | `csub-broker`, applying your `~/.config/csub/broker.toml` policy | host |
 | `<service>` | `worker` | `autodev worker`, wrapped in `agentic-sandbox` | sandbox |
 
-For a personal instance `mia.yaml` lists one service, your `autodev.yaml`. The worker polls GitHub, drives the
+For a personal instance `mia.yaml` lists one service, your `autodev` block. The worker polls GitHub, drives the
 workflows, and asks the broker to submit Claude Code jobs to LSF.
 
 ## Prerequisites
@@ -29,7 +29,7 @@ Run these from a Janelia cluster submit host.
 4. **Broker policy** in `~/.config/csub/broker.toml`:
    - `allow_claude = true`
    - `allowed_hosts` includes `api.anthropic.com`, `claude.ai`, `platform.claude.com`, plus everything in
-     `agent.allow_hosts` from `autodev.yaml`
+     `agent.allow_hosts` from `services.autodev.agent` in `mia.yaml`
    - `allowed_roots` contains your `paths.work_root`
 
    Check with `csub probe`.
@@ -48,16 +48,16 @@ pixi install
 ### 2. Configure
 
 ```bash
-cp autodev.yaml.example autodev.yaml    # git-ignored
+cp mia.yaml.example mia.yaml            # git-ignored; keep the `autodev` service, delete the others
 ```
 
-Edit `autodev.yaml`:
+Edit `mia.yaml`. Each service's `deployment` is its name, which prefixes its labels, task queue, workflow IDs,
+branches and tmux session; to keep your instance apart from the service and from colleagues, rename the block
+(`autodev-<you>`) and use that name below.
 
-- `deployment: autodev-<you>`. This prefixes your labels, task queue, workflow IDs, branches and tmux session, which
-  keeps your instance apart from the service and from colleagues.
-- `github.repo`: the repo to watch.
-- `paths.work_root`: agent workspaces, which must be inside your broker's `allowed_roots`.
-- `paths.state_dir`: the worker's logs and state. Keep it apart from `work_root`. `work_root` is bound read-write
+- `services.autodev.github.repo`: the repo to watch. The shared `github` and `paths` sections set the rest.
+- `services.autodev.paths.work_root`: agent workspaces, which must be inside your broker's `allowed_roots`.
+- `paths.state_root`: the worker's logs and state live in `<state_root>/<service>`. Keep it apart from `work_root`. `work_root` is bound read-write
   into the sandbox, so it must not be an ancestor of `state_dir`, and `<state_dir>-host` (the broker log) and
   `temporal.state_dir` from `mia.yaml` (the Temporal binary and database) must stay outside every writable bind.
 
@@ -69,14 +69,13 @@ gh auth token > ~/.config/autodev/token && chmod 600 ~/.config/autodev/token
 ```
 
 Or save a fine-grained PAT there with Contents, Pull requests and Issues read/write, and Checks and Commit statuses
-read. Then set `github.token_file: ~/.config/autodev/token` in `autodev.yaml`. The sandboxed worker reads the token
+read. Then set `github.token_file: ~/.config/autodev/token` in `mia.yaml`. The sandboxed worker reads the token
 from this file because the sandbox masks `.env`. Host-side commands such as `autodev check` also accept `.env` or
 `$GITHUB_TOKEN`.
 
 ### 4. Check, create labels, start
 
 ```bash
-cp mia.yaml.example mia.yaml            # keep only the `autodev` service, pointing at your autodev.yaml; keep temporal.managed: true
 pixi run mia exec autodev check         # the `temporal` row is BAD until `mia up` starts the dev server; fix any other BAD first
 pixi run mia exec autodev init-labels   # creates the autodev-<you>:* labels (idempotent)
 pixi run mia up                         # tmux sessions temporal and autodev; applies the poll schedule

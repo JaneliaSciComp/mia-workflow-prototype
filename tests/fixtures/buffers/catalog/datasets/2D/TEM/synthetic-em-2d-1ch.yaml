@@ -1,0 +1,71 @@
+# Hand-written fixture: a clean 1-channel 2D EM record with everything the planner needs.
+schema_version: '1.2'
+id: synthetic-em-2d-1ch
+title: Synthetic TEM sections (fixture)
+short_name: Synthetic TEM
+description: Ten 4096x4096 TEM sections, fixture only.
+landing_url: https://example.org/synthetic-em
+doi: 10.1/dup
+repository: Zenodo
+accession: null
+authors: [Fixture Author]
+publications: []
+date_published: '2026-01-01'
+imaging:
+  modality: [TEM]
+  dimensionality: 2D
+  voxel_size_nm: {x: 4.0, y: 4.0, z: null}
+  channels: 1
+  organism: [Mus musculus]
+  sample: fixture tissue
+  labels_stains: []
+data:
+  formats: [tiff]
+  size_bytes: 167772160
+  n_items: 10
+  access: open
+  download_url: https://zenodo.org/records/1
+  download_method: http
+annotations:
+  present: true
+  types: [semantic-segmentation]
+  coverage: dense
+  format: PNG masks
+  source: manual
+ml: {tasks: [segmentation], splits_provided: false, benchmark: null, baseline_code_url: null}
+license: {spdx: CC-BY-4.0, url: https://creativecommons.org/licenses/by/4.0/}
+provenance: {discovered_by: fixture, discovered_at: '2026-01-01T00:00:00Z', evidence_urls: [], confidence: 1.0}
+verification: {url_ok: true, license_found: true, annotations_verified: true, last_checked: '2026-01-01T00:00:00Z'}
+notes: fixture
+technical:
+  method: sample
+  size_source: file-listing
+  layout: {tree: "sections/ 10 files .tiff\n", n_files: 10, listing_complete: true}
+  sample: {urls: [], size_bytes: 0, description: none}
+  arrays:
+  - role: raw
+    path_pattern: sections/*.tiff
+    format: tiff
+    axes: yx
+    shape: [4096, 4096]
+    shape_varies: false
+    dtype: uint8
+    compression: none
+    value_range: [0, 255]
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: null
+  - role: label
+    path_pattern: masks/*.png
+    format: png
+    axes: yx
+    shape: [4096, 4096]
+    shape_varies: false
+    dtype: uint8
+    compression: deflate
+    value_range: [0, 3]
+    encoding: semantic-ids
+    classes: null
+    alignment: same-grid
+    alignment_notes: null
+  notes: fixture

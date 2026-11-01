@@ -97,7 +97,7 @@ def _harness_bin(cfg, mode=0o755):
 
 def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys):
     _fake_env(monkeypatch, ["*"])
-    for d in ("state", "work", "storage"):
+    for d in ("state", "work", "storage", "local"):
         (tmp_path / d).mkdir()
     cfg = make_cfg(tmp_path)
     _harness_bin(cfg)
@@ -105,7 +105,7 @@ def test_check_reports_every_row_and_fails_on_one(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
     assert main(["check"]) == 1
     out = capsys.readouterr().out.split("\n")
-    assert [line[:3] for line in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok "]
+    assert [line[:3] for line in out[:-1]] == ["ok ", "BAD", "ok ", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert "github snippets" in out[1] and "RuntimeError" in out[1]
 
 
@@ -180,3 +180,23 @@ def test_help_lists_app_commands(capsys):
     for cmd in ("check", "seed", "worker", "test-pr", "schedule"):
         assert cmd in out
     assert "restart" not in out and "attach" not in out
+
+
+def test_check_adds_local_root_and_token_rows_when_configured(monkeypatch, tmp_path, capsys):
+    _fake_env(monkeypatch, ["*"])
+    for d in ("state", "work", "storage"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "tok").write_text("t")
+    (tmp_path / "tok").chmod(0o600)
+    cfg = make_cfg(
+        tmp_path,
+        paths={"local_root": str(tmp_path / "local")},
+        service={"url": "http://svc:1", "token_file": str(tmp_path / "tok")},
+    )
+    _harness_bin(cfg)
+    monkeypatch.setattr(cli, "load_config", lambda path=None, service=None: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    monkeypatch.setattr(cli, "require_local_dir", lambda p: p.mkdir(parents=True, exist_ok=True))
+    main(["check"])
+    out = capsys.readouterr().out.rstrip("\n").split("\n")
+    assert len(out) == 9 and out[7].startswith("ok   local root") and out[8].startswith("ok   service token")

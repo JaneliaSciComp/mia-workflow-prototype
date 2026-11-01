@@ -1,8 +1,10 @@
 # Working in this repository
 
-Two Python packages: `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
-both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub. `mia_data` imports from
-`autodev`, never the reverse. Full guide: [`docs/development.md`](docs/development.md).
+Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loader, filesystem checks,
+untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
+both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
+buffers: the `MiaBuffer` workflow, the offline planner, the buffer-api service and its client dataset). `mia_data` imports from `autodev`, `mia_buffers` from both, never the reverse; every package may import `mia_core`,
+which imports none of them. Full guide: [`docs/development.md`](docs/development.md).
 
 ## Before you push
 
@@ -22,6 +24,21 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **Workflow code is deterministic.** If `test_replay_*` fails, your change alters the commands a workflow issues
   and will break in-flight runs. Guard with `workflow.patched()` and re-record the fixture (see the guide).
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
+- **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
+  files are deprecated. `paths.local_root` and a managed `temporal.state_dir` must be host-local disk.
+- **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer routes needs
+  `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx call.
+- **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
+  `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). Hand-run
+  harness commands bypass it.
+- **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
+  `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
+- **A staged artifact is published by the worker's rename and never written again.** Stage jobs write
+  `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
+- **A buffer never asks mia-data for a dataset; a `prep:go` issue does.** `MiaBuffer` fails an unprepared record;
+  `MiaPrep` opens the `data:go` issues and follows them through the registry.
+- **The page is read-only and holds no token.** Its only actions are GitHub links; a route the page needs is a read
+  route (`tests/test_buffers_ui.py` enforces it).
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

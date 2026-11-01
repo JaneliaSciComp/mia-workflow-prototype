@@ -1,5 +1,6 @@
 """The services in mia.yaml and how to run them: a Temporal dev server (or an external one), and per app
-service one tmux session holding a csub broker and a worker inside agentic-sandbox."""
+service one tmux session holding a csub broker and a worker inside agentic-sandbox (mia-buffers adds buffer-api,
+which runs on the host like the broker)."""
 
 from __future__ import annotations
 
@@ -14,8 +15,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from autodev.config import PROJECT_DIR
+from mia_core.fs import require_local_dir, require_secret_file
 
 from .manifest import Manifest
 
@@ -39,12 +42,30 @@ def is_running(session: str) -> bool:
     return _tmux("has-session", "-t", f"={session}", capture_output=True).returncode == 0
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def kill(session: str) -> int:
+    """Kill the session and wait for its processes to exit: tmux only delivers SIGHUP, and a Temporal server still
+    closing its SQLite database when `up` starts the next one makes that one fail with `database is locked`."""
     if not is_running(session):
         print(f"{session}: not running")
         return 0
+    panes = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}", capture_output=True).stdout
+    groups = [int(pid) for pid in panes.split() if pid.isdigit()]  # each pane's command leads its process group
     rc = _tmux("kill-session", "-t", f"={session}").returncode
     if rc == 0:
+        for _ in range(300):
+            if not any(_group_alive(pgid) for pgid in groups):
+                break
+            time.sleep(0.1)
+        else:
+            print(f"{session}: still exiting after 30 s", file=sys.stderr)
         print(f"{session}: stopped")
     return rc
 
@@ -79,25 +100,49 @@ def shell(*parts: object) -> str:
 @dataclass(frozen=True)
 class App:
     package: str  # `python -m <package>.cli`; `<package>.config.load_config`
-    config_env: str
+    config_env: str  # names the deprecated per-app config file
     proxy_env: str
 
     @property
     def module(self) -> str:
         return f"{self.package}.cli"
 
-    def load_config(self, path: Path) -> Any:
-        return importlib.import_module(f"{self.package}.config").load_config(path)
+    @property
+    def has_local_root(self) -> bool:  # host-local disk for the lock directory and the service state
+        return self.package in ("mia_data", "mia_buffers")
+
+    def load_config(self, path: Path, service: str | None = None) -> Any:
+        """The app's Config: service `service` of mia.yaml at `path`, or the legacy per-app file when None."""
+        return importlib.import_module(f"{self.package}.config").load_config(path, service=service)
 
     def extra_mounts(self, cfg: Any) -> list[tuple[str, Path]]:
+        mounts: list[tuple[str, Path]] = []
         if self.package == "mia_data":
-            return [("--ro", cfg.harness.dir), ("--rw", cfg.paths.storage_root)]
-        return []
+            mounts = [("--ro", cfg.harness.dir), ("--rw", cfg.paths.storage_root)]
+        if self.package == "mia_buffers":  # bindings are read from mia-data's storage_root; the caches are written
+            mounts = [
+                ("--ro", cfg.harness.dir),
+                ("--ro", cfg.paths.storage_root),
+                ("--rw", cfg.paths.raw_root),
+                ("--rw", cfg.paths.staged_root),
+            ]
+        if self.has_local_root and cfg.paths.local_root:
+            mounts.append(("--rw", cfg.paths.local_root / "locks"))
+        return mounts
+
+    def api_endpoint(self, cfg: Any) -> tuple[str, int] | None:
+        """(host, port) of buffer-api from `service.url`: `mia up` runs it beside the broker and lets the worker
+        reach that host through the sandbox proxy. None for the apps without a service."""
+        if self.package != "mia_buffers":
+            return None
+        url = urlparse(cfg.service.url)
+        return url.hostname or "localhost", url.port
 
 
 APPS = {
     "autodev": App("autodev", "AUTODEV_CONFIG", "AUTODEV_TEMPORAL_VIA_PROXY"),
     "mia-data": App("mia_data", "MIA_DATA_CONFIG", "MIA_DATA_TEMPORAL_VIA_PROXY"),
+    "mia-buffers": App("mia_buffers", "MIA_BUFFERS_CONFIG", "MIA_BUFFERS_TEMPORAL_VIA_PROXY"),
 }
 
 
@@ -105,8 +150,15 @@ APPS = {
 class Service:
     name: str  # also the tmux session
     app: App
-    config_path: Path
+    config_path: Path  # the file the worker reads: mia.yaml, or the legacy per-app file
     cfg: Any  # the app's validated Config
+    legacy: bool = False  # mia.yaml named a per-app config file (`services.<name>.config`)
+
+    def env(self) -> dict[str, str]:
+        """The variables that point the app's CLI at its config."""
+        if self.legacy:
+            return {self.app.config_env: str(self.config_path)}
+        return {"MIA_SERVICE": self.name, "MIA_CONFIG": str(self.config_path)}
 
     @property
     def state(self) -> Path:
@@ -126,8 +178,16 @@ class Service:
         path = g.private_key_path if g.auth == "app" else g.token_file
         return Path(path).expanduser().resolve() if path else None
 
+    @property
+    def token_file(self) -> Path | None:  # the buffer-api worker token, for apps that have a `service` section
+        path = getattr(getattr(self.cfg, "service", None), "token_file", None)
+        return Path(path).expanduser().resolve() if path else None
+
     def logs(self) -> dict[str, Path]:
-        return {"worker": self.state / "logs/worker.log", "broker": self.host / "logs/broker.log"}
+        logs = {"worker": self.state / "logs/worker.log", "broker": self.host / "logs/broker.log"}
+        if self.app.api_endpoint(self.cfg):
+            logs["api"] = self.host / "logs/api.log"
+        return logs
 
 
 class Stack:
@@ -135,10 +195,16 @@ class Stack:
 
     def __init__(self, manifest: Manifest):
         self.manifest = manifest
-        self.services = {
-            name: Service(name, APPS[s.app], s.config, APPS[s.app].load_config(s.config))
-            for name, s in manifest.services.items()
-        }
+        self.services: dict[str, Service] = {}
+        for name, block in manifest.services.items():
+            app = APPS[block.app]
+            if block.config:
+                print(f"{name}: services.{name}.config is deprecated; move its sections into mia.yaml", file=sys.stderr)
+                self.services[name] = Service(name, app, block.config, app.load_config(block.config), legacy=True)
+            elif manifest.path is None:
+                sys.exit(f"mia: service {name!r} has no config: file and the manifest was not loaded from a file")
+            else:
+                self.services[name] = Service(name, app, manifest.path, app.load_config(manifest.path, service=name))
         addresses = {s.cfg.temporal.address for s in self.services.values()}
         if len(addresses) != 1:
             sys.exit(f"mia: services disagree on temporal.address: {sorted(addresses)}")
@@ -178,6 +244,7 @@ class Temporal:
         self.state = stack.manifest.temporal.state_dir
         self.address = stack.temporal_address
         self.log = self.state / "logs/temporal.log"
+        self._reported = False
 
     @property
     def host(self) -> str:
@@ -219,16 +286,23 @@ class Temporal:
 
     def up(self) -> None:
         if self.healthy():
-            print(f"temporal: {self.status()} at {self.address}")
+            if not self._reported:  # every service_up checks Temporal; report the result once per command
+                print(f"temporal: {self.status()} at {self.address}")
+            self._reported = True
             return
         if not self.managed:
             sys.exit(f"temporal: unreachable at {self.address} (temporal.managed is false; see your cluster)")
+        try:
+            require_local_dir(self.state)  # temporal.db is SQLite: its locks do not work on a network filesystem
+        except RuntimeError as error:
+            sys.exit(f"temporal: {error} (temporal.state_dir)")
         self.log.parent.mkdir(parents=True, exist_ok=True)
         server = shell(self.cli(), "server", "start-dev", "--db-filename", self.state / "temporal.db")
         new_session(self.SESSION, "temporal", f"{server} 2>&1 | tee -a {shell(self.log)}")
         for _ in range(60):
             if self.healthy():
                 print(f"temporal: started at {self.address}")
+                self._reported = True
                 return
             time.sleep(1)
         sys.exit(f"temporal: did not come up; see {self.log}")
@@ -273,6 +347,31 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     for path, hint in prerequisites:
         if not os.access(path, os.X_OK):
             sys.exit(f"{svc.name}: {path} not found ({hint})")
+    endpoint = svc.app.api_endpoint(cfg)
+    if endpoint and endpoint[0] in ("localhost", "127.0.0.1", "::1"):  # the sandbox bypasses its proxy for these
+        sys.exit(f"{svc.name}: service.url must name this host, not {endpoint[0]}: inside the sandbox that is the "
+                 "sandbox's own loopback, where nothing listens")  # fmt: skip
+    if svc.app.has_local_root:
+        local_root = cfg.paths.local_root
+        # ponytail: a legacy per-app file may omit local_root (no lock dir); drop the exemption with `config:`
+        if local_root is None and not svc.legacy:
+            sys.exit(f"{svc.name}: set paths.local_root in mia.yaml (host-local disk for the lock directory and the "
+                     "service state)")  # fmt: skip
+        if local_root is not None:
+            try:
+                require_local_dir(local_root)
+            except RuntimeError as error:
+                sys.exit(f"{svc.name}: {error}")
+            for d in (local_root / "locks", local_root / "service"):
+                d.mkdir(parents=True, exist_ok=True)
+    token_file = svc.token_file
+    if svc.app.package == "mia_buffers" and token_file is None and not svc.legacy:
+        sys.exit(f"{svc.name}: set service.token_file in mia.yaml and run `mia init-token`")
+    if token_file is not None:
+        try:
+            require_secret_file(token_file)
+        except RuntimeError as error:
+            sys.exit(f"{svc.name}: {error}")
     extra = svc.app.extra_mounts(cfg)
     rw_extra = (p for flag, p in extra if flag == "--rw")
     for d in (svc.state / "logs", svc.host / "logs", cfg.paths.work_root, svc.run, *rw_extra):
@@ -282,7 +381,7 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     temporal.ensure_namespace(cfg.temporal.namespace)
 
     schedule = [str(PY), "-m", svc.app.module, "schedule", "apply"]
-    env = {**os.environ, svc.app.config_env: str(svc.config_path)}
+    env = {**os.environ, **svc.env()}
     if is_running(svc.name):
         subprocess.run(schedule, env=env, check=True)
         print(f"{svc.name}: already running (tmux attach -t {svc.name})")
@@ -291,15 +390,24 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     sock = svc.run / "csub.sock"
     broker_log = svc.host / "logs/broker.log"
     new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
+    allow = ["github.com", "api.github.com", temporal.host]
+    if (service := getattr(cfg, "service", None)) and (host := urlparse(service.url).hostname):
+        allow.append(host)  # every worker with a `service` block writes the registry (mia-data's dataset rows too)
+    if endpoint:  # buffer-api: on the host, unsandboxed like the broker
+        env_pairs = [f"{name}={value}" for name, value in svc.env().items()]
+        api = shell("env", *env_pairs, PY, "-m", svc.app.module, "serve")
+        new_window(svc.name, "api", f"{api} 2>&1 | tee -a {shell(svc.host / 'logs/api.log')}")
     # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
     # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
     mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]
+    if token_file is not None and token_file != svc.secret:
+        mounts += ["--ro", token_file]
     for flag, path in extra:
         mounts += [flag, path]
     mounts += ["--rw", cfg.paths.work_root, "--rw", svc.run]
     worker = shell(
-        sandbox, *mounts, "--allow", "github.com", "--allow", "api.github.com", "--allow", temporal.host, "--",
-        "env", f"{svc.app.config_env}={svc.config_path}", "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
+        sandbox, *mounts, *(a for h in allow for a in ("--allow", h)), "--",
+        "env", *(f"{key}={value}" for key, value in svc.env().items()), "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
         f"{svc.app.proxy_env}=1", PY, "-m", svc.app.module, "worker",
     )  # fmt: skip
     new_window(svc.name, "worker", f"cd {shell(svc.state)} && {worker}; read -p 'worker exited; press enter'")

@@ -1,0 +1,188 @@
+schema_version: '1.2'
+id: zenodo-20797339-u937-edu-h2ax-dapi-confocal
+title: Dataset of confocal images of EdU, H2ax, DAPI in U937-PR9 cells
+short_name: U937 nuclei and DNA-damage foci masks (confocal)
+description: 'Confocal images of U937-PR9 cells stained for EdU, γH2AX and DAPI after neocarzinostatin-induced DNA damage:
+  one 3-channel ImageJ stack of 25 fields of 2048x2048 (16-bit TIFF, 45 nm pixels), with three matching mask stacks made in
+  Fiji: a nuclei count mask (DAPI), a γH2AX-foci count mask and a binary EdU replication-foci mask.'
+landing_url: https://zenodo.org/records/20797339
+doi: 10.5281/zenodo.20797339
+repository: Zenodo
+accession: null
+authors:
+- Silvia Scalisi
+- Luca Lanzanò
+publications: []
+date_published: '2026-06-22'
+imaging:
+  modality:
+  - confocal
+  dimensionality: 2D
+  voxel_size_nm:
+    x: 45.0718
+    y: 45.0718
+    z: null
+  channels: 3
+  organism:
+  - Homo sapiens
+  sample: U937-PR9 human myeloid cells, DNA damage induced with neocarzinostatin
+  labels_stains:
+  - EdU
+  - γH2AX
+  - DAPI
+data:
+  formats:
+  - tiff
+  size_bytes: 1153470226
+  n_items: 25
+  access: open
+  download_url: https://zenodo.org/records/20797339
+  download_method: http
+annotations:
+  present: true
+  types:
+  - instance-segmentation
+  - semantic-segmentation
+  coverage: dense
+  format: TIFF mask stacks (uint16 count masks, uint8 binary mask)
+  source: unknown
+ml:
+  tasks:
+  - segmentation
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: null
+license:
+  spdx: CC-BY-4.0
+  url: https://creativecommons.org/licenses/by/4.0/legalcode
+provenance:
+  discovered_by: harvest-repositories
+  discovered_at: '2026-10-18T16:27:21Z'
+  evidence_urls:
+  - https://zenodo.org/records/20797339
+  - https://zenodo.org/api/records/20797339
+  - https://zenodo.org/api/records/20797339/files/U937-PR9_3ch_Intensity_File.tif/content
+  - https://zenodo.org/api/records/20797339/files/U937-PR9_Nuclei_Count_Mask.tif/content
+  confidence: 0.55
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-10-18T17:20:00Z'
+notes: 'Four TIFFs in one Zenodo record (1.15 GB). Masks were made in Fiji ("obtained in FiJi"); the EdU mask name says threshold
+  200, so they are likely thresholding / analyze-particles output, but the page does not say; source unknown. No paper found.
+  Dedup: DeepFoci (zenodo-4067741) and zenodo-19222986 are other foci datasets, different cells and images. enricher: dimensionality
+  3D -> 2D, n_items 1 -> 25 (inferred): the ImageJ header calls the 25 planes frames, not slices; adjacent planes are unrelated
+  (raw DAPI r = 0.07, nuclei-mask IoU = 0.07); mask IDs are numbered per plane and never repeat across planes; EdU / γH2AX
+  staining needs fixed cells, so not a time-lapse. So the stack holds 25 separate 2D fields. Voxel size 45.07 nm x/y from
+  the TIFF headers (unit micron); z not applicable. Nuclei count-mask max is 321, not 255.'
+technical:
+  method: sample
+  size_source: file-listing
+  layout:
+    tree: "./  4 files  1.2 GB  .tif\n  U937-PR9_3ch_Intensity_File.tif       629,164,063 B\n  U937-PR9_Nuclei_Count_Mask.tif\
+      \        209,721,571 B\n  U937-PR9_gH2A.x_foci_Count_Mask.tif   209,721,571 B\n  U937-PR9_EdU_binary_thr200.tif    \
+      \    104,863,021 B\n"
+    n_files: 4
+    listing_complete: true
+  sample:
+    urls:
+    - https://zenodo.org/api/records/20797339/files/U937-PR9_3ch_Intensity_File.tif/content
+    - https://zenodo.org/api/records/20797339/files/U937-PR9_Nuclei_Count_Mask.tif/content
+    - https://zenodo.org/api/records/20797339/files/U937-PR9_gH2A.x_foci_Count_Mask.tif/content
+    - https://zenodo.org/api/records/20797339/files/U937-PR9_EdU_binary_thr200.tif/content
+    size_bytes: 1153470226
+    description: 'The whole dataset: the intensity stack and its three mask stacks (no smaller file unit exists)'
+  arrays:
+  - role: raw
+    path_pattern: U937-PR9_3ch_Intensity_File.tif
+    format: tiff
+    axes: tcyx
+    shape:
+    - 25
+    - 3
+    - 2048
+    - 2048
+    shape_varies: false
+    dtype: uint16
+    compression: none
+    value_range:
+    - 0
+    - 41630
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: 'ImageJ hyperstack (channels=3, frames=25). The t axis indexes 25 separate fields of view, not time (see
+      notes). Channel 2 is the DAPI channel: it is bright inside the nuclei mask (mean 16,499 vs 137 outside, field 13).'
+  - role: label
+    path_pattern: U937-PR9_Nuclei_Count_Mask.tif
+    format: tiff
+    axes: tyx
+    shape:
+    - 25
+    - 2048
+    - 2048
+    shape_varies: false
+    dtype: uint16
+    compression: none
+    value_range:
+    - 0
+    - 321
+    normalization: unknown
+    encoding: instance-ids
+    classes:
+    - id: null
+      name: nucleus
+    alignment: same-grid
+    alignment_notes: 'Plane i labels raw field i (2048x2048, same header pixel size). The ImageJ header calls the 25 planes
+      slices (zyx), but they are the same 25 fields as the raw frames, so t is written here. Count mask: 0 = background, nucleus
+      IDs numbered consecutively over the stack (0-8 in plane 0, 150-166 in plane 13, 303-321 in plane 24).'
+  - role: label
+    path_pattern: U937-PR9_gH2A.x_foci_Count_Mask.tif
+    format: tiff
+    axes: tyx
+    shape:
+    - 25
+    - 2048
+    - 2048
+    shape_varies: false
+    dtype: uint16
+    compression: none
+    value_range:
+    - 0
+    - 1646
+    normalization: unknown
+    encoding: instance-ids
+    classes:
+    - id: null
+      name: γH2AX focus
+    alignment: same-grid
+    alignment_notes: 'Header calls the 25 planes slices; same 25 fields as the raw frames. Count mask: foci IDs numbered over
+      the stack (189 IDs, 1458-1646, in plane 13).'
+  - role: label
+    path_pattern: U937-PR9_EdU_binary_thr200.tif
+    format: tiff
+    axes: tyx
+    shape:
+    - 25
+    - 2048
+    - 2048
+    shape_varies: false
+    dtype: uint8
+    compression: none
+    value_range:
+    - 0
+    - 255
+    normalization: unknown
+    encoding: binary
+    classes:
+    - id: 255
+      name: EdU replication foci
+    alignment: same-grid
+    alignment_notes: 'ImageJ header: frames=25 (tyx), same 25 fields as the raw frames. Values {0, 255}; file name says threshold
+      200.'
+  notes: 'Listing: Zenodo API, 4 files, 1,153,470,226 B, complete. Probed all 4 headers (ImageJ TIFF, uncompressed, little
+    pages of 2048x2048, 45.0718 nm pixel, unit micron, no z spacing). Sampled by range read (tools/sample.py failed on this
+    host, so a script read whole pages via range requests; ~138 MB): raw pages 2,35,38,41,44,62,74 (DAPI channel, frames 0-24),
+    nuclei planes 0,12,13,14,24, foci and EdU plane 13. value_range from those pages only. Raw intensities 0-41,630 in uint16;
+    normalization unknown. No direct archive: Zenodo files-archive returns 404, so download_url stays the record page; the
+    4 file URLs (sample.urls) are direct. Axis t means field-of-view index, inferred (see record notes).'

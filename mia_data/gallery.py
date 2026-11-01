@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from autodev.jobs import read_untrusted
+from mia_core.untrusted import read_untrusted
 
 from .publish import MAX_FILE, check_crop_id
 

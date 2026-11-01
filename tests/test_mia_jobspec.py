@@ -1,5 +1,6 @@
 import stat
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -165,6 +166,42 @@ def test_harness_snapshot_rejects_unknown_commit_and_non_sha(tmp_path):
         harness_snapshot(cfg, "main")
 
 
+def test_two_threads_share_one_harness_extraction_under_a_local_lock_file(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    commit = harness_pin(cfg)[0]
+    lock_file = cfg.paths.local_root / "locks" / "snapshot" / commit
+    real_run, extractions, lock_seen = subprocess.run, [], []
+    first_extracting, second_started = threading.Event(), threading.Event()
+
+    def spying_run(cmd, *args, **kwargs):
+        if cmd[0] == "tar":
+            extractions.append(cmd)
+            lock_seen.append(lock_file.exists())
+            first_extracting.set()
+            second_started.wait(5)  # the other thread is by now waiting on the lock
+            time.sleep(0.3)  # it polls every 2 s; it cannot extract while we hold the lock
+        return real_run(cmd, *args, **kwargs)
+
+    def call(index):
+        if index:
+            first_extracting.wait(5)
+            second_started.set()
+        return harness_snapshot(cfg, commit)
+
+    monkeypatch.setattr(jobspec.subprocess, "run", spying_run)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(call, range(2)))
+    assert results[0] == results[1] and len(extractions) == 1 and lock_seen == [True] and not lock_file.exists()
+    assert not list(cfg.paths.work_root.glob("_harness/.*.lock"))  # no lock file beside the destination
+
+
+def test_snapshots_need_a_local_root(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.paths.local_root = None
+    with pytest.raises(RuntimeError, match="paths.local_root"):
+        harness_snapshot(cfg, harness_pin(cfg)[0])
+
+
 def test_assert_pin_raises_when_lock_changes(tmp_path):
     cfg = _cfg(tmp_path)
     pins = _pins(cfg)
@@ -267,5 +304,6 @@ def test_every_builder_refuses_a_moved_harness(tmp_path):
 def test_match_prompt_names_pins_and_outcomes(tmp_path):
     p = match_prompt(_pins(_cfg(tmp_path)))
     assert "rec-1" in p and "c" * 40 in p and "$" not in p
-    for o in ("matched", "needs_snippet", "ineligible", "blocked", "host_not_allowed", "outcome.json"):
+    for o in ("matched", "needs_snippet", "blocked", "host_not_allowed", "outcome.json"):
         assert o in p
+    assert "ineligible" not in p and "256" not in p  # size is the buffer plan's call (spec §12)

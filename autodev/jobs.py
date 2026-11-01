@@ -10,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import stat
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any
+
+from mia_core.untrusted import read_untrusted as read_untrusted
 
 from .models import JobOutcome
 
@@ -39,40 +40,6 @@ class JobSpec:
     rw_mounts: list[str] = field(default_factory=list)  # absolute paths, besides the workspace
     agent: str | None = None  # csub launcher agent mode, e.g. "claude"; gated by the policy [agents] table
     env: dict[str, str] = field(default_factory=dict)
-
-
-@overload
-def read_untrusted(
-    job_dir: Path, rel: str, limit: int, tail: bool = ..., binary: Literal[False] = ...
-) -> str | None: ...
-@overload
-def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = ..., *, binary: Literal[True]) -> bytes | None: ...
-def read_untrusted(job_dir: Path, rel: str, limit: int, tail: bool = False, binary: bool = False) -> str | bytes | None:
-    """Read a file a sandboxed job could have tampered with. Returns None for anything suspicious.
-
-    No symlinks, no FIFOs, nothing outside `job_dir`, and at most `limit` bytes (the last `limit` with
-    `tail`). Returns text unless `binary`."""
-    try:
-        root = Path(job_dir).resolve()
-        path = root / rel
-        if not path.resolve().is_relative_to(root):
-            return None
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                return None
-            # the opened file itself (not the path we checked earlier) must live inside the job dir
-            if not Path(os.path.realpath(f"/proc/self/fd/{fd}")).is_relative_to(root):
-                return None
-            if tail:
-                os.lseek(fd, max(0, info.st_size - limit), os.SEEK_SET)
-            data = os.read(fd, limit)
-            return data if binary else data.decode(errors="replace")
-        finally:
-            os.close(fd)
-    except (OSError, RuntimeError):  # RuntimeError: symlink loop in resolve()
-        return None
 
 
 def csub_client(session: str) -> csub.Client:

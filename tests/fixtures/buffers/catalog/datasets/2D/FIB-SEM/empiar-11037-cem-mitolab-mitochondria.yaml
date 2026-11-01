@@ -1,0 +1,146 @@
+schema_version: '1.2'
+id: empiar-11037-cem-mitolab-mitochondria
+title: 'CEM-MitoLab: ~22K cellular EM 2D images with mitochondrial instance label maps'
+short_name: Mitochondria instance segmentation (cellular EM)
+description: CEM-MitoLab contains 21,860 annotated grayscale 2D electron microscopy image patches (mostly 224x224
+  px) with paired mitochondrial instance label maps (135,285 instances in total), drawn from a heterogeneous set
+  of TEM, STEM and FIB-SEM/volume EM sources (a subset of the CEM1.5M collection). It was assembled to train the
+  MitoNet generalist mitochondria segmentation model.
+landing_url: https://www.ebi.ac.uk/empiar/EMPIAR-11037/
+doi: 10.6019/EMPIAR-11037
+repository: EMPIAR
+accession: EMPIAR-11037
+authors:
+- Kedar Narayan
+- Ryan W. Conrad
+publications:
+- title: Instance segmentation of mitochondria in electron microscopy images with a generalist deep learning model
+    trained on a diverse dataset
+  doi: 10.1016/j.cels.2022.12.006
+  url: https://pmc.ncbi.nlm.nih.gov/articles/PMC9883049/
+date_published: '2022-05-10'
+imaging:
+  modality:
+  - FIB-SEM
+  - TEM
+  dimensionality: 2D
+  voxel_size_nm: null
+  channels: null
+  organism:
+  - Mus musculus
+  - Drosophila melanogaster
+  - Caenorhabditis elegans
+  - Homo sapiens
+  sample: Heterogeneous cells and tissues (mouse brain, fly brain, C. elegans, HeLa cells, mouse kidney, liver,
+    salivary gland, muscle)
+  labels_stains: []
+data:
+  formats:
+  - tiff
+  size_bytes: 2956930493
+  n_items: 21860
+  access: open
+  download_url: https://ftp.ebi.ac.uk/empiar/world_availability/11037/data/cem_mitolab.zip
+  download_method: http
+annotations:
+  present: true
+  types:
+  - instance-segmentation
+  - organelle
+  coverage: dense
+  format: paired 8-bit TIFF instance label maps (image/ and mask/ subdirectories; background 0, instances 1..255)
+  source: proofread
+ml:
+  tasks:
+  - segmentation
+  splits_provided: false
+  benchmark: null
+  baseline_code_url: null
+license:
+  spdx: CC0-1.0
+  url: https://www.ebi.ac.uk/empiar/EMPIAR-11037/
+provenance:
+  discovered_by: harvest-literature
+  discovered_at: '2026-09-29T13:28:40Z'
+  evidence_urls:
+  - https://www.ebi.ac.uk/empiar/EMPIAR-11037/
+  - https://www.ebi.ac.uk/empiar/api/entry/EMPIAR-11037/
+  - https://pmc.ncbi.nlm.nih.gov/articles/PMC9883049/
+  - https://ftp.ebi.ac.uk/empiar/world_availability/11037/data/
+  confidence: 0.85
+verification:
+  url_ok: true
+  license_found: true
+  annotations_verified: true
+  last_checked: '2026-09-30T20:55:55Z'
+notes: 'Voxel/pixel size not stated on the EMPIAR entry (pixel_width null), API record, or paper Methods (varies
+  per source; benchmarks resampled to 10-25 nm), so left null. Modalities per paper: FIB-SEM, TEM, STEM (STEM mapped
+  to TEM). Organisms listed from paper Methods. Archive cem_mitolab.zip listed with peek_archive: ~43.6K TIFFs (image+mask
+  pairs, ~21.8K each) plus a metadata/cem_mitolab_metadata.xlsx. Annotations crowdsourced (Zooniverse, 10 annotators
+  per image, consensus) then expert reviewed. No train/val/test split stated in the entry. enricher: size_bytes
+  set to the exact file-listing total (was 2956700000).'
+technical:
+  method: sample
+  size_source: file-listing
+  layout:
+    tree: |
+      ./                                   1 files    4.7 KB  .xml (EMPIAR entry header)
+      data/                                1 files    3.0 GB  .zip
+      data/metadata/                       1 files  176.1 KB  .xlsx
+      cem_mitolab.zip/cem_mitolab/   (~1,120 source subfolders, 43,744 members, 6.7 GB uncompressed)
+        000r10530ND0Jf1lZ9gQ_3D/images/   16 files  755.7 KB  .tiff
+        000r10530ND0Jf1lZ9gQ_3D/masks/    16 files  755.7 KB  .tiff
+        005231Mi4tR936D758lh_2D/images/   12 files  606.0 KB  .tiff
+        005231Mi4tR936D758lh_2D/masks/    12 files  606.0 KB  .tiff
+        01L9EKE74kM3O0QSq90G_2D/images/   22 files    5.8 MB  .tiff
+        01L9EKE74kM3O0QSq90G_2D/masks/    22 files    5.8 MB  .tiff
+        ... (<source id>_{2D,3D}/{images,masks}/*.tiff for every source)
+    n_files: 3
+    listing_complete: true
+  sample:
+    urls:
+    - https://ftp.ebi.ac.uk/empiar/world_availability/11037/data/cem_mitolab.zip::cem_mitolab/000r10530ND0Jf1lZ9gQ_3D/images/000r10530ND0Jf1lZ9gQ_3D-LOC-0_0117_0-191_448-672.tiff
+    - https://ftp.ebi.ac.uk/empiar/world_availability/11037/data/cem_mitolab.zip::cem_mitolab/000r10530ND0Jf1lZ9gQ_3D/masks/000r10530ND0Jf1lZ9gQ_3D-LOC-0_0117_0-191_448-672.tiff
+    size_bytes: 86208
+    description: One image/mask patch pair (191x224 uint8 TIFFs, 43,104 bytes each uncompressed)
+  arrays:
+  - role: raw
+    path_pattern: cem_mitolab.zip/cem_mitolab/*/images/*.tiff
+    format: tiff
+    axes: yx
+    shape:
+    - 224
+    - 224
+    shape_varies: true
+    dtype: uint8
+    compression: none
+    value_range:
+    - 12
+    - 255
+    normalization: unknown
+    alignment: not-applicable
+    alignment_notes: null
+  - role: label
+    path_pattern: cem_mitolab.zip/cem_mitolab/*/masks/*.tiff
+    format: tiff
+    axes: yx
+    shape:
+    - 224
+    - 224
+    shape_varies: true
+    dtype: uint8
+    compression: none
+    value_range:
+    - 0
+    - 2
+    encoding: instance-ids
+    classes: null
+    alignment: same-grid
+    alignment_notes: images/ and masks/ in each source folder hold files with identical names; both sampled pairs
+      have identical shapes.
+  notes: 'Listing: the zip central directory (43,744 members, 43,632 .tiff, 6.7 GB uncompressed) plus the xml header
+    and the metadata xlsx, all with exact sizes. Patches are up to 224x224; edge patches are smaller (e.g. 191x224,
+    the filename encodes the crop ranges), so shape varies. Probed raw and mask TIFFs: single page, uncompressed
+    uint8, no pixel-size calibration. Two pairs sampled: raw ranges 24-255 and 12-251; masks hold values {0,1,2},
+    consistent with the paper''s instance label maps (few mitochondria per patch). Value ranges from two samples
+    only. Folder suffix _2D/_3D marks the source type (2D image vs. volume slice).'

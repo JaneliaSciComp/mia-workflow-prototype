@@ -27,8 +27,9 @@ Trust boundaries:
 
 1. Prerequisites P1-P4 in [the plan](plans/2026-10-10-autodev-basic-loop.md#before-you-start-prerequisites-not-tasks).
    csub is pinned to `krokicki/csub` branch `deploy-all` (has the `claude` request field); `pixi install` gets it.
-2. `cp autodev.yaml.example autodev.yaml` and set `deployment: autodev-<you>` (keeps your labels, branches and
-   workflows apart from the service and from colleagues), `paths.work_root` under your csub `allowed_roots`.
+2. `cp mia.yaml.example mia.yaml`, keep the `autodev` service and name it `autodev-<you>` in `services` (the deployment
+   is the service name, so your labels, branches and workflows stay apart from the service and from colleagues), and
+   set its `paths.work_root` under your csub `allowed_roots`.
    Keep `work_root` and `paths.state_dir` apart: `work_root` must not be an ancestor of `state_dir`, because
    `work_root` is bound read-write into the sandbox, and `<state_dir>-host` (the broker log) and `temporal.state_dir`
    from `mia.yaml` (the Temporal binary and database) must stay outside every writable bind.
@@ -56,6 +57,28 @@ Upgrading a host from the old up-scripts: the dev server's database used to be `
 To keep in-flight workflows, stop the old tmux sessions (`tmux kill-session -t <deployment>`) and copy that file into
 `temporal.state_dir` before the first `mia up`, or point `temporal.state_dir` at the old `-host` directory. A fresh
 database is fine on a dev host: the poll schedule is re-applied and open issues are picked up on the next poll.
+
+Moving a service off a legacy per-app file (`services.<name>.config`, deprecated): copying its sections into the
+service block is not enough, because three things change with it. Name the service after the old file's `deployment`
+(labels, task queue and workflow ids come from it). Set `paths.state_dir` in the service block to the old state
+directory, or move that directory to `<state_root>/<name>` while no round is running (in-flight rounds look for their
+`rounds/<id>/pins.json` and csub job-id files there). Keep `temporal.namespace` in the block when the old file set
+one. Then `mia restart <service>`.
+
+buffer-api (`mia-buffers serve`) keeps its SQLite ledger at `<local_root>/service/buffers.sqlite` (host-local disk,
+never NFS) and writes backups to `<state_dir>/backups/` every `keeper.minutes`; worker writes need the token in
+`service.token_file`. The first start moves an old `<state_dir>/buffers.sqlite` to the new place (the old file keeps a
+`.moved` suffix). If the ledger is missing but `<state_dir>/backups/` holds backups, `serve` refuses to start and names
+the newest: copy it to `<local_root>/service/buffers.sqlite` to restore it.
+After the first `mia up`, fill the registry:
+`mia exec mia-buffers catalog sync` (the catalog records; `--ref <sha>` for a particular commit) and
+`mia exec mia-buffers datasets sync` (the prepared rows, from `storage_root`).
+
+Upgrading mia-buffers to the registry (milestone B): restart it with no buffer round in `buffer:sourcing`. A stage job
+submitted before the upgrade writes to the old `<levels key>/<record>` directory, and its dataset fails after the
+restart. The first round after the upgrade re-stages every record under `<levels key>/<record>/<artifact id>`. Rolling
+back to the pre-B code once new volumes are registered needs a ledger backup taken before the upgrade: the old code does
+not know the `artifact` key.
 
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
@@ -108,7 +131,7 @@ nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes 
 mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `mia exec mia-data check`
 names what is missing); P4 see the plan.
 
-1. `cp mia_data.yaml.example mia_data.yaml`, fill in paths, `harness.dir` and a `github.token_file` (or app key).
+1. `cp mia.yaml.example mia.yaml` (if you have not), fill in the shared paths, the `mia-data` block, `harness.dir` and a `github.token_file` (or app key).
    `paths.work_root` and `paths.storage_root` take a path or `{path, url}`; with a `url` (the folder in Fileglancer)
    the issue comments link the round's workspace and the dataset's crops folder.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
@@ -129,4 +152,6 @@ names what is missing); P4 see the plan.
    dataset issues from the catalog.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Labels on a dataset issue: `data:go` starts a run; `data:approve` approves the snippet PR / crops for publish.
+6. Labels on a dataset issue: `data:go` starts a run; `data:approve` publishes the crops under review (and merges
+   the snippet PR that made them); `data:reject`, with your comments on the issue, sends them to the agent fixing
+   the snippet and the next crops come back for review.

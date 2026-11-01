@@ -1,5 +1,5 @@
 import pytest
-from test_mia_ops_services import fake, make_stack, tmux_calls  # noqa: F401  (fixture re-export)
+from test_mia_ops_services import fake, make_stack, make_stack_v2, tmux_calls  # noqa: F401  (fixture re-export)
 
 from mia_ops import cli, services
 
@@ -24,7 +24,7 @@ def test_help_lists_commands(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec"):
+    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec", "init-token"):
         assert cmd in out
 
 
@@ -106,3 +106,20 @@ def test_exec_runs_the_app_cli_with_its_config(stack, fake, tmp_path):  # noqa: 
     argv, kw = fake.calls[-1]
     assert argv == [str(services.PY), "-m", "mia_data.cli", "seed", "--dry-run"]
     assert kw["env"]["MIA_DATA_CONFIG"] == f"{tmp_path}/mia_data.yaml"
+
+
+def test_exec_passes_the_service_name(tmp_path, fake, monkeypatch):  # noqa: F811
+    s = make_stack_v2(tmp_path)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    assert cli.main(["exec", "mia-buffers", "plan", "--help"]) == 0
+    argv, kw = fake.calls[-1]
+    assert argv[1:3] == ["-m", "mia_buffers.cli"] and kw["env"]["MIA_SERVICE"] == "mia-buffers"
+
+
+def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsys):  # noqa: F811
+    s = make_stack_v2(tmp_path)
+    (tmp_path / "token").unlink()
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    assert cli.main(["init-token"]) == 0
+    assert oct((tmp_path / "token").stat().st_mode & 0o777) == "0o600" and len((tmp_path / "token").read_text()) == 64
+    assert cli.main(["init-token"]) == 0 and "exists" in capsys.readouterr().err

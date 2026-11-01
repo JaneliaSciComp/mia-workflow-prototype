@@ -26,9 +26,10 @@ mia-data is a dataset → binding → test crops → human approval → producti
 [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has downloaded gets an issue in
 [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data). On `data:go`, a Claude agent in a cluster
 sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
-and writes a binding; plain harness jobs check it, cut four test crops and show them in the issue. A human approves
-with `data:approve` (or, for a new snippet, by reviewing its PR, which autodev writes), and a plain job extracts
-the production set, verifies it and publishes it to shared storage and a `galleries` branch. Every stage is a label
+and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them in the issue.
+A human approves with `data:approve`, and those crops are published to shared storage and a `galleries` branch; or
+rejects with `data:reject` and comments, which go to the agent fixing the snippet (a new snippet's PR, which autodev
+writes, is merged only when its crops are approved). Every stage is a label
 and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`notes/mia-crops-spec.md`](notes/mia-crops-spec.md).
 

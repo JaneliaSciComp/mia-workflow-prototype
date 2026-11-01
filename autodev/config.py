@@ -16,7 +16,10 @@ from typing import Literal, Protocol
 import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+from mia_core.config import PROJECT_DIR as PROJECT_DIR
+from mia_core.config import TemporalCfg as TemporalCfg
+from mia_core.config import load_dotenv as load_dotenv
+from mia_core.config import load_service_config, manifest_path
 
 # environment variable -> the YAML key path it overrides
 _ENV_OVERRIDES = {
@@ -53,15 +56,8 @@ class GitHubCfg(BaseModel):
     api_url: str = "https://api.github.com"
     git_url: str | None = None  # default https://github.com/<repo>.git; tests use a local path
     protected_paths: list[str] = [".github/"]
-    trusted_bots: list[str] = []  # app logins ("name[bot]") whose `go` label counts without a permission lookup
+    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label, `/approve` and `/revise` count (see review.py)
     required_checks: list[str] = []  # status contexts / check-run names that must be present and green before merge
-
-
-class TemporalCfg(BaseModel):
-    address: str = "localhost:7233"
-    namespace: str = "default"
-    via_https_proxy: bool = False  # inside agentic-sandbox: reach Temporal through the allowlist proxy
-    poll_minutes: int = 2
 
 
 class PathsCfg(BaseModel):
@@ -145,8 +141,11 @@ class Config(BaseModel):
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
-        if bad := [login for login in github.trusted_bots if not login.endswith("[bot]")]:
-            raise ValueError(f"github.trusted_bots: {bad} must be app logins ending in '[bot]'")
+        # the slug as GitHub shows the App, or the login it acts under ("<slug>[bot]"); stored as the login
+        slugs = [login.removesuffix("[bot]") for login in github.trusted_bots]
+        if bad := [slug for slug in slugs if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", slug)]:
+            raise ValueError(f"github.trusted_bots: {bad} must be GitHub App slugs")
+        github.trusted_bots = [f"{slug}[bot]" for slug in slugs]
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())
@@ -212,25 +211,24 @@ class Config(BaseModel):
         return self.github.repo.replace("/", "__")
 
 
-def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
-    """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
-    if not path.is_file():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.removeprefix("export ").partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+def load_config(path: str | os.PathLike | None = None, *, service: str | None = None) -> Config:
+    """Load and validate the config, exiting with a readable message if it is missing or invalid.
 
-
-def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load and validate the config file, exiting with a readable message if it is missing or invalid."""
+    With a service name (or $MIA_SERVICE) the config is that service's block of mia.yaml; otherwise autodev.yaml."""
     load_dotenv()
-    path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
-    if not path.is_file():
-        sys.exit(f"autodev: config not found at {path} (copy autodev.yaml.example, or set $AUTODEV_CONFIG)")
-    data = yaml.safe_load(path.read_text()) or {}
+    service = service or os.environ.get("MIA_SERVICE")
+    source: str | Path
+    if service:
+        source = f"{manifest_path(path)} (service {service})"
+        data = load_service_config(service, path)
+    else:
+        path = Path(path or os.environ.get("AUTODEV_CONFIG") or PROJECT_DIR / "autodev.yaml")
+        if not path.is_file():
+            sys.exit(
+                f"autodev: config not found at {path} (copy mia.yaml.example to mia.yaml and set MIA_SERVICE, or set $AUTODEV_CONFIG)"
+            )
+        source = path
+        data = yaml.safe_load(path.read_text()) or {}
     for env_var, key_path in _ENV_OVERRIDES.items():
         if os.environ.get(env_var):
             node = data
@@ -242,4 +240,4 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     try:
         return Config(**data)
     except ValidationError as err:
-        sys.exit(f"autodev: invalid config {path}:\n{err}")
+        sys.exit(f"autodev: invalid config {source}:\n{err}")

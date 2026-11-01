@@ -35,12 +35,20 @@ class Reviewers:
     bot: str
     allow_self: bool
     marker_prefix: str
+    trusted: frozenset[str] = frozenset()  # `github.trusted_bots`: logins whose `/approve` and `/revise` count
 
     def is_human_writer(self, login: str | None) -> bool:
         """A person with write access, and not the bot itself unless `allow_self`."""
         if not login:
             return False
         return self.permissions.get(login) in WRITE_PERMISSIONS and (self.allow_self or login != self.bot)
+
+    def may_command(self, comment: dict, match: re.Match) -> bool:
+        """Whether the `/approve` or `/revise` found at `match` in `comment` counts: anywhere in a comment by a
+        human with write access; only as the first line of a comment by a trusted bot (the mia-data worker,
+        whose other comments quote agent-written text that must not be able to command us)."""
+        login = _login(comment)
+        return self.is_human_writer(login) or (login in self.trusted and match.start() == 0)
 
     def is_ours(self, body: str | None) -> bool:
         return self.marker_prefix in (body or "")
@@ -59,7 +67,8 @@ def latest_round_at(comments: list[dict], reviewers: Reviewers) -> str | None:
 
 
 def approved(head_sha: str, reviews: list[dict], comments: list[dict], reviewers: Reviewers, since: str | None) -> bool:
-    """Whether a human with write access approved exactly `head_sha`, by review or by `/approve <sha>` comment.
+    """Whether a human with write access approved exactly `head_sha`, by review or by `/approve <sha>` comment
+    (a trusted bot's `/approve` counts too, see Reviewers.may_command).
 
     `/approve` comments count only if posted after `since`: a short prefix of an older head must not approve
     a later head the agent happens to produce. GitHub's ISO-8601 UTC timestamps compare correctly as strings."""
@@ -76,7 +85,7 @@ def approved(head_sha: str, reviews: list[dict], comments: list[dict], reviewers
         if reviewers.is_ours(comment.get("body")) or (since and (comment.get("created_at") or "") <= since):
             continue
         match = APPROVE_RE.search(comment.get("body") or "")
-        if match and head_sha.startswith(match.group(1)) and reviewers.is_human_writer(_login(comment)):
+        if match and head_sha.startswith(match.group(1)) and reviewers.may_command(comment, match):
             return True
     return False
 
@@ -104,7 +113,7 @@ def feedback(
         if reviewers.is_ours(comment.get("body")):
             continue
         match = REVISE_RE.search(comment.get("body") or "")
-        if match and reviewers.is_human_writer(_login(comment)):
+        if match and reviewers.may_command(comment, match):
             items.append(
                 (
                     comment.get("created_at") or "",

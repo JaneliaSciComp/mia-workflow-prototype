@@ -1,0 +1,47 @@
+# Live-test buffer spec: exactly two 2D datasets, picked by their record paths.
+#   zenodo-20797339-u937…  already has an approved binding under storage_root → stages straight away
+#   zenodo-7949940-…       has none → the buffer opens its mia-workflow-data issue and adds data:go (milestone 4);
+#                          one 54 MB zip of 1024×1024 uint16 TIFFs with masks on zenodo.org, voxel size known,
+#                          so mia-data's existing tiff-zip-member snippet should match without snippet development.
+# Add a third path, datasets/2D/histology-WSI/github-bcss-breast-cancer-semantic-segmentation.yaml, to exercise
+# the manual drop and the png reader development as well.
+schema_version: 1
+name: live-test-two-datasets
+
+catalog:
+  repo: AI-HHMI/mia-agentic-search
+  ref: ab6a013d5da39c80651ddc845915d034b2eae82a   # a commit, never a branch
+
+select:
+  paths:
+    - datasets/2D/confocal/zenodo-20797339-u937-edu-h2ax-dapi-confocal.yaml
+    - datasets/2D/spinning-disk/zenodo-7949940-zerocostdl4mic-stardist-sirdna-nuclei.yaml
+  where:
+    dims: {in: [2D]}
+    license:
+      in: [CC0-1.0, CC-BY-3.0, CC-BY-4.0, MIT, BSD-3-Clause]
+      allow_unknown: false
+    annotations:
+      required: false
+  dedup:
+    by: [doi]
+
+sampling:
+  patch:
+    2D: {y: 256, x: 256}
+    c: 1                                # one channel per crop: gray recipe per dataset
+  levels: [1, 2, 4]
+  weighting:
+    scheme: temperature
+    over: [modality, dataset]
+    temperature: 0.5
+  normalize:
+    method: percentile
+    range: [1, 99]
+    scope: volume                       # per-volume bounds from the stage job's intensity sample (milestone 4)
+
+ready:
+  min_fraction: 0.5                     # buffer:ready as soon as one of the two is servable; the other joins later
+
+splits:
+  fractions: {train: 0.8, val: 0.1, test: 0.1}

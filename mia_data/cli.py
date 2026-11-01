@@ -24,8 +24,9 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from autodev.auth import bot_login, token_fn
-from autodev.cli import _client, _setup_logging, run_checks
+from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
+from mia_core.fs import require_local_dir, require_secret_file
 
 from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
 
@@ -179,12 +180,33 @@ async def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
             )
         return f"{commit[:12]} env {digest[:12]}"
 
+    def local_root_check(root: Path) -> Callable[[], Awaitable[str]]:
+        async def check():
+            require_local_dir(root)
+            probe_file = root / "locks" / ".write-test"
+            probe_file.parent.mkdir(parents=True, exist_ok=True)
+            probe_file.touch()
+            probe_file.unlink()
+            return str(root)
+
+        return check
+
+    def service_token_check(token_file: Path) -> Callable[[], Awaitable[str]]:
+        async def check():
+            require_secret_file(token_file)
+            return str(token_file)
+
+        return check
+
     repos = [
         (f"github {kind}", repo_check(getattr(cfg.github, f"{kind}_repo"))) for kind in ("data", "snippets", "catalog")
     ]
-    return await run_checks(
-        [*repos, ("temporal", temporal), ("csub broker", csub), ("directories", dirs), ("harness pin", pin)]
-    )
+    rows = [*repos, ("temporal", temporal), ("csub broker", csub), ("directories", dirs), ("harness pin", pin)]
+    if cfg.paths.local_root:
+        rows.append(("local root", local_root_check(cfg.paths.local_root)))
+    if cfg.service and cfg.service.token_file:
+        rows.append(("service token", service_token_check(cfg.service.token_file)))
+    return await run_checks(rows)
 
 
 async def cmd_crops_by_snippet(cfg: Config, args: argparse.Namespace) -> int:
@@ -413,12 +435,10 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
-        ScheduleAlreadyRunningError,
         ScheduleIntervalSpec,
         ScheduleOverlapPolicy,
         SchedulePolicy,
         ScheduleSpec,
-        ScheduleUpdate,
     )
 
     from .workflows import MiaDataPoll
@@ -430,12 +450,7 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.temporal.poll_minutes))]),
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
     )
-    try:
-        await client.create_schedule(schedule_id, schedule)
-        print(f"created schedule {schedule_id}")
-    except ScheduleAlreadyRunningError:
-        await client.get_schedule_handle(schedule_id).update(lambda _: ScheduleUpdate(schedule=schedule))
-        print(f"updated schedule {schedule_id}")
+    print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
     return 0
 
 
