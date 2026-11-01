@@ -5,7 +5,7 @@ for compute, and GitHub issues as the user interface. Two workflows so far: **au
 issue into a PR written by Claude Code, revises it on request, and merges it after human approval; **mia-data**
 turns a dataset in the MIA catalog into verified, published image crops, with a human approving every binding.
 Setup: [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
-[`docs/github-app.md`](docs/github-app.md).
+[`docs/github-app.md`](docs/github-app.md). Production layout: [`docs/deployment.md`](docs/deployment.md).
 
 ## autodev
 
