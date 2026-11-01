@@ -1,4 +1,4 @@
-# MIA agentic workflows (prototype)
+# Agentic workflows for MIAAI
 
 A prototype for running agentic workflows for MIA on the Janelia cluster, built on Temporal for orchestration, LSF
 for compute, and GitHub issues as the user interface. Two workflows so far: **autodev** turns a labelled GitHub
