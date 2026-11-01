@@ -82,7 +82,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing-inspection-0.4.4-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
-      - pypi: .
+      - pypi: ./
       - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
       - pypi: https://files.pythonhosted.org/packages/11/52/6327a5f4fda01207205038a106a99848a41c83e933cd23ea2cab3d2ebc6c/nexus_rpc-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl
@@ -283,7 +283,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zarr-3.4.2-pyhc364b38_0.conda
-      - pypi: .
+      - pypi: ./
       - pypi: git+https://github.com/JaneliaSciComp/mia-snippets?subdirectory=harness&branch=training-buffers#80eed04e17c8188f3d7d14d7505941dbeb2ca011
       - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
       - pypi: git+https://github.com/weigertlab/muvit#ef182d3f49772ccc74913195c358e188d313c43f
@@ -3739,8 +3739,8 @@ packages:
   run_exports: {}
   size: 567575
   timestamp: 1793141208083
-- pypi: .
-  name: mia-workflow-prototype
+- pypi: ./
+  name: mia-workflows
   requires_dist:
   - temporalio>=1.7
   - httpx>=0.27

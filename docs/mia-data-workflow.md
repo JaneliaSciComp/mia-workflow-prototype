@@ -65,7 +65,7 @@ The pieces, and where they live:
 
 | component | repo | role |
 |---|---|---|
-| `mia_data/` package, `mia-data` CLI (`pixi run mia exec mia-data ...`) | [mia-workflow-prototype](https://github.com/JaneliaSciComp/mia-workflow-prototype) (this repo) | the workflow, its activities, the poller, seed and devops commands |
+| `mia_data/` package, `mia-data` CLI (`pixi run mia exec mia-data ...`) | [mia-workflows](https://github.com/JaneliaSciComp/mia-workflows) (this repo) | the workflow, its activities, the poller, seed and devops commands |
 | `autodev/` package | this repo | GitHub client and App auth, the csub job runner, the await-queue pattern; also the agent that writes new snippets |
 | snippets and harness | [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets) | one small immutable reader per source format, and the `harness` CLI (`smoke`, `crop`, `verify`, `preview`) |
 | dataset issues and galleries | [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) | the user interface: one issue per dataset, labels as state, a `galleries` branch of PNGs for review |

@@ -81,7 +81,7 @@ def test_load_service_config_reads_mia_config_env(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "service, module, attr, expected",
     [
-        ("autodev", "autodev.config", "github.repo", "JaneliaSciComp/mia-workflow-prototype"),
+        ("autodev", "autodev.config", "github.repo", "JaneliaSciComp/mia-workflows"),
         ("snippets", "autodev.config", "github.repo", "JaneliaSciComp/mia-snippets"),
         ("mia-data", "mia_data.config", "github.data_repo", "JaneliaSciComp/mia-workflow-data"),
         ("mia-buffers", "mia_buffers.config", "github.buffers_repo", "JaneliaSciComp/mia-buffers"),

@@ -589,7 +589,7 @@ keeper: {minutes: 30, catalog_sync_hours: 24}
 services:                                 # per service: app + the sections that differ, in the app's own shape
   autodev:
     app: autodev
-    github: {repo: JaneliaSciComp/mia-workflow-prototype, base_branch: main}
+    github: {repo: JaneliaSciComp/mia-workflows, base_branch: main}
     agent: {model: sonnet, walltime_min: 60}
   snippets:
     app: autodev

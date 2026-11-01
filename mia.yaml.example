@@ -69,7 +69,7 @@ services:                                 # per service: app + the sections that
     temporal: {namespace: default}
     paths: {work_root: /shared/TBD/autodev/work}   # autodev takes a plain path here, not {path, url}: agent workspaces
     github:
-      repo: JaneliaSciComp/mia-workflow-prototype
+      repo: JaneliaSciComp/mia-workflows
       base_branch: main
       protected_paths: [".github/"]
       # required_checks: ["mia-data/crops"]   # status contexts / check-run names that must be present and green

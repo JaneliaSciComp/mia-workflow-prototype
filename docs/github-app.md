@@ -20,7 +20,7 @@ Go to **github.com/organizations/JaneliaSciComp/settings/apps** and click **New 
 
 - **GitHub App name**: this sets the bot's login, e.g. `mia-autodev` becomes `mia-autodev[bot]`. It must be unique
   across GitHub.
-- **Homepage URL**: `https://github.com/JaneliaSciComp/mia-workflow-prototype`.
+- **Homepage URL**: `https://github.com/JaneliaSciComp/mia-workflows`.
 - **Callback URL, Setup URL, "Request user authorization"**: leave empty or unchecked. autodev never acts on
   behalf of a user.
 - **Webhook**: uncheck **Active**. autodev polls, and the worker accepts no inbound connections.
@@ -64,7 +64,7 @@ and agent jobs never see it.
 ## 3. Install it on the repo
 
 On the App's page, click **Install App**, choose **JaneliaSciComp**, then **Only select repositories**, and pick
-`mia-workflow-prototype` (or whichever repos autodev should watch). Click **Install**.
+`mia-workflows` (or whichever repos autodev should watch). Click **Install**.
 
 You land on a page like `github.com/organizations/JaneliaSciComp/settings/installations/12345678`. The number at
 the end is the **installation ID**.
@@ -75,7 +75,7 @@ In the shared `github` section of `mia.yaml`:
 
 ```yaml
 github:
-  repo: JaneliaSciComp/mia-workflow-prototype
+  repo: JaneliaSciComp/mia-workflows
   auth: app
   app_id: 123456                              # step 2
   installation_id: 12345678                   # step 3
@@ -102,7 +102,7 @@ feedback" markers by login, so on a PR that's already open under the old identit
 already handled, and repost its comments. Switch when nothing is in flight:
 
 1. Finish or close every issue labelled `<deployment>:working` or `<deployment>:review`, e.g.
-   `gh issue list -R JaneliaSciComp/mia-workflow-prototype -l autodev:review`.
+   `gh issue list -R JaneliaSciComp/mia-workflows -l autodev:review`.
 2. `pixi run mia restart autodev` (or the service name the App runs under).
 
 At startup the worker looks up the bot user's ID and sets the commit author on every agent workspace to

@@ -1,5 +1,5 @@
 [project]
-name = "mia-workflow-prototype"
+name = "mia-workflows"
 version = "0.1.0"
 description = "MIA agentic workflows prototype: autodev (GitHub issue -> Claude Code PR), Temporal orchestration, LSF via csub"
 requires-python = ">=3.12"
@@ -43,7 +43,7 @@ httpx = "*"
 cryptography = "*"
 
 [tool.pixi.pypi-dependencies]
-mia-workflow-prototype = { path = ".", editable = true }
+mia-workflows = { path = ".", editable = true }
 temporalio = ">=1.7"
 csub = { git = "https://github.com/krokicki/csub", branch = "deploy-all" }
 
