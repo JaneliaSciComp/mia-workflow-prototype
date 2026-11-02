@@ -241,7 +241,7 @@ def test_re_put_replaces_candidates_and_keeps_frozen(tmp_path):
 def test_volume_bodies_carry_samples(tmp_path, spec_2d):
     ... stage.json volume with "samples": {"train": [...]} → body["samples"] == that
 def test_split_planes_golden():
-    assert _split_planes("r/v0", 10, {"policy": "fractions", "fractions": {"train": 0.6, "val": 0.2, "test": 0.2}, "seed": 0}) == <the harness's numbers>
+    assert _split_planes("r/v0.zarr", 10, {"policy": "fractions", "fractions": {"train": 0.6, "val": 0.2, "test": 0.2}, "seed": 0}) == {"train": [0, 1, 4, 5, 7, 8], "val": [3, 6], "test": [2, 9]}   # the volume id volume_bodies uses; the harness pins the same
 ```
 
 - [ ] **Step 2: Run** → FAIL
