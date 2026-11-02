@@ -47,7 +47,7 @@ from mia_data.status import render_links, render_stage
 from .api import BufferConfig
 from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
-from .jobspec import artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
+from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     MAX_POLL_MINUTES,
@@ -124,6 +124,23 @@ def _voxel(row: Row) -> dict[str, float]:
     of view, not a physical z; the harness has no other source for it and refuses to write a pyramid without)."""
     known = {axis: float(value) for axis, value in row.voxel_size_nm.items() if value is not None}
     return {"z": 1.0, **known} if row.dims == "2D" else known
+
+
+def voxel_size_json(row: dict) -> dict[str, dict]:
+    """The stage job's voxel_size.json from a plan row: each known axis in nm with where it came from (`record`, or
+    `assumed` from the catalog median `mia_buffers.assume` used), plus the synthetic 1 nm plane axis of a 2D stack."""
+    sizes: dict[str, dict] = {}
+    if row["dims"] == "2D" and row["voxel_size_nm"].get("z") is None:
+        sizes["z"] = {"nm": 1.0, "source": "synthetic"}  # as _voxel: the harness needs a z to write a pyramid
+    for axis, value in row["voxel_size_nm"].items():
+        if value is None:
+            continue
+        if axis in row.get("assumed", []):
+            basis = f"({row['family']}, {row['modality_group']}) catalog median"
+            sizes[axis] = {"nm": float(value), "source": "assumed", "basis": basis}
+        else:
+            sizes[axis] = {"nm": float(value), "source": "record"}
+    return sizes
 
 
 class Activities:
@@ -282,11 +299,12 @@ class Activities:
 
     def _artifact(self, round_id: str, record: str) -> str:
         """The record's staged artifact id: the round's binding copy, the levels key, the plan row's voxel size
-        (the value the stage job is given) and the round's harness pins."""
+        (the value the stage job is given), the round's harness pins and the row's plan digest."""
         binding = self._binding_path(round_id, record)
         if not binding.is_file():
             raise ValueError(f"{record}: no binding copied into round {round_id}")
-        voxel = self._row(round_id, record).get("voxel_size_nm") or {}
+        row = self._row(round_id, record)
+        voxel = row.get("voxel_size_nm") or {}
         pins = self._pins(round_id)
         return artifact_id(
             hashlib.sha256(binding.read_bytes()).hexdigest(),
@@ -294,6 +312,7 @@ class Activities:
             {axis: size for axis, size in voxel.items() if size is not None},  # the plan keeps unknown axes as None
             pins.harness_commit,
             pins.env_digest,
+            row.get("plan_digest", ""),
         )
 
     def _staged_dir(self, round_id: str, record: str) -> Path:
@@ -724,13 +743,26 @@ class Activities:
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
     async def prepare_stage(self, issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
-        """The stage job's workspace with record.yaml and binding.yaml; the raw cache and the round's building
-        directory exist afterwards (a mount must). A rebuild gets its own (`stage-<record>-r<n>`). Returns the
-        workspace path."""
+        """The stage job's workspace with record.yaml, binding.yaml, plan-rule.json (the row's sample rule and the
+        artifact id the job must write) and voxel_size.json; the raw cache and the round's building directory exist
+        afterwards (a mount must). A rebuild gets its own (`stage-<record>-r<n>`). Returns the workspace path."""
+        row = self._row(round_id, record)
+        if not row.get("plan_rule"):
+            raise ValueError(f"{record}: plan row has no sample rule")
+        pins = self._pins(round_id)
+        plan_rule = {
+            "artifact_id": self._artifact(round_id, record),
+            "levels_key": self._levels_key(round_id),
+            "harness_commit": pins.harness_commit,
+            "env_digest": pins.env_digest,
+            "rule": row["plan_rule"],
+        }
         workspace = self._round_workspace(issue, round_id) / (f"stage-{record}" + (f"-r{rebuild}" if rebuild else ""))
         workspace.mkdir(parents=True, exist_ok=True)
         write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
         shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
+        write_atomic(workspace / PLAN_FILE, json.dumps(plan_rule, indent=2))
+        write_atomic(workspace / VOXEL_FILE, json.dumps(voxel_size_json(row), indent=2))
         self._cache_dir(record).mkdir(parents=True, exist_ok=True)
         self._building_dir(round_id, record, rebuild).mkdir(parents=True, exist_ok=True)
         return str(workspace)
@@ -793,10 +825,10 @@ class Activities:
     @activity.defn(name="read_stage")
     @mia_permanent_errors
     async def read_stage(self, round_id: str, record: str, rebuild: int = 0) -> StageResult:
-        """The stage job's stage.json, reduced; tolerant of any shape. An ok build is published: the artifact block
-        written into its stage.json, then the building directory renamed to the final one (when that exists already,
-        an identical pyramid won: the build is removed and the final one reused). A failed build stays where it is,
-        for the keeper's `.building-*` rule. Idempotent on retry."""
+        """The stage job's stage.json, reduced; tolerant of any shape. An ok build naming the expected artifact id is
+        published: the building directory renamed to the final one (when that exists already, an identical pyramid
+        won: the build is removed and the final one reused). A failed or foreign build stays where it is, for the
+        keeper's `.building-*` rule. Idempotent on retry."""
         final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record, rebuild)
         report = _stage_json(building if building.exists() else final)
         if isinstance(report, dict) and report.get("ok") is True and building.exists():
@@ -817,25 +849,32 @@ class Activities:
         return result
 
     def _artifact_block(self, round_id: str, record: str) -> dict:
-        """Every input the staged artifact id hashes, as stage.json's `artifact` and the staged asset row keep them."""
+        """Every input the staged artifact id hashes, as the staged asset row keeps them."""
         pins = self._pins(round_id)
+        row = self._row(round_id, record)
         return {
             "id": self._artifact(round_id, record),
             "binding_hash": hashlib.sha256(self._binding_path(round_id, record).read_bytes()).hexdigest(),
             "levels_key": self._levels_key(round_id),
-            "voxel_size_nm": self._row(round_id, record).get("voxel_size_nm"),
+            "voxel_size_nm": row.get("voxel_size_nm"),
             "harness_commit": pins.harness_commit,
             "env_digest": pins.env_digest,
+            "plan_digest": row.get("plan_digest", ""),
         }
 
     def _publish(
         self, round_id: str, record: str, report: dict, building: Path, final: Path, replace: bool = False
     ) -> Any:
-        """Write the artifact block into the build's stage.json and rename the build to its final directory. Returns
-        the published report: the build's, or the final directory's when that was there first. `replace` (a rebuild
+        """Rename the build to its final directory; the build is never written (the harness wrote its stage.json,
+        artifact block included). Returns the published report: the build's, or the final directory's when that was
+        there first. A build whose stage.json names another artifact id is not renamed: the report comes back
+        `ok: False` with the mismatch as an error, the build left for the `.building-*` sweep. `replace` (a rebuild
         of a degraded pyramid): the final directory, broken though its stage.json says ok, is set aside first."""
-        report["artifact"] = self._artifact_block(round_id, record)
-        write_atomic(building / "stage.json", json.dumps(report))  # compact: it carries ~150 KB of samples
+        block = report.get("artifact")
+        found, expected = block.get("id") if isinstance(block, dict) else None, self._artifact(round_id, record)
+        if found != expected:
+            error = f"stage.json artifact id {found!r} is not the expected {expected!r}"
+            return {**report, "ok": False, "errors": [*texts(report.get("errors")), error]}
         if replace and final.exists():  # for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
         try:
@@ -875,6 +914,7 @@ class Activities:
                 "harness_commit": block["harness_commit"],
                 "env_digest": block["env_digest"],
                 "voxel_size_nm": block["voxel_size_nm"],
+                "plan_digest": block["plan_digest"],
                 "round": round_id,
                 "ok": result.ok,
                 "volumes": result.volumes,

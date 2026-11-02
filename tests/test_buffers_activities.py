@@ -17,7 +17,7 @@ from test_buffers_plan import BCSS, CATALOG, ONE_CH, U937, spec_with
 from test_buffers_register import token_server, write_stage_json  # noqa: F401  (fixture)
 
 from mia_buffers import activities as acts_module
-from mia_buffers.activities import Activities
+from mia_buffers.activities import Activities, voxel_size_json
 from mia_buffers.drop import cache_key, read_manifest
 from mia_buffers.jobspec import artifact_id
 from mia_buffers.models import (
@@ -490,13 +490,15 @@ async def test_verify_drop_rejects_symlink_and_empty_file(acts):
 
 def staged_dir(acts, record_id):
     """<staged_root>/<levels key>/<record>/<artifact>: the id from the binding read_binding copied into the round,
-    the plan row's voxel size and the round's pins."""
+    the plan row's voxel size and plan digest, and the round's pins."""
     round_dir = acts.cfg.paths.state_dir / "rounds" / ROUND
     binding_hash = hashlib.sha256((round_dir / "bindings" / f"{record_id}.yaml").read_bytes()).hexdigest()
     row = next(row for row in json.loads((round_dir / "plan.json").read_text())["rows"] if row["id"] == record_id)
     voxel = {axis: size for axis, size in row["voxel_size_nm"].items() if size is not None}
     pins = json.loads((round_dir / "pins.json").read_text())
-    artifact = artifact_id(binding_hash, "p256-l1-2-4", voxel, pins["harness_commit"], pins["env_digest"])
+    artifact = artifact_id(
+        binding_hash, "p256-l1-2-4", voxel, pins["harness_commit"], pins["env_digest"], row["plan_digest"]
+    )
     return acts.cfg.paths.staged_root / "p256-l1-2-4" / record_id / artifact
 
 
@@ -518,6 +520,45 @@ async def test_prepare_stage_makes_workspace_and_dirs(acts):
     rebuilt = Path(await acts.prepare_stage(7, ROUND, U937, 1))  # a degraded pyramid's rebuild: its own dirs
     assert rebuilt == workspace.with_name(f"stage-{U937}-r1") and acts._building_dir(ROUND, U937, 1).is_dir()
     assert acts._building_dir(ROUND, U937, 1) != acts._building_dir(ROUND, U937)
+
+
+async def test_prepare_stage_writes_plan_rule_and_voxel_size(acts):
+    await planned_and_bound(acts)
+    workspace = Path(await acts.prepare_stage(7, ROUND, U937))
+    rule = json.loads((workspace / "plan-rule.json").read_text())
+    row = acts._row(ROUND, U937)
+    assert rule == {
+        "artifact_id": staged_dir(acts, U937).name,
+        "levels_key": "p256-l1-2-4",
+        "harness_commit": "h" * 40,
+        "env_digest": "d" * 64,
+        "rule": row["plan_rule"],
+    }
+    assert rule["rule"]["samples"] and rule["rule"]["patch"] == 256
+    assert json.loads((workspace / "voxel_size.json").read_text()) == {
+        "z": {"nm": 1.0, "source": "synthetic"},  # a 2D record: the plane axis its stack keeps
+        "y": {"nm": 45.0718, "source": "record"},
+        "x": {"nm": 45.0718, "source": "record"},
+    }
+
+
+async def test_prepare_stage_refuses_a_row_without_a_sample_rule(acts, monkeypatch):
+    await planned_and_bound(acts)
+    row = {key: value for key, value in acts._row(ROUND, U937).items() if key != "plan_rule"}
+    monkeypatch.setattr(acts, "_row", lambda round_id, record: row)
+    with pytest.raises(ApplicationError, match="plan row has no sample rule"):  # a programming error: permanent
+        await acts.prepare_stage(7, ROUND, U937)
+
+
+def test_voxel_size_json_names_each_axis_source():
+    two_d = {"dims": "2D", "family": "lm", "modality_group": "confocal", "voxel_size_nm": {"y": 200, "x": 180.5}}
+    assert voxel_size_json({**two_d, "assumed": ["y"]}) == {
+        "z": {"nm": 1.0, "source": "synthetic"},
+        "y": {"nm": 200.0, "source": "assumed", "basis": "(lm, confocal) catalog median"},
+        "x": {"nm": 180.5, "source": "record"},
+    }
+    three_d = {"dims": "3D", "family": "em", "modality_group": "FIB-SEM", "voxel_size_nm": {"z": 8, "y": 4, "x": None}}
+    assert voxel_size_json(three_d) == {"z": {"nm": 8.0, "source": "record"}, "y": {"nm": 4.0, "source": "record"}}
 
 
 async def test_read_stage_reduces_report(acts, server):  # read_stage registers what it read
@@ -651,6 +692,7 @@ async def test_read_stage_records_the_staged_and_raw_assets(acts, server):
         "ok": True,
     }
     assert (staged["binding_hash"], staged["harness_commit"], staged["env_digest"]) == (info.hash, "h" * 40, "d" * 64)
+    assert staged["plan_digest"] == acts._row(ROUND, U937)["plan_digest"] != ""
     raw = acts.registry.asset("raw", U937)
     assert {key: raw[key] for key in ("path", "files")} == {
         "path": str(acts.cfg.paths.raw_root / U937),
@@ -1172,11 +1214,11 @@ async def test_keep_marks_a_half_removed_artifact_missing(acts, keeper_server, m
 # -- milestone D: publish by rename, the status board, events, retire, the keeper's lifecycle signals
 
 
-def staged_into(directory: Path, **report) -> Path:
+def staged_into(directory: Path, artifact_id: str | None = None, **report) -> Path:
     """write_stage_json into a directory that may exist already (prepare_stage made it)."""
     if directory.exists():
         directory.rmdir()
-    staged = write_stage_json(directory)
+    staged = write_stage_json(directory, artifact_id=artifact_id)
     if report:
         (staged / "stage.json").write_text(json.dumps({**json.loads((staged / "stage.json").read_text()), **report}))
     return staged
@@ -1187,29 +1229,18 @@ async def test_read_stage_publishes_by_rename_and_reuses_an_existing_artifact(ac
     await acts.prepare_stage(7, ROUND, U937)
     final, building = staged_dir(acts, U937), acts._building_dir(ROUND, U937)
     assert building == final.parent / f".building-{final.name}-{job_key(7, ROUND, U937)}"
-    staged_into(building)
+    staged_into(building, final.name)
     assert (await acts.read_stage(ROUND, U937)).ok
     assert not building.exists() and (final / "stage.json").is_file()
-    assert "\n" not in (final / "stage.json").read_text()  # compact: it carries the sampled values
-    report = json.loads((final / "stage.json").read_text())
-    binding = acts.cfg.paths.state_dir / "rounds" / ROUND / "bindings" / f"{U937}.yaml"
-    assert report["artifact"] == {
-        "id": final.name,
-        "binding_hash": hashlib.sha256(binding.read_bytes()).hexdigest(),
-        "levels_key": "p256-l1-2-4",
-        "voxel_size_nm": {"y": 45.0718, "x": 45.0718},
-        "harness_commit": "h" * 40,
-        "env_digest": "d" * 64,
-    }
     assert acts.registry.asset("staged", final.name)["path"] == str(final)
     assert (await acts.read_stage(ROUND, U937)).ok  # a retry after the rename reads the published directory
     await acts.prepare_stage(7, ROUND, U937)  # staged again (a race, a lost registry row): the first copy wins
-    staged_into(building, volumes=[])
+    staged_into(building, final.name, volumes=[])
     result = await acts.read_stage(ROUND, U937)
     assert result.ok and result.volumes == 1 and not building.exists()
     assert json.loads((final / "stage.json").read_text())["artifact"]["id"] == final.name
     await acts.prepare_stage(7, ROUND, U937, 1)  # a rebuild of a degraded pyramid: the fresh build replaces it
-    staged_into(acts._building_dir(ROUND, U937, 1), volumes=[])
+    staged_into(acts._building_dir(ROUND, U937, 1), final.name, volumes=[])
     result = await acts.read_stage(ROUND, U937, 1)
     assert result.ok and result.volumes == 0 and not acts._building_dir(ROUND, U937, 1).exists()
     assert len(list(final.parent.glob(f".building-stale-{final.name}-*"))) == 1  # the broken one, for the sweep
@@ -1226,11 +1257,35 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
     assert acts.registry.asset("staged", staged_dir(acts, U937).name)["state"] == "partial"
     staged_into(staged_dir(acts, U937), ok=False)  # a failed build where milestone C staged in place
     (building / "stage.json").unlink()
-    staged_into(building)
+    staged_into(building, staged_dir(acts, U937).name)
     assert (await acts.read_stage(ROUND, U937)).ok  # the good build replaces it; the failed one is set aside
     assert json.loads((staged_dir(acts, U937) / "stage.json").read_text())["ok"] is True
     [aside] = staged_dir(acts, U937).parent.glob(".building-stale-*")
     assert json.loads((aside / "stage.json").read_text())["ok"] is False
+
+
+async def test_read_stage_refuses_a_foreign_artifact_id(acts, server):
+    """A build whose stage.json names another artifact is not published: it stays for the `.building-*` sweep."""
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    building, final = acts._building_dir(ROUND, U937), staged_dir(acts, U937)
+    staged_into(building, "f" * 16)
+    result = await acts.read_stage(ROUND, U937)
+    assert not result.ok and result.errors == [
+        f"stage.json artifact id {'f' * 16!r} is not the expected {final.name!r}"
+    ]
+    assert (building / "stage.json").is_file() and not final.exists()
+    assert acts.registry.asset("staged", final.name)["state"] == "partial"
+
+
+async def test_publish_does_not_rewrite_stage_json(acts, server):
+    """The harness writes the whole artifact block; the worker only renames the build."""
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    building = staged_into(acts._building_dir(ROUND, U937), staged_dir(acts, U937).name)
+    before = (building / "stage.json").read_bytes()
+    assert (await acts.read_stage(ROUND, U937)).ok
+    assert (staged_dir(acts, U937) / "stage.json").read_bytes() == before
 
 
 async def test_set_stage_writes_the_event(acts, server):
@@ -1366,7 +1421,7 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
 async def test_publish_reraises_a_failed_rename_when_nothing_was_published(acts, server, monkeypatch):
     await planned_and_bound(acts)
     await acts.prepare_stage(7, ROUND, U937)
-    staged_into(acts._building_dir(ROUND, U937))
+    staged_into(acts._building_dir(ROUND, U937), staged_dir(acts, U937).name)
 
     def refuse(src, dst):
         raise PermissionError(13, "read-only file system")
@@ -1382,7 +1437,7 @@ async def test_a_failed_build_beside_a_published_artifact_leaves_its_row(acts, s
     failure must not mark the published pyramid partial; submit's `staging` mark is undone."""
     await planned_and_bound(acts)
     await acts.prepare_stage(7, ROUND, U937)
-    staged_into(acts._building_dir(ROUND, U937))
+    staged_into(acts._building_dir(ROUND, U937), staged_dir(acts, U937).name)
     assert (await acts.read_stage(ROUND, U937)).ok
     artifact = staged_dir(acts, U937).name
     acts.registry.put_asset("staged", artifact, {"state": "staging", "ok": False, "job": "j9"})  # as submit marks it

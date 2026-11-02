@@ -12,7 +12,8 @@ from mia_buffers.register import buffer_config, normalize_bounds, recipe_for, re
 from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed, spec_with  # noqa: F401  (fixtures)
 
 
-def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3):
+def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3, artifact_id=None):
+    """A harness-shaped stage.json in a new directory; with `artifact_id`, the `artifact` block the harness writes."""
     staged.mkdir(parents=True)
     levels = [
         {
@@ -34,7 +35,20 @@ def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3)
         "labels": labels or {},
         "levels": levels,
     }
-    (staged / "stage.json").write_text(json.dumps({"ok": True, "volumes": [volume], "errors": []}))
+    report: dict = {"ok": True, "volumes": [volume], "errors": []}
+    if artifact_id is not None:
+        report["artifact"] = {
+            "id": artifact_id,
+            "levels_key": "p256-l1-2-4",
+            "binding_hash": "b" * 64,
+            "plan_digest": "p" * 64,
+            "harness_commit": "h" * 40,
+            "env_digest": "d" * 64,
+            "snippets_commit": "s" * 40,
+            "record": staged.parent.name,
+            "record_commit": "c" * 40,
+        }
+    (staged / "stage.json").write_text(json.dumps(report))
     return staged
 
 
