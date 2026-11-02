@@ -45,6 +45,7 @@ harness:
   dir: /path/to/mia-snippets-checkout     # pinned per round by commit + pixi.lock digest
 limits:
   job_bytes: 5e9
+  # stage_bytes: 2e9   # cap on one staged artifact's uncompressed planned bytes; defaults to job_bytes
   job_walltime_min: 120
   fetch_bytes: 50e9
   fetch_walltime_min: 480
