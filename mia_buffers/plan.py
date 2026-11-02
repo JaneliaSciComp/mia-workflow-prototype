@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ import yaml
 from .assume import channel_recipes, voxel_size
 from .select import Decision, decide_all
 from .spec import Spec
-from .specmap import Facts, facts
+from .specmap import ArrayFacts, Facts, facts
 
 MANUAL_DROP_NOTE = "download_method other: needs a manual drop (spec v0.4 §3)"
 UNREADABLE = "_unreadable"  # set by cli.load_records on a file that is not a YAML mapping
@@ -155,7 +156,11 @@ class Plan:
             planned = sum(sum(row.planned.values()) for row in pool)
             requested = sum(sum((row.plan_rule or {}).get("samples", {}).values()) for row in pool)
             total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
-            lines += ["", f"planned {planned} of requested {requested} samples; ~{total_bytes} uncompressed"]
+            lines += [
+                "",
+                f"planned {planned} of requested {requested} samples; ~{total_bytes} uncompressed "
+                "(planned is an expectation over each record's items)",
+            ]
         if self.excluded:
             lines += [
                 "",
@@ -250,11 +255,16 @@ def positions(f: Facts, spec: Spec) -> int:
         if "z" in patch:
             depth = (array.extent_z or 0) // patch["z"]  # 3D: how many patch-deep slabs the volume holds
         else:
-            # ponytail: a 2D record counts items or planes, whichever the enricher filled in (U937: 25 fields as
-            # n_items and as t), never both; a record with both > 1 undercounts until the stage job reports planes.
-            depth = max(f.n_items, array.planes) // f.n_items if array.planes > 1 else 1
+            depth = _depth_2d(f, array)
         total += f.n_items * depth * tiles
     return total
+
+
+def _depth_2d(f: Facts, array: ArrayFacts) -> int:
+    """Planes per item of a 2D record's raw array."""
+    # ponytail: a 2D record counts items or planes, whichever the enricher filled in (U937: 25 fields as
+    # n_items and as t), never both; a record with both > 1 undercounts until the stage job reports planes.
+    return max(f.n_items, array.planes) // f.n_items if array.planes > 1 else 1
 
 
 def _group_key(row: Row, level: str) -> str:
@@ -320,8 +330,9 @@ def plan_digest(rule: dict) -> str:
 
 
 def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]:
-    """Estimated samples per split over the record's raw arrays, the byte upper bound, and whether a shape was
-    missing (that array then counts the full request)."""
+    """Expected samples per split over every volume the record stages, the byte upper bound, and whether a shape
+    was missing (that array then counts the full request). The registry puts each one-plane volume into one split by
+    a seeded draw weighted by the fractions, so across the record's items the fractions hold in expectation."""
     samples: dict[str, int] = rule["samples"]
     footprint = rule["patch"] * max(rule["levels"])
     split = row.split or {}
@@ -330,11 +341,16 @@ def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]
     for array in f.raw_arrays:
         if array.extent_y and array.extent_x:
             tiles = (array.extent_y // footprint) * (array.extent_x // footprint)
+            three_d = (f.dims or "").startswith("3D")
+            planes = f.n_items * (array.planes if three_d else _depth_2d(f, array))  # as positions() folds n_items
             if split.get("policy") == "holdout":
-                planes = {name: (array.planes if name == "test" else 0) for name in samples}
+                share = {name: (1.0 if name == "test" else 0.0) for name in samples}
             else:
-                planes = split_counts(array.planes, split.get("fractions", {}))
-            counts = {name: min(wanted, tiles * planes.get(name, 0)) for name, wanted in samples.items()}
+                share = {name: split.get("fractions", {}).get(name, 0.0) for name in samples}
+            # 1e-9: 0.7 × 10 is 6.999…, an expectation of 7
+            counts = {
+                name: min(wanted, math.floor(tiles * planes * share[name] + 1e-9)) for name, wanted in samples.items()
+            }
         else:
             counts, unknown = dict(samples), True
         itemsize = ITEMSIZE.get(array.dtype or "", DEFAULT_ITEMSIZE)

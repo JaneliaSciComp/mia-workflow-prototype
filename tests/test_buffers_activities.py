@@ -195,18 +195,16 @@ async def test_plan_reads_the_registry_and_syncs_the_ref_on_demand(acts, server,
         return await real_sync(cfg_, gh, registry, ref)
 
     monkeypatch.setattr(cli, "catalog_sync", counting_sync)
-    # mia-data is still working on BCSS: not prepared. (U937 stays: its planes supply every split; BCSS alone has
-    # one plane per image, all in train, which is a plan error.)
-    acts.registry.put_dataset(BCSS, state="in-progress")
+    acts.registry.put_dataset(U937, state="in-progress")  # mia-data is still working on it: not prepared
     pins = await admitted(acts)
     spec_path = acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml"
     spec_path.write_text(spec_path.read_text().replace("auto_approve: false", "auto_approve: true"))
     assert acts.registry.catalogs() == []
     result = await acts.plan(7, ROUND, pins)
     assert synced == [REF] and [catalog["ref"] for catalog in acts.registry.catalogs()] == [REF]
-    assert [dataset.record for dataset in result.pool] == [U937]
+    assert [dataset.record for dataset in result.pool] == [BCSS]
     plan_text = (acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json").read_text()
-    row = next(row for row in json.loads(plan_text)["rows"] if row["id"] == BCSS)
+    row = next(row for row in json.loads(plan_text)["rows"] if row["id"] == U937)
     assert row["rule"] == "not prepared" and not row["admitted"]
     assert result.plan_hash == plan_hash(plan_text) and result.auto_approve is True
     [planned] = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]  # no plan-review stage writes it
