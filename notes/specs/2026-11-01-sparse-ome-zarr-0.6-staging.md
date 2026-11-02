@@ -83,7 +83,7 @@ job; it is an existing limitation, recorded in the frictions note, not something
 The dataset weights are **not** in the rule. The sampler applies them at draw time as it does today: pick a volume
 by weight, then a sample uniformly from that volume's list. The served distribution follows the weights whatever
 the list lengths are; `samples` only sets how many distinct samples each volume contributes. A volume with planes
-in a split contributes exactly `samples[split]` for it (overlap allowed, as train overlap is unlimited today).
+in a split contributes exactly `min(samples[split], capacity)` for it (§2.5; no two samples of a split overlap).
 The planner prints the pool total and a byte estimate so the budget is visible at the plan gate.
 
 > **Call (yours to confirm, §9 Q6):** train is served from a finite planned list, drawn with replacement. Today
@@ -153,16 +153,16 @@ so instance labels fail it by design; §6 makes the `strict_*` results advisory.
 
 ### 2.5 When a volume cannot supply the requested samples
 
-A draw never fails outright: centres may overlap, and the fit rule guarantees at least one position. What a small
-volume cannot supply is **distinct** samples, and a frozen val or test list full of near-duplicates would
-overstate the evaluation set. So each volume has a per-split **capacity**: the number of non-overlapping coarsest
-tiles times the planes it has in that split (the planner's `positions` measure, per volume and per split). The
-planned count is `min(samples[split], capacity)`; the cap is a count heuristic, not a diversity guarantee. For
-**val and test** a candidate is also rejected when it shares more than `OVERLAP_MAX` (0.25, `mia_harness.sample`,
-the rule the review crops already use) of its coarsest footprint with an earlier candidate of the same volume
-and plane, and the sequence keeps drawing until the count is met or a draw budget (`8 × count`) is spent. Train
-candidates may overlap freely, as train does today. A volume with no planes in a split contributes nothing to
-it.
+The fit rule guarantees at least one position. What a small volume cannot supply is **distinct** samples, and a
+frozen val or test list full of near-duplicates would overstate the evaluation set. So each volume has a per-split
+**capacity**: the number of non-overlapping coarsest tiles times the planes it has in that split (the planner's
+`positions` measure, per volume and per split), and the planned count is `min(samples[split], capacity)`. The
+derivation fills it without overlap by construction (2026-11-02, replacing the earlier `OVERLAP_MAX` rejection
+rule): each split lays one grid of coarsest footprints over every plane it holds, at a random offset drawn once
+per split (a multiple of the coarsest factor), shuffles the (plane, tile) cells with the split's `Random` and
+takes the first `count`. Finer levels are centred inside their coarsest footprint, so no two samples of a split
+share a pixel at any level, train included; a larger count extends a smaller count's list. A volume with no
+planes in a split contributes nothing to it.
 
 The planner applies the same rule to the catalog shape and reports it at the plan gate, in `plan.md`: per record,
 `planned / requested` per split with the reason (`capacity`, `no planes in split`), and a pool total
@@ -290,8 +290,10 @@ them and rewrites `stage.json` from the same model. The digests describe the fin
   candidates run out first the list is shorter and `/split` says so (`size` = what exists, `exhausted: true`).
 - `BufferDataset.__getitem__` lets `NotStaged` propagate (the loader dies naming the chunk keys). It is a staging
   bug by construction; skipping and redrawing would hide it, and a placeholder is the fill value by another name.
-- `PUT volumes` **replaces** that volume's candidates (a retry or a rebuild cannot duplicate them); frozen
-  entries already drawn from an earlier registration of the same volume stay as they are.
+- `PUT volumes` **replaces** that volume's candidates (a retry or a rebuild cannot duplicate them). A re-put under
+  the same artifact with the same candidates keeps the frozen lists; one that changes the artifact or the candidates
+  clears the buffer's frozen lists for every split (a frozen row indexes the candidates it was drawn from), and the
+  response says how many rows went (`frozen_cleared`). Consumers rebuild their lists on the next read.
 - Planner: the `sampling.plan` block, per-row counts, `plan_digest` in `plan.json`, the byte estimate in `plan.md`.
 - The page is unchanged; it reads nothing new.
 

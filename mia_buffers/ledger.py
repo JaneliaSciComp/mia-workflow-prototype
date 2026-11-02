@@ -138,6 +138,12 @@ class Ledger:
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
             self._volumes.pop(buffer, None)
 
+    def clear_frozen(self, buffer: str) -> int:
+        """Drop the buffer's frozen eval lists (every split); returns the rows removed. Called when a volume's
+        candidates change, since a frozen row names a candidate by index into the volume it was drawn from."""
+        with self._transaction() as db:
+            return int(db.execute("DELETE FROM frozen WHERE buffer = ?", (buffer,)).rowcount)
+
     def volumes(self, buffer: str) -> list[Volume]:
         """The buffer's volumes by id, parsed once per write (every `next` and `split` request reads them); a new list
         each call, so a caller may replace entries."""

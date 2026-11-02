@@ -181,6 +181,23 @@ def test_re_put_replaces_candidates_and_keeps_frozen(tmp_path):
     }
 
 
+def test_re_put_under_a_new_artifact_clears_frozen(tmp_path):
+    """A rebuild changes the candidates a frozen row indexes, so the lists start over; a same-artifact re-put keeps
+    them (test_re_put_replaces_candidates_and_keeps_frozen)."""
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    planned = {**body(), "samples": {"val": CANDS}, "artifact": "aaaa"}
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload=planned)[1]["frozen_cleared"] == 0
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    first = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert len(first["descriptors"]) == 4
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload=planned)[1]["frozen_cleared"] == 0
+    rebuilt = {**planned, "artifact": "bbbb", "samples": {"val": CANDS[:2]}}
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload=rebuilt)[1]["frozen_cleared"] == 4
+    again = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert again["size"] == 2 and {d["candidate"] for d in again["descriptors"]} == {0, 1}
+
+
 def test_empty_split_is_204_and_bad_bodies_are_422(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
