@@ -547,7 +547,8 @@ async def test_prepare_stage_refuses_a_row_without_a_sample_rule(acts, monkeypat
     await planned_and_bound(acts)
     row = {key: value for key, value in acts._row(ROUND, U937).items() if key != "plan_rule"}
     monkeypatch.setattr(acts, "_row", lambda round_id, record: row)
-    with pytest.raises(ApplicationError, match="plan row has no sample rule"):  # a programming error: permanent
+    stale = r"plan row has no sample rule \(planned before sparse staging\): re-plan the buffer"
+    with pytest.raises(ApplicationError, match=stale):  # a plan from before the deploy: permanent, re-plan
         await acts.prepare_stage(7, ROUND, U937)
 
 

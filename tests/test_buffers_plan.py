@@ -320,8 +320,10 @@ def test_planned_counts_are_capped_by_capacity_and_reported(plan_2d):
     assert plan_2d.rows_by_id[U937].planned_bytes == 3 * 100 * 4 * 256 * 256 * 3 * 2
     md = plan_2d.render_markdown()
     assert "planned" in md and "of requested" in md
-    assert "| train 80 / 1000 · val 10 / 20 · test 10 / 20 |" in md
-    assert "planned 1004 of requested 2080 samples; ~" in md and "expectation over each record's items" in md
+    # requested is per volume, planned summed over them: U937 asks 1000 / 20 / 20 of each of its 25 items
+    assert plan_2d.rows_by_id[U937].volumes == 25 and plan_2d.rows_by_id[BCSS].volumes == 151
+    assert "| train 80 / 25000 · val 10 / 500 · test 10 / 500 |" in md
+    assert "planned 1004 of requested 183040 samples; ~" in md and "expectation over each record's items" in md
     assert plan_2d.valid
 
 
@@ -329,6 +331,31 @@ def test_split_unsupplied_by_every_record_is_an_error(spec_2d, records_single_pl
     plan = build_plan(spec_2d, "h", None, records_single_plane)  # every record: one plane, fractions put all in train
     assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
     assert not any(e.startswith("split 'train'") for e in plan.errors)
+
+
+def test_planned_cuts_planes_exactly_like_the_harness(spec_2d):
+    # one 5-plane 4096² volume: 4×4 tiles; split_counts(5, .8/.1/.1) gives train 4, val 1 (the tie), test 0 planes
+    five_planes = [(path, record) for path, record in records() if record["id"] == U937]
+    record = five_planes[0][1]
+    record["data"]["n_items"] = 1
+    record["technical"]["arrays"] = [{**record["technical"]["arrays"][0], "shape": [5, 3, 4096, 4096]}]
+    plan = build_plan(spec_2d, "h", None, five_planes)
+    assert plan.rows_by_id[U937].planned == {"train": min(1000, 16 * 4), "val": 16, "test": 0}
+    assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
+    assert not any(e.startswith(("split 'train'", "split 'val'")) for e in plan.errors)
+
+
+def test_plan_digest_golden():
+    """The cross-repo pin: the harness's PlanRule.digest() of the same rule must give this hex."""
+    rule = {
+        "seed": 0,
+        "patch": 256,
+        "levels": [1, 2, 4],
+        "samples": {"train": 1000, "val": 20, "test": 20},
+        "split": {"policy": "fractions", "fractions": {"train": 0.8, "val": 0.1, "test": 0.1}, "seed": 0},
+        "channel_recipe": None,
+    }
+    assert plan_digest(rule) == "2827e3d249deb0a8bb8ecc10cb579ce0f37c9a4d2667f04af2914388bc04ae74"
 
 
 def test_raw_array_without_extents_counts_the_full_request(spec_2d):

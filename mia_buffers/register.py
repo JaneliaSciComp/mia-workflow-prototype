@@ -169,6 +169,12 @@ def _is_candidate(candidate: object) -> bool:
     )
 
 
+def _sparse(volume: dict) -> bool:
+    """A sparse OME-Zarr 0.6 volume: its levels say the staged box (`origin`, `extent`), a 0.5 one's never do."""
+    levels = volume["levels"]
+    return bool(levels) and ("origin" in levels[0] or "extent" in levels[0])
+
+
 def volume_bodies(
     row: dict,
     staged: Path,
@@ -202,6 +208,9 @@ def volume_bodies(
     for index, volume in enumerate(report.get("volumes") or []):
         if (why := check_volume(volume)) is not None:
             refuse(index, volume, why)
+        elif _sparse(volume) and not any(volume.get("samples", {}).values()):
+            # a harness regression must not turn a staged box into uniform centres over the whole volume
+            refuse(index, volume, "0.6 volume without samples")
         elif scope != "patch" and (why := check_sample(volume.get("intensity_sample"), _channels(volume))):
             refuse(index, volume, f"{why}; re-stage with the current harness for normalize.scope {scope}")
         elif scope == "dataset" and volumes and _channels(volume) != _channels(volumes[0]):

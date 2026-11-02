@@ -107,6 +107,21 @@ def test_volume_bodies_carry_samples(tmp_path, spec_2d):  # noqa: F811
     assert volume_bodies(ROW, staged, spec_2d)[0][1]["samples"] == {}  # a 0.5 artifact: none, drawn uniformly
 
 
+@pytest.mark.parametrize("samples", [None, {}, {"train": [], "val": []}])
+def test_sparse_volume_without_samples_is_refused(tmp_path, spec_2d, samples):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    for level in report["volumes"][0]["levels"]:  # the 0.6 marker: the staged box of each level
+        level.update(origin=[0, 0, 0, 0], extent=level["shape"])
+    if samples is not None:
+        report["volumes"][0]["samples"] = samples
+    refused: dict[str, str] = {}
+    assert volume_bodies(ROW, staged, spec_2d, report, refused) == []
+    assert refused == {"u937/v0.zarr": "0.6 volume without samples"}
+    report["volumes"][0]["samples"] = {"train": [], "val": [GOOD_CANDIDATE]}  # one candidate anywhere is enough
+    assert [vid for vid, _ in volume_bodies(ROW, staged, spec_2d, report)] == ["u937/v0.zarr"]
+
+
 GOOD_CANDIDATE = {"plane": {"z": 0}, "centre_nm": [1.0, 2.0], "levels": [1, 2, 4], "patch": 256, "starts": {}}
 BAD_SAMPLES = [
     [],

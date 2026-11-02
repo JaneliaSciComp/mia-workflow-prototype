@@ -754,7 +754,9 @@ class Activities:
         afterwards (a mount must). A rebuild gets its own (`stage-<record>-r<n>`). Returns the workspace path."""
         row = self._row(round_id, record)
         if not row.get("plan_rule"):
-            raise ValueError(f"{record}: plan row has no sample rule")
+            raise ValueError(
+                f"{record}: plan row has no sample rule (planned before sparse staging): re-plan the buffer"
+            )
         pins = self._pins(round_id)
         plan_rule = {
             "artifact_id": self._artifact(round_id, record),

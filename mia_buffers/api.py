@@ -525,7 +525,8 @@ class BufferService:
         """A window of the split's frozen list, appended to and never reordered; a planned candidate is listed at most
         once. `exhausted` means the list is capped by the candidates, shorter than the configured size: it is set from
         the first read on (every drawable volume has samples and they number fewer than the size), with `size` the
-        capped length, so a client sizes itself from any read."""
+        capped length, so a client sizes itself from any read. `size` never drops below the rows already frozen: a
+        volume flagged missing later takes its candidates out of the cap, never its listed rows out of reach."""
         config = self._serving(buffer)
         self._consumer(buffer, query)
         start, n = _int(query, "from", 0, low=0, high=10**9), _int(query, "n", 1, low=1, high=MAX_N)
@@ -540,9 +541,6 @@ class BufferService:
             return self._no_content(buffer)
         if candidates is not None and candidates < size:  # capped by the candidates, shorter than the configured size
             size, exhausted = candidates, True
-            if start >= size:
-                raise HttpError(416, f"from {start} is past the {split} list of {size}, every candidate listed")
-        end = min(start + n, size)
         patch, levels, channels = config.patch, config.levels, config.channels
         # ponytail: the replay reproduces the frozen prefix only while the volumes' candidates are those it was drawn
         # from; a re-PUT with other candidates keeps the listed rows (never re-drawn) but draws the rest from a
@@ -550,6 +548,11 @@ class BufferService:
         # centres over a staged box. Freeze the candidate lists per list if a re-planned record must be re-registered.
         with self._lock:
             frozen = self.ledger.frozen(buffer, split)
+            # a frozen row stays addressable: a volume flagged missing drops its candidates from `capacity`, not rows
+            size = max(size, len(frozen))
+            if start >= size:
+                raise HttpError(416, f"from {start} is past the {split} list of {size}, every candidate listed")
+            end = min(start + n, size)
             if len(frozen) < end:
                 rng = random.Random(f"{config.seed}:{split}")
                 used: set[tuple[str, int]] = set()

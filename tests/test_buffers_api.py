@@ -131,6 +131,24 @@ def test_frozen_list_stops_when_candidates_run_out(tmp_path):
     assert call(s, "GET", "/buffers/b/split/val", {"from": "2", "n": "1", "consumer": cid})[0] == 416
 
 
+def test_frozen_rows_stay_readable_when_a_volume_goes_missing(tmp_path):
+    staged = tmp_path / "staged"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
+    call(s, "PUT", "/buffers/b", payload=CFG)  # val list of 4
+    for vid, candidates in (("a", CANDS[:2]), ("c", CANDS[2:])):
+        (staged / vid / "v0.zarr").mkdir(parents=True)
+        path = str(staged / vid / "v0.zarr")
+        call(s, "PUT", f"/buffers/b/volumes/{vid}", payload={**body(vid), "path": path, "samples": {"val": candidates}})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    whole = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert len(whole["descriptors"]) == 4 and whole["size"] == 4
+    shutil.rmtree(staged / "c")
+    assert call(s, "GET", "/buffers/b/status")[1]["missing"] == ["c"]  # its 2 candidates leave `capacity`
+    status, tail, _ = call(s, "GET", "/buffers/b/split/val", {"from": "2", "n": "2", "consumer": cid})
+    assert status == 200 and tail["descriptors"] == whole["descriptors"][2:] and tail["size"] == 4
+    assert call(s, "GET", "/buffers/b/split/val", {"from": "4", "n": "1", "consumer": cid})[0] == 416
+
+
 def test_zero_weight_candidates_end_the_list_without_an_error(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)

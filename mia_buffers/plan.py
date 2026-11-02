@@ -74,6 +74,7 @@ class Row:
     plan_digest: str = ""
     planned: dict[str, int] = field(default_factory=dict)  # estimated samples per split over the raw arrays
     planned_bytes: int = 0  # upper bound on the staged chunk bytes the planned samples touch
+    volumes: int = 0  # items × raw arrays: the volumes the request applies to, each capped on its own; pool rows only
 
     @property
     def in_pool(self) -> bool:
@@ -154,7 +155,7 @@ class Plan:
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
         if pool:
             planned = sum(sum(row.planned.values()) for row in pool)
-            requested = sum(sum((row.plan_rule or {}).get("samples", {}).values()) for row in pool)
+            requested = sum(sum((row.plan_rule or {}).get("samples", {}).values()) * row.volumes for row in pool)
             total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
             lines += [
                 "",
@@ -189,11 +190,11 @@ def _voxel_cell(row: Row) -> str:
 
 
 def _planned_cell(row: Row) -> str:
-    """`train 10 / 1000 · val 3 / 20 · …`: planned against requested samples per split."""
+    """`train 10 / 1000 · val 3 / 20 · …`: planned against requested samples per split, both over all its volumes."""
     if not row.in_pool or row.plan_rule is None:
         return ""
     samples = row.plan_rule["samples"]
-    return " · ".join(f"{name} {row.planned.get(name, 0)} / {samples[name]}" for name in samples)
+    return " · ".join(f"{name} {row.planned.get(name, 0)} / {samples[name] * row.volumes}" for name in samples)
 
 
 def _human_bytes(size: int) -> str:
@@ -313,7 +314,7 @@ def split_counts(n: int, fractions: dict[str, float]) -> dict[str, int]:
 
 def plan_rule(row: Row, spec: Spec) -> dict:
     """The record-local rule the harness's `PlanRule` mirrors: same keys and value types, never a weight or total."""
-    patch = spec.patch_for(row.dims or "") or {}
+    patch = spec.patch_for("2D") or {}  # as the levels key and the served config.patch: the square 2D crop
     return {
         "seed": spec.sampling.seed,
         "patch": int(patch.get("y", 0)),
@@ -334,9 +335,10 @@ def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]
     caps a staged volume (`min(samples[split], capacity)`); the byte figure is an upper bound given those counts;
     the flag says an array had no shape (each of its items then counts the full request).
 
-    A volume with at least one plane per split has its planes cut by the fractions; one with fewer puts each plane
-    in one split with probability `fraction` (the registry's and the harness's draw), so the cap applies before the
-    fraction. The planner counts t × z planes while the harness counts z only."""
+    A volume with at least one plane per split gets exactly `split_counts(planes, fractions)` planes per split (the
+    harness's `split_planes`; only which planes is hashed), so 5 planes at .8/.1/.1 give test none; one with fewer
+    puts each plane in one split with probability `fraction` (the registry's and the harness's draw), so the cap
+    applies before the fraction. The planner counts t × z planes while the harness counts z only."""
     samples: dict[str, int] = rule["samples"]
     footprint = rule["patch"] * max(rule["levels"])
     split = row.split or {}
@@ -353,8 +355,8 @@ def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]
                 fraction = fractions.get(name, 0.0)
                 if held_out:
                     per_item[name] = min(wanted, tiles * planes) if name == "test" else 0
-                elif planes >= len(fractions):
-                    per_item[name] = min(wanted, tiles * planes * fraction)
+                elif planes >= len(fractions):  # the harness's exact cut: split_counts planes go to this split
+                    per_item[name] = min(wanted, tiles * split_counts(planes, fractions).get(name, 0))
                 else:
                     per_item[name] = fraction * min(wanted, tiles * planes)
         else:
@@ -501,6 +503,7 @@ def build_plan(
             row.plan_rule = plan_rule(row, spec)
             row.plan_digest = plan_digest(row.plan_rule)
             row.planned, row.planned_bytes, unknown = _planned(row, facts_by_id[row.id], row.plan_rule)
+            row.volumes = row.n_items * len(facts_by_id[row.id].raw_arrays)
             if unknown:
                 row.notes.append(UNKNOWN_SHAPE_NOTE)
     errors = _policy_errors(pool, spec)
