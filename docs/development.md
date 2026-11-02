@@ -123,11 +123,13 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    hand:
 
    ```
-   plan-rule.json    {"artifact": "<artifact id>", "levels": "<levels key>", "harness_commit": "<sha>",
+   plan-rule.json    {"artifact_id": "<artifact id>", "levels_key": "<levels key>", "harness_commit": "<sha>",
                       "env_digest": "<digest>", "rule": {<the plan row's plan_rule>}}
    voxel_size.json   {"x": {"nm": 8.0, "source": "record"}, "y": {...}, "z": {"nm": 8.0, "source": "assumed",
-                      "basis": "<why>"}}      # source: record | assumed | synthetic; basis is optional
+                      "basis": "<why>"}}      # source: record | assumed | synthetic | file; basis is optional
    ```
+
+   `file` is the harness's own (it reads the size from the image file); the worker never writes it.
 
    The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config `limits.stage_bytes`, default
    `limits.job_bytes`).
@@ -287,7 +289,10 @@ builds untouched for `quota.hold_hours`.
 
 **Deployment.** Deploy with no round in sourcing. An in-flight round's pinned harness does not know `--plan`, and builds
 in flight under the old job spec are refused (no `artifact` block, or a foreign id), so drain first. The mia-snippets
-PR that adds `--plan` must be merged and `harness.dir` fast-forwarded before any new round.
+PR that adds `--plan` must be merged and `harness.dir` fast-forwarded before any new round. A buffer serving from a
+round planned before this deploy cannot rebuild a degraded pyramid: the round's plan rows have no sample rule and its
+pinned harness does not know `--plan` (`prepare_stage` fails with "planned before sparse staging"). Re-plan such
+buffers (`go`) after the deploy.
 
 **The recipe pin.** `PUT /buffers/<id>` carries `recipe` (tensorizer, params, `harness_commit`, `env_digest`) and
 `plan_hash`. `BufferDataset` compares the recipe's `harness_commit` with its checkout (`MIA_HARNESS_COMMIT`, else
