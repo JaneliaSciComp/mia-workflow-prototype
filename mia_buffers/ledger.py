@@ -82,6 +82,7 @@ def _volume_from(data: dict) -> Volume:
     data["levels"] = tuple(Level(**{**level, "shape": tuple(level["shape"])}) for level in data["levels"])
     data["shape"] = tuple(data["shape"])
     data["split_planes"] = {split: tuple(planes) for split, planes in data["split_planes"].items()}
+    data["samples"] = {split: tuple(candidates) for split, candidates in data.get("samples", {}).items()}
     return Volume(**data)
 
 
@@ -95,6 +96,9 @@ class Ledger:
         self._path = path
         self._lock = threading.Lock()
         self._retiring = threading.Lock()  # one retire at a time: two would write the same archive's temp file
+        # buffer -> its parsed volumes, dropped on every write to the volumes table (put_volume, set_volume_missing)
+        # ponytail: whole-buffer cache; per-volume rows if a buffer ever holds thousands of volumes
+        self._volumes: dict[str, list[Volume]] = {}
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
@@ -132,11 +136,16 @@ class Ledger:
                 (buffer, volume.id, json.dumps(dataclasses.asdict(volume))),
             )
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
+            self._volumes.pop(buffer, None)
 
     def volumes(self, buffer: str) -> list[Volume]:
+        """The buffer's volumes by id, parsed once per write (every `next` and `split` request reads them); a new list
+        each call, so a caller may replace entries."""
         with self._lock:
-            rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
-        return [_volume_from(json.loads(row[0])) for row in rows]
+            if buffer not in self._volumes:
+                rows = self._db.execute("SELECT data FROM volumes WHERE buffer = ? ORDER BY id", (buffer,)).fetchall()
+                self._volumes[buffer] = [_volume_from(json.loads(row[0])) for row in rows]
+            return list(self._volumes[buffer])
 
     def set_volume_missing(self, buffer: str, volume_id: str, missing: bool, path: str) -> None:
         """Set the flag only while the volume is still registered at `path`, the one stat'ed: a volume re-registered
@@ -147,6 +156,7 @@ class Ledger:
                 "AND json_extract(data, '$.path') = ?",
                 (json.dumps(missing), buffer, volume_id, path),
             )
+            self._volumes.pop(buffer, None)
 
     # --- a buffer's status board, lifecycle events and summary: what the page shows -------------
 

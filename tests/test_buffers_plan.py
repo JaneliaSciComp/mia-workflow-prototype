@@ -1,10 +1,22 @@
 import copy
+import hashlib
 from pathlib import Path
 
 import pytest
 import yaml
 
-from mia_buffers.plan import NOT_PREPARED, Fit, Plan, build_plan, fit, positions, split_counts, weights
+from mia_buffers.plan import (
+    NOT_PREPARED,
+    UNKNOWN_SHAPE_NOTE,
+    Fit,
+    Plan,
+    build_plan,
+    fit,
+    plan_digest,
+    positions,
+    split_counts,
+    weights,
+)
 from mia_buffers.spec import Spec, load_spec
 from mia_buffers.specmap import Facts, facts
 
@@ -252,3 +264,118 @@ def test_rows_carry_the_split_policy(spec_2d):
 def test_stratify_by_is_a_plan_error(spec_2d):
     plan = build_plan(spec_with(spec_2d, **{"splits.stratify_by": ["modality"]}), "h", None, records())
     assert "splits.stratify_by is not implemented; remove it" in plan.errors
+
+
+@pytest.fixture
+def plan_2d(spec_2d) -> Plan:
+    return build_plan(spec_2d, "h", None, records())
+
+
+@pytest.fixture
+def records_single_plane() -> list[tuple[str, dict]]:
+    """The catalog with every record cut to one item and every raw array to one plane (t and z of 1): one plane
+    lands in one split, so the expectation of val and test is under one sample."""
+    single = records()
+    for _, record in single:
+        record.setdefault("data", {})["n_items"] = 1
+        for array in (record.get("technical") or {}).get("arrays") or []:
+            if array.get("role") == "raw" and array.get("axes") and array.get("shape"):
+                sizes = zip(array["axes"], array["shape"], strict=True)
+                array["shape"] = [1 if axis in "tz" else size for axis, size in sizes]
+    return single
+
+
+def test_rows_carry_a_record_local_rule_and_digest(plan_2d, spec_2d):
+    row = next(r for r in plan_2d.rows if r.in_pool)
+    assert row.plan_rule is not None
+    assert set(row.plan_rule) == {"seed", "patch", "levels", "samples", "split", "channel_recipe"}
+    assert row.plan_rule["samples"] == spec_2d.sampling.plan.samples and "weight" not in row.plan_rule
+    assert row.plan_digest == plan_digest(row.plan_rule) and len(row.plan_digest) == 64
+    other = next(r for r in plan_2d.rows if r.in_pool and r.id != row.id)
+    assert (row.plan_digest == other.plan_digest) == (row.plan_rule == other.plan_rule)
+    assert row.rule == "admitted"  # the selection rule stays a string beside the sample rule
+
+
+def test_rule_json_matches_the_harness_dump(plan_2d):
+    row = plan_2d.rows_by_id[U937]
+    assert (
+        row.plan_digest
+        == hashlib.sha256(
+            b'{"channel_recipe":null,"levels":[1,2,4],"patch":256,'
+            b'"samples":{"test":20,"train":1000,"val":20},'
+            b'"seed":0,"split":{"fractions":{"test":0.1,"train":0.8,"val":0.1},"policy":"fractions","seed":0}}'
+        ).hexdigest()
+    )
+
+
+def test_planned_counts_are_capped_by_capacity_and_reported(plan_2d):
+    row = next(r for r in plan_2d.rows if r.in_pool)
+    assert row.plan_rule is not None
+    assert all(row.planned[s] <= row.plan_rule["samples"][s] for s in row.planned) and row.planned_bytes > 0
+    # BCSS: 151 one-plane images of 2467×3394, 1024 px coarsest footprint → 2×3 tiles; each image lands whole in
+    # one split, so per item 6 samples × fraction: 151 × 4.8 / 0.6 / 0.6
+    assert plan_2d.rows_by_id[BCSS].planned == {"train": 724, "val": 90, "test": 90}
+    # U937: 25 planes of 2048×2048 (n_items and t count the same fields) → 2×2 tiles; 100 × 0.8 / 0.1 / 0.1
+    assert plan_2d.rows_by_id[U937].planned == {"train": 80, "val": 10, "test": 10}
+    assert plan_2d.rows_by_id[U937].planned_bytes == 3 * 100 * 4 * 256 * 256 * 3 * 2
+    md = plan_2d.render_markdown()
+    assert "planned" in md and "of requested" in md
+    # requested is per volume, planned summed over them: U937 asks 1000 / 20 / 20 of each of its 25 items
+    assert plan_2d.rows_by_id[U937].volumes == 25 and plan_2d.rows_by_id[BCSS].volumes == 151
+    assert "| train 80 / 25000 · val 10 / 500 · test 10 / 500 |" in md
+    assert "planned 1004 of requested 183040 samples; ~" in md and "expectation over each record's items" in md
+    assert plan_2d.valid
+
+
+def test_split_unsupplied_by_every_record_is_an_error(spec_2d, records_single_plane):
+    plan = build_plan(spec_2d, "h", None, records_single_plane)  # every record: one plane, fractions put all in train
+    assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
+    assert not any(e.startswith("split 'train'") for e in plan.errors)
+
+
+def test_planned_cuts_planes_exactly_like_the_harness(spec_2d):
+    # one 5-plane 4096² volume: 4×4 tiles; split_counts(5, .8/.1/.1) gives train 4, val 1 (the tie), test 0 planes
+    five_planes = [(path, record) for path, record in records() if record["id"] == U937]
+    record = five_planes[0][1]
+    record["data"]["n_items"] = 1
+    record["technical"]["arrays"] = [{**record["technical"]["arrays"][0], "shape": [5, 3, 4096, 4096]}]
+    plan = build_plan(spec_2d, "h", None, five_planes)
+    assert plan.rows_by_id[U937].planned == {"train": min(1000, 16 * 4), "val": 16, "test": 0}
+    assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
+    assert not any(e.startswith(("split 'train'", "split 'val'")) for e in plan.errors)
+
+
+def test_plan_digest_golden():
+    """The cross-repo pin: the harness's PlanRule.digest() of the same rule must give this hex."""
+    rule = {
+        "seed": 0,
+        "patch": 256,
+        "levels": [1, 2, 4],
+        "samples": {"train": 1000, "val": 20, "test": 20},
+        "split": {"policy": "fractions", "fractions": {"train": 0.8, "val": 0.1, "test": 0.1}, "seed": 0},
+        "channel_recipe": None,
+    }
+    assert plan_digest(rule) == "2827e3d249deb0a8bb8ecc10cb579ce0f37c9a4d2667f04af2914388bc04ae74"
+
+
+def test_raw_array_without_extents_counts_the_full_request(spec_2d):
+    with_odd_array = records()
+    for _, record in with_odd_array:
+        if record["id"] == U937:
+            record["technical"]["arrays"].append({"role": "raw", "axes": "t", "shape": [5]})
+    row = build_plan(spec_2d, "h", None, with_odd_array).rows_by_id[U937]
+    # the odd array is a volume per item with no shape: each of the 25 counts the full request
+    assert row.planned == {"train": 80 + 25 * 1000, "val": 10 + 25 * 20, "test": 10 + 25 * 20}
+    assert UNKNOWN_SHAPE_NOTE in row.notes
+
+
+def test_holdout_only_pool_cannot_supply_train(spec_2d):
+    plan = build_plan(spec_with(spec_2d, **{"splits.holdout_ids": [U937, BCSS]}), "h", None, records())
+    assert plan.rows_by_id[U937].planned == {"train": 0, "val": 0, "test": 25 * 4}  # 25 items × min(20, 4 tiles)
+    assert any(e.startswith("split 'train': no record can supply it") for e in plan.errors)
+
+
+def test_planned_caps_each_volume_like_the_harness(spec):
+    # hemibrain: one 3D item of 41394 z planes; 38×33 tiles of 1024 px per plane, far over every request
+    plan = build_plan(spec_with(spec, **{"select.where.dims": {"in": ["3D"]}}), "h", None, records())
+    assert plan.rows_by_id[HEMIBRAIN].planned == {"train": 1000, "val": 20, "test": 20}

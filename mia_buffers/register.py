@@ -139,7 +139,40 @@ def check_volume(volume: object) -> str | None:
                 level[key]
     except (KeyError, TypeError) as error:
         return f"missing or malformed field: {type(error).__name__}: {error}"
+    samples = volume.get("samples", {})
+    if not (
+        isinstance(samples, dict)
+        and all(
+            isinstance(candidates, list) and all(_is_candidate(candidate) for candidate in candidates)
+            for candidates in samples.values()
+        )
+    ):
+        return "samples is not {split: [descriptor]}"
     return None
+
+
+def _is_candidate(candidate: object) -> bool:
+    """A planned sample as the harness writes it: a plane dict, a finite (y, x) centre in nm, int levels and patch,
+    and the per-level starts dict; served to consumers verbatim, so typed here."""
+    if not isinstance(candidate, dict):
+        return False
+    centre, levels = candidate.get("centre_nm"), candidate.get("levels")
+    return (
+        isinstance(candidate.get("plane"), dict)
+        and isinstance(centre, list)
+        and len(centre) == 2
+        and all(type(value) in (int, float) and math.isfinite(value) for value in centre)
+        and isinstance(levels, list)
+        and all(type(level) is int for level in levels)
+        and type(candidate.get("patch")) is int
+        and isinstance(candidate.get("starts"), dict)
+    )
+
+
+def _sparse(volume: dict) -> bool:
+    """A sparse OME-Zarr 0.6 volume: its levels say the staged box (`origin`, `extent`), a 0.5 one's never do."""
+    levels = volume["levels"]
+    return bool(levels) and ("origin" in levels[0] or "extent" in levels[0])
 
 
 def volume_bodies(
@@ -175,6 +208,9 @@ def volume_bodies(
     for index, volume in enumerate(report.get("volumes") or []):
         if (why := check_volume(volume)) is not None:
             refuse(index, volume, why)
+        elif _sparse(volume) and not any(volume.get("samples", {}).values()):
+            # a harness regression must not turn a staged box into uniform centres over the whole volume
+            refuse(index, volume, "0.6 volume without samples")
         elif scope != "patch" and (why := check_sample(volume.get("intensity_sample"), _channels(volume))):
             refuse(index, volume, f"{why}; re-stage with the current harness for normalize.scope {scope}")
         elif scope == "dataset" and volumes and _channels(volume) != _channels(volumes[0]):
@@ -222,6 +258,7 @@ def volume_bodies(
                     "voxel_size_nm": {k: v for k, v in (volume.get("voxel_size_nm") or {}).items() if v is not None},
                     "normalize": bounds,
                     "artifact": artifact or staged.name,
+                    "samples": volume.get("samples") or {},  # a sparse artifact's planned crops, the only ones staged
                 },
             )
         )

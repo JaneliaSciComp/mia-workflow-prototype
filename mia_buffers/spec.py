@@ -106,6 +106,12 @@ class PatchSize(_Strict):
     z: PositiveInt | None = None
     t: PositiveInt | None = None
 
+    @model_validator(mode="after")
+    def _square(self) -> PatchSize:
+        if self.y != self.x:
+            raise ValueError("patch must be square (y == x); the harness chunks by one edge")
+        return self
+
 
 class Patch(_Strict):
     """Patch sizes per dimensionality; `c` is the channel policy (a channel count per crop, default 1, or all)."""
@@ -155,8 +161,15 @@ class Normalize(_Strict):
     clip: bool = True
 
 
+class SamplePlan(_Strict):
+    """Planned training samples per volume, per split (the harness stages only the chunks these samples touch)."""
+
+    samples: dict[str, PositiveInt] = {"train": 1000, "val": 20, "test": 20}
+
+
 class Sampling(_Strict):
     patch: Patch
+    plan: SamplePlan = SamplePlan()
     levels: list[int] = [1]
     assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)
     output_axes: str = "tczyx"
@@ -251,6 +264,12 @@ class Spec(_Strict):
     def _collect_warnings(self) -> Spec:
         if self.sampling.label_axis is not None:
             self.warnings.append("sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)")
+        return self
+
+    @model_validator(mode="after")
+    def _plan_names_the_splits(self) -> Spec:
+        if set(self.sampling.plan.samples) != set(self.splits.fractions):
+            raise ValueError(f"sampling.plan.samples must name exactly the splits {sorted(self.splits.fractions)}")
         return self
 
     def patch_for(self, dims: str) -> dict[str, int] | None:

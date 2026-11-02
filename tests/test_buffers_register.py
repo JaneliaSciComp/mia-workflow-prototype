@@ -8,11 +8,20 @@ import pytest
 
 from mia_buffers.api import BufferService, make_server
 from mia_buffers.ledger import Ledger
-from mia_buffers.register import buffer_config, normalize_bounds, recipe_for, register, volume_bodies
+from mia_buffers.register import (
+    _split_planes,
+    buffer_config,
+    check_volume,
+    normalize_bounds,
+    recipe_for,
+    register,
+    volume_bodies,
+)
 from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed, spec_with  # noqa: F401  (fixtures)
 
 
-def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3):
+def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3, artifact_id=None):
+    """A harness-shaped stage.json in a new directory; with `artifact_id`, the `artifact` block the harness writes."""
     staged.mkdir(parents=True)
     levels = [
         {
@@ -34,7 +43,20 @@ def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3)
         "labels": labels or {},
         "levels": levels,
     }
-    (staged / "stage.json").write_text(json.dumps({"ok": True, "volumes": [volume], "errors": []}))
+    report: dict = {"ok": True, "volumes": [volume], "errors": []}
+    if artifact_id is not None:
+        report["artifact"] = {
+            "id": artifact_id,
+            "levels_key": "p256-l1-2-4",
+            "binding_hash": "b" * 64,
+            "plan_digest": "p" * 64,
+            "harness_commit": "h" * 40,
+            "env_digest": "d" * 64,
+            "snippets_commit": "s" * 40,
+            "record": staged.parent.name,
+            "record_commit": "c" * 40,
+        }
+    (staged / "stage.json").write_text(json.dumps(report))
     return staged
 
 
@@ -73,6 +95,61 @@ def test_volume_bodies_carry_the_artifact(tmp_path, spec_2d):  # noqa: F811
     [(_, plain)] = volume_bodies(ROW, staged, spec_2d)
     [(_, keyed)] = volume_bodies(ROW, staged, spec_2d, artifact="0123456789abcdef")
     assert plain["artifact"] == "u937" and keyed["artifact"] == "0123456789abcdef"
+
+
+def test_volume_bodies_carry_samples(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    planned = {"plane": {"z": 3}, "centre_nm": [5000.0, 6000.0], "levels": [1, 2, 4], "patch": 256, "starts": {}}
+    report["volumes"][0]["samples"] = {"train": [planned]}
+    [(_, vb)] = volume_bodies(ROW, staged, spec_2d, report)
+    assert vb["samples"] == {"train": [planned]}
+    assert volume_bodies(ROW, staged, spec_2d)[0][1]["samples"] == {}  # a 0.5 artifact: none, drawn uniformly
+
+
+@pytest.mark.parametrize("samples", [None, {}, {"train": [], "val": []}])
+def test_sparse_volume_without_samples_is_refused(tmp_path, spec_2d, samples):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    for level in report["volumes"][0]["levels"]:  # the 0.6 marker: the staged box of each level
+        level.update(origin=[0, 0, 0, 0], extent=level["shape"])
+    if samples is not None:
+        report["volumes"][0]["samples"] = samples
+    refused: dict[str, str] = {}
+    assert volume_bodies(ROW, staged, spec_2d, report, refused) == []
+    assert refused == {"u937/v0.zarr": "0.6 volume without samples"}
+    report["volumes"][0]["samples"] = {"train": [], "val": [GOOD_CANDIDATE]}  # one candidate anywhere is enough
+    assert [vid for vid, _ in volume_bodies(ROW, staged, spec_2d, report)] == ["u937/v0.zarr"]
+
+
+GOOD_CANDIDATE = {"plane": {"z": 0}, "centre_nm": [1.0, 2.0], "levels": [1, 2, 4], "patch": 256, "starts": {}}
+BAD_SAMPLES = [
+    [],
+    {"train": {}},
+    {"train": [1]},
+    {"train": ["x"]},
+    *({"train": [{k: v for k, v in GOOD_CANDIDATE.items() if k != key}]} for key in GOOD_CANDIDATE),  # a key missing
+    {"train": [{**GOOD_CANDIDATE, "centre_nm": [1.0]}]},
+    {"train": [{**GOOD_CANDIDATE, "centre_nm": [1.0, float("nan")]}]},
+    {"train": [{**GOOD_CANDIDATE, "patch": "256"}]},
+]
+
+
+@pytest.mark.parametrize("samples", BAD_SAMPLES)
+def test_malformed_samples_are_refused(tmp_path, spec_2d, samples):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    report["volumes"][0]["samples"] = samples
+    assert check_volume(report["volumes"][0]) == "samples is not {split: [descriptor]}"
+    refused: dict[str, str] = {}
+    assert volume_bodies(ROW, staged, spec_2d, report, refused) == []
+    assert refused == {"u937/v0.zarr": "samples is not {split: [descriptor]}"}
+
+
+def test_split_planes_golden():
+    """The harness's `tests/test_plan.py::test_split_planes_golden` pins the same numbers for the same volume id."""
+    split = {"policy": "fractions", "fractions": {"train": 0.6, "val": 0.2, "test": 0.2}, "seed": 0}
+    assert _split_planes("r/v0.zarr", 10, split) == {"train": [0, 1, 4, 5, 7, 8], "val": [3, 6], "test": [2, 9]}
 
 
 def test_buffer_config_from_plan(spec_2d):  # noqa: F811

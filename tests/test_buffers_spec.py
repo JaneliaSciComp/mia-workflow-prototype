@@ -44,6 +44,7 @@ def _merge(base: dict, edit: dict) -> dict:
         ({"select": {"where": {"sample_type": {"in": ["tissue"]}}}}, "sample_type"),
         ({"sampling": {"patch": {"2D": {"y": 256, "xx": 256}}}}, "xx"),
         ({"sampling": {"patch": {"2D": {"y": 0, "x": 256}}}}, "y"),
+        ({"sampling": {"patch": {"2D": {"y": 128, "x": 256}}}}, r"patch must be square \(y == x\)"),
     ],
 )
 def test_refused(tmp_path, edit, needle):
@@ -127,3 +128,11 @@ def test_prep_spec_refused(body, needle):
     data = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, **body}
     with pytest.raises(SpecError, match=needle):
         load_prep_text(yaml.safe_dump(data))
+
+
+def test_sample_plan_defaults_and_must_match_splits():
+    data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
+    assert load_spec_text(yaml.safe_dump(data)).sampling.plan.samples == {"train": 1000, "val": 20, "test": 20}
+    data["splits"]["fractions"] = {"train": 0.8, "val": 0.1, "test": 0.0, "extra": 0.1}
+    with pytest.raises(SpecError, match="sampling.plan.samples must name exactly the splits"):
+        load_spec_text(yaml.safe_dump(data))

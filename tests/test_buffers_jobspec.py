@@ -13,7 +13,8 @@ from mia_data.jobspec import harness_pin
 
 
 def _cfg(tmp_path, **overrides):
-    cfg = make_cfg(tmp_path, limits={"job_bytes": 1e6}, **overrides)
+    limits = {"job_bytes": 1e6, **overrides.pop("limits", {})}
+    cfg = make_cfg(tmp_path, limits=limits, **overrides)
     harness = cfg.harness.dir
     (harness / "harness").mkdir()
     (harness / "harness" / "pixi.lock").write_text("lock v1\n")
@@ -48,13 +49,37 @@ def test_stage_job_mounts_cache_and_out_rw_and_allows_hosts(tmp_path):
         _args(cfg, cfg.paths.work_root / "issue-1" / "i1-e2" / "stage-rec", ["zenodo.org"], str(out)),
         tmp_path / "snap",
     )
-    assert "harness stage binding.yaml" in spec.command and "--levels 1,2,4 --patch 256" in spec.command
-    assert f"--out {out}" in spec.command and "--voxel-size-nm 45.0,45.0" in spec.command
+    assert "harness stage binding.yaml" in spec.command
+    assert f"--out {out}" in spec.command
     assert spec.allow_hosts == ["zenodo.org"] and spec.name == "mia-buffers-stage"
     assert str(cfg.paths.raw_root / "rec") in spec.rw_mounts and str(out) in spec.rw_mounts
     assert str(tmp_path / "snap") in spec.ro_mounts
     assert spec.env["MIA_HARNESS_CACHE_DIR"] == str(cfg.paths.raw_root / "rec")
     assert spec.env["MIA_HARNESS_CACHE_WRITABLE"] == "1" and spec.env["MIA_HARNESS_ALLOWED_HOSTS"] == "zenodo.org"
+
+
+def test_artifact_id_takes_the_plan_digest():
+    base = ("b" * 64, "p256-l1-2-4", {"y": 10.0, "x": 10.0}, "c" * 40, "e" * 64)
+    assert artifact_id(*base) == artifact_id(*base, "")
+    assert artifact_id(*base, "d" * 64) != artifact_id(*base) and len(artifact_id(*base, "d" * 64)) == 16
+
+
+def test_stage_job_names_the_plan_and_voxel_files_and_the_stage_cap(tmp_path):
+    cfg = _cfg(tmp_path, limits={"job_bytes": 1e6, "stage_bytes": 2e6})
+    spec = stage_job(
+        cfg, _args(cfg, cfg.paths.work_root / "w" / "stage-rec", [], str(tmp_path / "out")), tmp_path / "snap"
+    )
+    assert "--plan plan-rule.json --voxel-size voxel_size.json" in spec.command and "--levels" not in spec.command
+    assert "--patch" not in spec.command and "--voxel-size-nm" not in spec.command
+    assert spec.env["MIA_HARNESS_STAGE_BYTES"] == "2000000"
+
+
+def test_stage_cap_defaults_to_job_bytes(tmp_path):
+    cfg = _cfg(tmp_path)
+    spec = stage_job(
+        cfg, _args(cfg, cfg.paths.work_root / "w" / "stage-rec", [], str(tmp_path / "out")), tmp_path / "snap"
+    )
+    assert spec.env["MIA_HARNESS_STAGE_BYTES"] == "1000000"
 
 
 def test_stage_job_without_hosts_is_offline(tmp_path):

@@ -1,13 +1,16 @@
-"""Pure crop sampling over registered volumes: which volume (by weight), which plane and centre (uniform), per split.
+"""Pure crop sampling over registered volumes: which volume (by weight), then which crop, per split.
 
-Spec v0.5 §2 serving-time rules. No I/O and no clock: the service owns the rng and the ledger, this module only
-turns (volumes, split, rng) into one crop descriptor without its sequence number.
+Spec v0.5 §2 serving-time rules. A volume staged sparse (an OME-Zarr 0.6 artifact) carries its planned samples, the
+only crops whose chunks exist on disk: a crop is one of them, verbatim. A volume without samples (a 0.5 artifact,
+the whole pyramid on disk) gets a uniform plane and centre. No I/O and no clock: the service owns the rng and the
+ledger, this module only turns (volumes, split, rng) into one crop descriptor without its sequence number.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,9 @@ class Volume:
     normalize: dict | None = None  # per-channel lo/hi bounds the tensorizer applies (scope volume|dataset)
     artifact: str | None = None  # the staged artifact the volume lives in (its registry key); None before ids
     missing: bool = False  # its pyramid was not on disk at the last status check; never served while set
+    # planned samples per split ({"plane", "centre_nm", "levels", "patch", "starts"}); empty for a 0.5 artifact,
+    # whose levels describe the whole volume rather than the staged box
+    samples: dict[str, tuple[dict, ...]] = field(default_factory=dict)
 
     def extent(self, axis: str) -> int:
         return self.shape[self.axes.index(axis)] if axis in self.axes else 1
@@ -62,18 +68,86 @@ def fits(volume: Volume, patch: int, levels: list[int]) -> str | None:
 
 
 def servable(volumes: list[Volume], split: str) -> list[Volume]:
-    """The volumes with planes in `split` whose pyramid is not missing."""
-    return [volume for volume in volumes if volume.split_planes.get(split) and not volume.missing]
+    """The volumes with something to serve in `split` (candidates when the volume has samples, else planes) whose
+    pyramid is not missing."""
+    return [
+        volume
+        for volume in volumes
+        if not volume.missing and (volume.samples.get(split) if volume.samples else volume.split_planes.get(split))
+    ]
+
+
+def _drawable(volumes: list[Volume], split: str) -> list[Volume]:
+    """The servable volumes `draw_frozen` can pick: a weight of 0 or less is never drawn (`choices` would raise once
+    only such volumes have candidates left)."""
+    return [volume for volume in servable(volumes, split) if volume.weight > 0]
+
+
+def capacity(volumes: list[Volume], split: str) -> int | None:
+    """How many crops `draw_frozen` yields for the split before it runs out: every candidate of a drawable volume, or
+    None (no end) when a drawable volume without samples serves it."""
+    drawable = _drawable(volumes, split)
+    return None if any(not volume.samples for volume in drawable) else sum(len(v.samples[split]) for v in drawable)
 
 
 def draw(
     rng: random.Random, volumes: list[Volume], split: str, *, patch: int, levels: list[int], channels: int | str
 ) -> dict | None:
-    """One crop descriptor (without seq) for the split, or None when no volume has planes in it."""
-    candidates = servable(volumes, split)
-    if not candidates:
+    """One crop descriptor (without seq) for the split, with replacement, or None when no volume serves it."""
+    choices = servable(volumes, split)
+    if not choices:
         return None
-    volume = rng.choices(candidates, weights=[max(v.weight, 0.0) for v in candidates])[0]
+    volume = rng.choices(choices, weights=[max(v.weight, 0.0) for v in choices])[0]
+    index = rng.randrange(len(volume.samples[split])) if volume.samples else None
+    return _crop(rng, volume, split, index, patch=patch, levels=levels, channels=channels)
+
+
+def draw_frozen(
+    rng: random.Random,
+    volumes: list[Volume],
+    split: str,
+    used: set[tuple[str, int]],
+    *,
+    patch: int,
+    levels: list[int],
+    channels: int | str,
+) -> dict | None:
+    """One crop descriptor (without seq) whose (volume, candidate) is not in `used`, or None when nothing is left: a
+    volume by weight among the positive-weight ones with an unused candidate (a volume without samples always has
+    one), then an unused candidate uniformly. Whether it returns None does not depend on `rng`."""
+    served = _drawable(volumes, split)
+    lengths = {volume.id: len(volume.samples[split]) for volume in served if volume.samples}
+    taken = Counter(volume_id for volume_id, index in used if 0 <= index < lengths.get(volume_id, 0))
+    choices = [volume for volume in served if not volume.samples or taken[volume.id] < lengths[volume.id]]
+    if not choices:
+        return None
+    volume = rng.choices(choices, weights=[max(v.weight, 0.0) for v in choices])[0]
+    index = None
+    if volume.samples:
+        index = rng.choice([i for i in range(lengths[volume.id]) if (volume.id, i) not in used])
+    return _crop(rng, volume, split, index, patch=patch, levels=levels, channels=channels)
+
+
+def _crop(
+    rng: random.Random,
+    volume: Volume,
+    split: str,
+    index: int | None,
+    *,
+    patch: int,
+    levels: list[int],
+    channels: int | str,
+) -> dict:
+    """The descriptor of the volume's candidate `index`, verbatim (its chunks are the only ones staged), or with
+    None a uniform plane and centre over the whole volume (a 0.5 artifact)."""
+    served = {
+        "volume": volume.id,
+        "path": volume.path,
+        "channels": volume.recipe if channels != "all" else None,
+        "normalize": volume.normalize,
+    }
+    if index is not None:
+        return {**volume.samples[split][index], **served, "candidate": index}
     plane = rng.choice(volume.split_planes[split])
     half = footprint(patch, levels) // 2
     level0 = volume.levels[0]
@@ -81,13 +155,4 @@ def draw(
         rng.randint(half, volume.extent(axis) - half) * level0.scale_nm[axis] + level0.translation_nm.get(axis, 0.0)
         for axis in ("y", "x")
     ]
-    return {
-        "volume": volume.id,
-        "path": volume.path,
-        "plane": {"z": plane},
-        "centre_nm": centre,
-        "levels": list(levels),
-        "patch": patch,
-        "channels": volume.recipe if channels != "all" else None,
-        "normalize": volume.normalize,
-    }
+    return {**served, "plane": {"z": plane}, "centre_nm": centre, "levels": list(levels), "patch": patch}

@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from .config import Config
     from .models import FetchJobArgs, StageJobArgs
 
+PLAN_FILE = "plan-rule.json"  # the sample rule, written beside binding.yaml in the job workspace
+VOXEL_FILE = "voxel_size.json"  # the record's voxel size in nm, likewise
+
 
 def levels_key(patch: int, levels: list[int]) -> str:
     """The staged layout's directory key: a pyramid depends on the spec's patch and levels (spec §2)."""
@@ -30,12 +33,19 @@ def levels_key(patch: int, levels: list[int]) -> str:
 
 
 def artifact_id(
-    binding_hash: str, levels_key: str, voxel_size_nm: dict[str, float] | None, harness_commit: str, env_digest: str
+    binding_hash: str,
+    levels_key: str,
+    voxel_size_nm: dict[str, float] | None,
+    harness_commit: str,
+    env_digest: str,
+    plan_digest: str = "",
 ) -> str:
     """A staged pyramid's id: 16 hex of the sha256 over every input that changes its bytes, so a pyramid on disk is
-    an immutable artifact a later round can reuse only when all of them match."""
+    an immutable artifact a later round can reuse only when all of them match. The plan digest joins the hashed
+    list only when non-empty, so an empty one reproduces the ids of artifacts staged before plans existed."""
     voxel = {axis: float(size) for axis, size in sorted((voxel_size_nm or {}).items())}
-    payload = json.dumps([binding_hash, levels_key, voxel, harness_commit, env_digest], separators=(",", ":"))
+    parts = [binding_hash, levels_key, voxel, harness_commit, env_digest] + ([plan_digest] if plan_digest else [])
+    payload = json.dumps(parts, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -59,19 +69,20 @@ def stage_job(cfg: Config, args: StageJobArgs, snapshot: Path) -> JobSpec:
     read-write."""
     if not args.out:
         raise ValueError("StageJobArgs.out is empty: the submit activity sets it to the staged directory")
+    # args.levels/patch/voxel_size_nm stay on StageJobArgs for recorded histories; the plan and voxel files carry them.
     body = (
         f"harness stage {BINDING_FILE} --snippets {quote(str(snapshot))} --record {RECORD_FILE} "
-        f"--levels {','.join(str(int(level)) for level in args.levels)} --patch {int(args.patch)} "
-        f"--out {quote(args.out)}"
+        f"--plan {PLAN_FILE} --voxel-size {VOXEL_FILE} --out {quote(args.out)}"
     )
-    if args.voxel_size_nm:
-        axes = [axis for axis in ("z", "y", "x") if axis in args.voxel_size_nm]
-        body += " --voxel-size-nm " + ",".join(str(float(args.voxel_size_nm[axis])) for axis in axes)
     spec = _spec(cfg, "stage", Path(args.workspace), args.pins, body, list(args.hosts), [snapshot])
     cache = str(cfg.paths.raw_root / args.record)
     (spec.rw_mounts if args.cache_writable else spec.ro_mounts).append(cache)
     spec.rw_mounts.append(args.out)
-    spec.env.update(MIA_HARNESS_CACHE_DIR=cache, MIA_HARNESS_CACHE_WRITABLE="1" if args.cache_writable else "0")
+    spec.env.update(
+        MIA_HARNESS_CACHE_DIR=cache,
+        MIA_HARNESS_CACHE_WRITABLE="1" if args.cache_writable else "0",
+        MIA_HARNESS_STAGE_BYTES=str(int(cfg.limits.stage_bytes or cfg.limits.job_bytes)),
+    )
     return spec
 
 

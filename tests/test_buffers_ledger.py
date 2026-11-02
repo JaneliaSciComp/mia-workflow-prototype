@@ -26,6 +26,22 @@ def test_buffer_volume_roundtrip_and_upsert(tmp_path):
     assert led.volumes("other") == []
 
 
+def test_volumes_are_parsed_once_per_write(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_volume("b", vol("a"))
+    statements: list[str] = []
+    led._db.set_trace_callback(statements.append)
+    first = led.volumes("b")
+    second = led.volumes("b")
+    assert first == second == [vol("a")] and first is not second  # a copy: a caller may replace entries
+    assert sum("FROM volumes" in statement for statement in statements) == 1  # the second read never hit SQLite
+    led.put_volume("b", vol("c"))
+    assert [v.id for v in led.volumes("b")] == ["a", "c"]
+    led.set_volume_missing("b", "c", True, vol("c").path)
+    assert [v.missing for v in led.volumes("b")] == [False, True]
+    assert sum("FROM volumes" in statement for statement in statements) == 3
+
+
 def test_consumers_and_staleness(tmp_path):
     led = Ledger(tmp_path / "l.sqlite")
     led.put_buffer("b", {})

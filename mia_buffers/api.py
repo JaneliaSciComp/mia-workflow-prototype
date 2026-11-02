@@ -34,7 +34,7 @@ from mia_core.untrusted import read_untrusted
 from .config import Config
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
-from .sampler import Level, Volume, draw, fits, servable
+from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_spec_text, spec_text_hash
 from .sync import scan_assets, scan_storage
 
@@ -113,6 +113,7 @@ class VolumeBody(_Strict):
     voxel_size_nm: dict[str, float]
     normalize: dict | None = None  # {"lo": [per channel], "hi": [per channel]} for normalize.scope volume|dataset
     artifact: str | None = None  # the staged artifact's id; without one the volume references its directory
+    samples: dict[str, list[dict]] = {}  # planned crops per split of a sparse (0.6) artifact; {} for a 0.5 one
 
 
 class ConsumerBody(_Strict):
@@ -322,6 +323,7 @@ class BufferService:
             voxel_size_nm=parsed.voxel_size_nm,
             normalize=parsed.normalize,
             artifact=parsed.artifact,
+            samples={split: tuple(candidates) for split, candidates in parsed.samples.items()},
         )
         if len(volume.shape) != len(volume.axes):
             raise HttpError(422, f"shape {volume.shape} does not match axes {volume.axes!r}")
@@ -520,6 +522,11 @@ class BufferService:
         return 200, {"descriptors": self.ledger.record_draws(buffer, consumer_id, descriptors)}, {}
 
     def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A window of the split's frozen list, appended to and never reordered; a planned candidate is listed at most
+        once. `exhausted` means the list is capped by the candidates, shorter than the configured size: it is set from
+        the first read on (every drawable volume has samples and they number fewer than the size), with `size` the
+        capped length, so a client sizes itself from any read. `size` never drops below the rows already frozen: a
+        volume flagged missing later takes its candidates out of the cap, never its listed rows out of reach."""
         config = self._serving(buffer)
         self._consumer(buffer, query)
         start, n = _int(query, "from", 0, low=0, high=10**9), _int(query, "n", 1, low=1, high=MAX_N)
@@ -529,19 +536,39 @@ class BufferService:
         volumes = self.ledger.volumes(buffer)
         if not servable(volumes, split):
             return self._no_content(buffer)
-        end = min(start + n, size)
+        candidates, exhausted = capacity(volumes, split), False
+        if candidates == 0:  # only zero-weight volumes hold candidates: nothing drawable yet
+            return self._no_content(buffer)
+        if candidates is not None and candidates < size:  # capped by the candidates, shorter than the configured size
+            size, exhausted = candidates, True
+        patch, levels, channels = config.patch, config.levels, config.channels
+        # ponytail: the replay reproduces the frozen prefix only while the volumes' candidates are those it was drawn
+        # from; a re-PUT with other candidates keeps the listed rows (never re-drawn) but draws the rest from a
+        # diverged sequence, and a re-PUT that drops `samples` turns the volume legacy, so its new rows are uniform
+        # centres over a staged box. Freeze the candidate lists per list if a re-planned record must be re-registered.
         with self._lock:
             frozen = self.ledger.frozen(buffer, split)
+            # a frozen row stays addressable: a volume flagged missing drops its candidates from `capacity`, not rows
+            size = max(size, len(frozen))
+            if start >= size:
+                raise HttpError(416, f"from {start} is past the {split} list of {size}, every candidate listed")
+            end = min(start + n, size)
             if len(frozen) < end:
                 rng = random.Random(f"{config.seed}:{split}")
+                used: set[tuple[str, int]] = set()
                 fresh = []
                 for index in range(end):  # replay the whole prefix so the list never depends on request order
-                    d = draw(rng, volumes, split, patch=config.patch, levels=config.levels, channels=config.channels)
-                    if index >= len(frozen) and d is not None:
-                        fresh.append({**d, "seq": index})
+                    d = draw_frozen(rng, volumes, split, used, patch=patch, levels=levels, channels=channels)
+                    if d is None:  # a defence: unreachable while the candidates are unchanged (capacity caps end)
+                        break
+                    entry = frozen[index] if index < len(frozen) else {**d, "seq": index}
+                    if index >= len(frozen):
+                        fresh.append(entry)
+                    if "candidate" in entry:
+                        used.add((entry["volume"], entry["candidate"]))
                 self.ledger.extend_frozen(buffer, split, fresh)
                 frozen += fresh
-        return 200, {"descriptors": frozen[start:end], "size": size}, {}
+        return 200, {"descriptors": frozen[start:end], "size": size, "exhausted": exhausted}, {}
 
     def _no_content(self, buffer: str) -> Response:
         """A 204 (nothing servable yet), counted for the buffer's usage: the day's row and the last hour's window."""

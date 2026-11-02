@@ -115,6 +115,7 @@ class CropsCfg(BaseModel):
 
 class LimitsCfg(BaseModel):
     job_bytes: float = 5e9
+    stage_bytes: float | None = None  # cap on one staged artifact's uncompressed planned bytes; None = job_bytes
     job_walltime_min: int = 120
     agent_max_budget_usd: float = 5
     max_stage_attempts: int = 1
@@ -197,7 +198,7 @@ class Config(BaseModel):
 
     def _check_limits(self) -> None:
         for name, value in vars(self.limits).items():
-            if not (math.isfinite(value) and value > 0):
+            if value is not None and not (math.isfinite(value) and value > 0):
                 raise ValueError(f"limits.{name} must be finite and positive")
         if self.limits.max_stage_attempts != 1:
             raise ValueError("limits.max_stage_attempts: only 1 is supported (a failed job ends the round)")

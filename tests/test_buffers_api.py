@@ -111,6 +111,76 @@ def test_frozen_split_is_stable_and_bounded(tmp_path):
     assert call(s, "GET", "/buffers/b/split/train", {"from": "0", "n": "1", "consumer": cid})[1]["size"] == 256
 
 
+CANDS = [
+    {"plane": {"z": 4}, "centre_nm": [10240.0 + i, 10240.0], "levels": [1, 2, 4], "patch": 256, "starts": {}}
+    for i in range(4)
+]
+
+
+def test_frozen_list_stops_when_candidates_run_out(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)  # val list of 4
+    call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "samples": {"val": CANDS[:2]}})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    head = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "1", "consumer": cid})[1]
+    assert head["size"] == 2 and head["exhausted"] is True  # what a client sizes its dataset from
+    out = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert len(out["descriptors"]) == 2 and out["size"] == 2 and out["exhausted"] is True
+    assert {d["candidate"] for d in out["descriptors"]} == {0, 1} and out["descriptors"][:1] == head["descriptors"]
+    assert [d["seq"] for d in out["descriptors"]] == [0, 1]
+    assert call(s, "GET", "/buffers/b/split/val", {"from": "2", "n": "1", "consumer": cid})[0] == 416
+
+
+def test_frozen_rows_stay_readable_when_a_volume_goes_missing(tmp_path):
+    staged = tmp_path / "staged"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
+    call(s, "PUT", "/buffers/b", payload=CFG)  # val list of 4
+    for vid, candidates in (("a", CANDS[:2]), ("c", CANDS[2:])):
+        (staged / vid / "v0.zarr").mkdir(parents=True)
+        path = str(staged / vid / "v0.zarr")
+        call(s, "PUT", f"/buffers/b/volumes/{vid}", payload={**body(vid), "path": path, "samples": {"val": candidates}})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    whole = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert len(whole["descriptors"]) == 4 and whole["size"] == 4
+    shutil.rmtree(staged / "c")
+    assert call(s, "GET", "/buffers/b/status")[1]["missing"] == ["c"]  # its 2 candidates leave `capacity`
+    status, tail, _ = call(s, "GET", "/buffers/b/split/val", {"from": "2", "n": "2", "consumer": cid})
+    assert status == 200 and tail["descriptors"] == whole["descriptors"][2:] and tail["size"] == 4
+    assert call(s, "GET", "/buffers/b/split/val", {"from": "4", "n": "1", "consumer": cid})[0] == 416
+
+
+def test_zero_weight_candidates_end_the_list_without_an_error(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload={**body("a"), "samples": {"val": CANDS[:1]}})
+    call(s, "PUT", "/buffers/b/volumes/z", payload={**body("z"), "weight": 0.0, "samples": {"val": CANDS[1:3]}})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    for _ in range(2):  # a later read replays the same prefix
+        status, out, _ = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})
+        assert status == 200 and out["size"] == 1 and out["exhausted"] is True
+        assert [(d["volume"], d["candidate"]) for d in out["descriptors"]] == [("a", 0)]
+
+
+def test_re_put_replaces_candidates_and_keeps_frozen(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    planned = {**body(), "samples": {"val": CANDS}}
+    call(s, "PUT", "/buffers/b/volumes/a", payload=planned)
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    first = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "2", "consumer": cid})[1]
+    assert first["size"] == 4 and first["exhausted"] is False
+    assert call(s, "PUT", "/buffers/b/volumes/a", payload=planned)[0] == 200
+    again = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "2", "consumer": cid})[1]
+    assert again == first and call(s, "GET", "/buffers/b/status")[1]["volumes"] == 1
+    whole = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
+    assert whole["descriptors"][:2] == first["descriptors"] and {d["candidate"] for d in whole["descriptors"]} == {
+        0,
+        1,
+        2,
+        3,
+    }
+
+
 def test_empty_split_is_204_and_bad_bodies_are_422(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)

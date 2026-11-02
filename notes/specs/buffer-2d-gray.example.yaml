@@ -25,6 +25,8 @@ sampling:
     2D: {y: 256, x: 256}
     c: 1                                # one channel per crop: gray recipe per dataset (spec v0.5 §2)
   levels: [1, 2, 4]                     # 256 px at 1×, 2×, 4× around one centre
+  plan:                                 # planned samples per volume per split; placeholder until the planner's estimates on the real pool set it
+    samples: {train: 1000, val: 20, test: 20}
   weighting:
     scheme: temperature
     over: [modality, dataset]

@@ -115,8 +115,24 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
 
 1. **Plan.** `mia-buffers plan notes/specs/buffer-2d-gray.example.yaml --catalog-dir <catalog checkout> --json plan.json`
    writes the data pool with a weight, a voxel size (documented or assumed) and a channel recipe per record.
-2. **Stage** each dataset you want to serve with the mia-snippets harness (`harness stage`, see that repo's
-   `SPEC.md` §7) into `<staged root>/<record id>/`, which then holds `stage.json` and one `v<i>.zarr` per volume.
+2. **Stage** each dataset you want to serve with the mia-snippets harness (see that repo's `SPEC.md` §7):
+   `harness stage binding.yaml --snippets <snippets dir> --record record.yaml --plan plan-rule.json
+   --voxel-size voxel_size.json --out <staged root>/<record id>/`. The output holds `stage.json` and one sparse
+   OME-Zarr 0.6 image `v<i>.zarr` per raw volume, with only the chunks of the planned samples written. The worker path
+   (`prepare_stage`) writes `plan-rule.json` and `voxel_size.json` next to the job; for a manual stage write them by
+   hand:
+
+   ```
+   plan-rule.json    {"artifact_id": "<artifact id>", "levels_key": "<levels key>", "harness_commit": "<sha>",
+                      "env_digest": "<digest>", "rule": {<the plan row's plan_rule>}}
+   voxel_size.json   {"x": {"nm": 8.0, "source": "record"}, "y": {...}, "z": {"nm": 8.0, "source": "assumed",
+                      "basis": "<why>"}}      # source: record | assumed | synthetic | file; basis is optional
+   ```
+
+   `file` is the harness's own (it reads the size from the image file); the worker never writes it.
+
+   The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config `limits.stage_bytes`, default
+   `limits.job_bytes`).
 3. **Serve.** `mia-buffers serve` runs buffer-api from the configuration: host and port from `service.url`, the ledger at
    `<local_root>/service/buffers.sqlite`, backups under `<state_dir>/backups/` every `keeper.minutes`, and every
    worker write needs the token from `service.token_file`. It holds no credentials and never reads pixels.
@@ -161,6 +177,10 @@ Sync commands, for a fresh service or one that missed writes:
 mia exec mia-buffers catalog sync [--ref <catalog sha>]   # load the catalog records of a commit
 mia exec mia-buffers datasets sync                        # rebuild the prepared rows from storage_root
 ```
+
+A volume's `samples` (from `stage.json`) register as candidates. Train draws a candidate by weight for volumes that
+have them; val and test lists are drawn from the candidates without replacement, so a list can run out: the response
+says `exhausted` and `size` is capped by the candidates available.
 
 `POST /plan` plans a spec against the synced catalog and the registry; datasets that are not `prepared` are out of the
 pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read the spec from a file:
@@ -260,11 +280,19 @@ label posts a lifecycle event (`POST`/`GET /buffers/<id>/events`; kinds `created
 `GET /records?ref=` serves the catalog's records (default: the latest synced ref).
 
 **Publish by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`, never
-the final directory. When `stage.json` says `ok`, the worker writes the `artifact` block into it (every input the
-artifact id hashes), then renames the build to `<artifact>`. The published directory is never written again. A rebuild
+the final directory. When `stage.json` says `ok`, the worker checks that its `artifact` block (written by the harness,
+every input the artifact id hashes) names this job's artifact id, refuses a build with no block or a foreign id, then
+renames the build to `<artifact>`. The published directory is never written again. A rebuild
 lands under the same id through the same rename; a retry that finds the final directory reuses it. A failed build
 left in place before D is moved aside as `.building-stale-<artifact>-<ns>`; the keeper's `.building-*` sweep removes
 builds untouched for `quota.hold_hours`.
+
+**Deployment.** Deploy with no round in sourcing. An in-flight round's pinned harness does not know `--plan`, and builds
+in flight under the old job spec are refused (no `artifact` block, or a foreign id), so drain first. The mia-snippets
+PR that adds `--plan` must be merged and `harness.dir` fast-forwarded before any new round. A buffer serving from a
+round planned before this deploy cannot rebuild a degraded pyramid: the round's plan rows have no sample rule and its
+pinned harness does not know `--plan` (`prepare_stage` fails with "planned before sparse staging"). Re-plan such
+buffers (`go`) after the deploy.
 
 **The recipe pin.** `PUT /buffers/<id>` carries `recipe` (tensorizer, params, `harness_commit`, `env_digest`) and
 `plan_hash`. `BufferDataset` compares the recipe's `harness_commit` with its checkout (`MIA_HARNESS_COMMIT`, else
@@ -514,7 +542,7 @@ no longer needs the catalog's downloads state: a record that is on the catalog's
 
 
 **Statistics.** `harness stage` records, per raw volume and channel, a sorted sample of up to 4,096 level-0
-values from 8 random patch boxes (`stage.json` → `volumes[].intensity_sample`). At registration, for
+values from 8 written level-0 chunks per channel (`stage.json` → `volumes[].intensity_sample`). At registration, for
 `sampling.normalize.scope: volume`, each volume body carries `normalize: {lo: [per channel], hi: [per channel]}`
 at the spec's percentile range from its own sample; for `scope: dataset` the samples of the record's volumes are
 pooled first; for `scope: patch` (the default) the field is `null`. Descriptors carry the volume's `normalize`,
