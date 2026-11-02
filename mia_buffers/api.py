@@ -523,7 +523,9 @@ class BufferService:
 
     def _split(self, buffer: str, split: str, *, query: dict[str, str], body: bytes) -> Response:
         """A window of the split's frozen list, appended to and never reordered; a planned candidate is listed at most
-        once. The list ends early (`exhausted`, `size` its length) when every volume has samples and they run out."""
+        once. `exhausted` means the list is capped by the candidates, shorter than the configured size: it is set from
+        the first read on (every drawable volume has samples and they number fewer than the size), with `size` the
+        capped length, so a client sizes itself from any read."""
         config = self._serving(buffer)
         self._consumer(buffer, query)
         start, n = _int(query, "from", 0, low=0, high=10**9), _int(query, "n", 1, low=1, high=MAX_N)
@@ -534,7 +536,9 @@ class BufferService:
         if not servable(volumes, split):
             return self._no_content(buffer)
         candidates, exhausted = capacity(volumes, split), False
-        if candidates is not None and candidates < size:  # the list ends once every candidate is listed
+        if candidates == 0:  # only zero-weight volumes hold candidates: nothing drawable yet
+            return self._no_content(buffer)
+        if candidates is not None and candidates < size:  # capped by the candidates, shorter than the configured size
             size, exhausted = candidates, True
             if start >= size:
                 raise HttpError(416, f"from {start} is past the {split} list of {size}, every candidate listed")
@@ -542,7 +546,8 @@ class BufferService:
         patch, levels, channels = config.patch, config.levels, config.channels
         # ponytail: the replay reproduces the frozen prefix only while the volumes' candidates are those it was drawn
         # from; a re-PUT with other candidates keeps the listed rows (never re-drawn) but draws the rest from a
-        # diverged sequence. Freeze the candidate lists per list if a re-planned record must be re-registered.
+        # diverged sequence, and a re-PUT that drops `samples` turns the volume legacy, so its new rows are uniform
+        # centres over a staged box. Freeze the candidate lists per list if a re-planned record must be re-registered.
         with self._lock:
             frozen = self.ledger.frozen(buffer, split)
             if len(frozen) < end:
@@ -551,7 +556,7 @@ class BufferService:
                 fresh = []
                 for index in range(end):  # replay the whole prefix so the list never depends on request order
                     d = draw_frozen(rng, volumes, split, used, patch=patch, levels=levels, channels=channels)
-                    if d is None:  # only when the candidates changed under the list (see above)
+                    if d is None:  # a defence: unreachable while the candidates are unchanged (capacity caps end)
                         break
                     entry = frozen[index] if index < len(frozen) else {**d, "seq": index}
                     if index >= len(frozen):

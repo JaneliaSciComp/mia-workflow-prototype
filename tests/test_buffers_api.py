@@ -131,6 +131,18 @@ def test_frozen_list_stops_when_candidates_run_out(tmp_path):
     assert call(s, "GET", "/buffers/b/split/val", {"from": "2", "n": "1", "consumer": cid})[0] == 416
 
 
+def test_zero_weight_candidates_end_the_list_without_an_error(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", "/buffers/b/volumes/a", payload={**body("a"), "samples": {"val": CANDS[:1]}})
+    call(s, "PUT", "/buffers/b/volumes/z", payload={**body("z"), "weight": 0.0, "samples": {"val": CANDS[1:3]}})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    for _ in range(2):  # a later read replays the same prefix
+        status, out, _ = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})
+        assert status == 200 and out["size"] == 1 and out["exhausted"] is True
+        assert [(d["volume"], d["candidate"]) for d in out["descriptors"]] == [("a", 0)]
+
+
 def test_re_put_replaces_candidates_and_keeps_frozen(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)

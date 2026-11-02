@@ -143,12 +143,30 @@ def check_volume(volume: object) -> str | None:
     if not (
         isinstance(samples, dict)
         and all(
-            isinstance(candidates, list) and all(isinstance(candidate, dict) for candidate in candidates)
+            isinstance(candidates, list) and all(_is_candidate(candidate) for candidate in candidates)
             for candidates in samples.values()
         )
     ):
         return "samples is not {split: [descriptor]}"
     return None
+
+
+def _is_candidate(candidate: object) -> bool:
+    """A planned sample as the harness writes it: a plane dict, a finite (y, x) centre in nm, int levels and patch,
+    and the per-level starts dict; served to consumers verbatim, so typed here."""
+    if not isinstance(candidate, dict):
+        return False
+    centre, levels = candidate.get("centre_nm"), candidate.get("levels")
+    return (
+        isinstance(candidate.get("plane"), dict)
+        and isinstance(centre, list)
+        and len(centre) == 2
+        and all(type(value) in (int, float) and math.isfinite(value) for value in centre)
+        and isinstance(levels, list)
+        and all(type(level) is int for level in levels)
+        and type(candidate.get("patch")) is int
+        and isinstance(candidate.get("starts"), dict)
+    )
 
 
 def volume_bodies(

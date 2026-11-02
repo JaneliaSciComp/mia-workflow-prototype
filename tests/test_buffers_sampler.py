@@ -112,3 +112,15 @@ def test_draw_frozen_is_without_replacement_and_weighted():
     assert capacity([a, b, legacy], "val") is None
     d = draw_frozen(random.Random(0), [a, b, legacy], "val", used, patch=256, levels=[1, 2, 4], channels=1)
     assert d is not None and d["volume"] == "c" and "candidate" not in d
+
+
+def test_zero_weight_volumes_are_never_drawn_or_counted():
+    """A zero-weight volume's candidates would leave `choices` only zero weights once the others run out."""
+    a = dataclasses.replace(vol("a", weight=1.0, splits={"val": (0,)}), samples={"val": candidates(1)})
+    b = dataclasses.replace(vol("b", weight=0.0, splits={"val": (0,)}), samples={"val": candidates(2)})
+    assert capacity([a, b], "val") == 1 and capacity([b], "val") == 0
+    used: set[tuple[str, int]] = set()
+    first = draw_frozen(random.Random(0), [a, b], "val", used, patch=256, levels=[1, 2, 4], channels=1)
+    assert first is not None and first["volume"] == "a"
+    used.add(("a", 0))
+    assert draw_frozen(random.Random(0), [a, b], "val", used, patch=256, levels=[1, 2, 4], channels=1) is None

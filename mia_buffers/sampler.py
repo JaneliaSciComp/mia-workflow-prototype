@@ -77,11 +77,17 @@ def servable(volumes: list[Volume], split: str) -> list[Volume]:
     ]
 
 
+def _drawable(volumes: list[Volume], split: str) -> list[Volume]:
+    """The servable volumes `draw_frozen` can pick: a weight of 0 or less is never drawn (`choices` would raise once
+    only such volumes have candidates left)."""
+    return [volume for volume in servable(volumes, split) if volume.weight > 0]
+
+
 def capacity(volumes: list[Volume], split: str) -> int | None:
-    """How many crops `draw_frozen` yields for the split before it runs out: every candidate, or None (no end) when a
-    volume without samples serves it."""
-    served = servable(volumes, split)
-    return None if any(not volume.samples for volume in served) else sum(len(v.samples[split]) for v in served)
+    """How many crops `draw_frozen` yields for the split before it runs out: every candidate of a drawable volume, or
+    None (no end) when a drawable volume without samples serves it."""
+    drawable = _drawable(volumes, split)
+    return None if any(not volume.samples for volume in drawable) else sum(len(v.samples[split]) for v in drawable)
 
 
 def draw(
@@ -107,9 +113,9 @@ def draw_frozen(
     channels: int | str,
 ) -> dict | None:
     """One crop descriptor (without seq) whose (volume, candidate) is not in `used`, or None when nothing is left: a
-    volume by weight among those with an unused candidate (a volume without samples always has one), then an unused
-    candidate uniformly. Whether it returns None does not depend on `rng`."""
-    served = servable(volumes, split)
+    volume by weight among the positive-weight ones with an unused candidate (a volume without samples always has
+    one), then an unused candidate uniformly. Whether it returns None does not depend on `rng`."""
+    served = _drawable(volumes, split)
     lengths = {volume.id: len(volume.samples[split]) for volume in served if volume.samples}
     taken = Counter(volume_id for volume_id, index in used if 0 <= index < lengths.get(volume_id, 0))
     choices = [volume for volume in served if not volume.samples or taken[volume.id] < lengths[volume.id]]

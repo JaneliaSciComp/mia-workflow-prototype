@@ -107,7 +107,20 @@ def test_volume_bodies_carry_samples(tmp_path, spec_2d):  # noqa: F811
     assert volume_bodies(ROW, staged, spec_2d)[0][1]["samples"] == {}  # a 0.5 artifact: none, drawn uniformly
 
 
-@pytest.mark.parametrize("samples", [[], {"train": {}}, {"train": [1]}, {"train": ["x"]}])
+GOOD_CANDIDATE = {"plane": {"z": 0}, "centre_nm": [1.0, 2.0], "levels": [1, 2, 4], "patch": 256, "starts": {}}
+BAD_SAMPLES = [
+    [],
+    {"train": {}},
+    {"train": [1]},
+    {"train": ["x"]},
+    *({"train": [{k: v for k, v in GOOD_CANDIDATE.items() if k != key}]} for key in GOOD_CANDIDATE),  # a key missing
+    {"train": [{**GOOD_CANDIDATE, "centre_nm": [1.0]}]},
+    {"train": [{**GOOD_CANDIDATE, "centre_nm": [1.0, float("nan")]}]},
+    {"train": [{**GOOD_CANDIDATE, "patch": "256"}]},
+]
+
+
+@pytest.mark.parametrize("samples", BAD_SAMPLES)
 def test_malformed_samples_are_refused(tmp_path, spec_2d, samples):  # noqa: F811
     staged = write_stage_json(tmp_path / "u937")
     report = json.loads((staged / "stage.json").read_text())

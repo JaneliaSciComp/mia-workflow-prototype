@@ -879,7 +879,8 @@ class Activities:
         block = report.get("artifact")
         found, expected = block.get("id") if isinstance(block, dict) else None, self._artifact(round_id, record)
         if found != expected:
-            error = f"stage.json artifact id {text(found, 64)!r} is not the expected {expected!r}"
+            shown = repr(text(found, 64)) if isinstance(found, str) else text(repr(found), 64)  # None stays None
+            error = f"stage.json artifact id {shown} is not the expected {expected!r}"
             return {**report, "ok": False, "errors": [error, *texts(report.get("errors"))]}  # first: texts() caps
         if replace and final.exists():  # for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))

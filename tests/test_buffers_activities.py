@@ -1294,6 +1294,8 @@ async def test_publish_refusal_survives_the_error_caps(acts, server):
         and out["errors"][0] == f"stage.json artifact id {'f' * 64!r} is not the expected {final.name!r}"
     )
     assert texts(out["errors"])[0] == out["errors"][0]
+    missing = acts._publish(ROUND, U937, {"ok": True}, building, final)  # no artifact block at all
+    assert missing["errors"] == [f"stage.json artifact id None is not the expected {final.name!r}"]
 
 
 async def test_publish_does_not_rewrite_stage_json(acts, server):
