@@ -330,29 +330,37 @@ def plan_digest(rule: dict) -> str:
 
 
 def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]:
-    """Expected samples per split over every volume the record stages, the byte upper bound, and whether a shape
-    was missing (that array then counts the full request). The registry puts each one-plane volume into one split by
-    a seeded draw weighted by the fractions, so across the record's items the fractions hold in expectation."""
+    """Expected samples per split over the record's items, each raw array of each item capped the way the harness
+    caps a staged volume (`min(samples[split], capacity)`); the byte figure is an upper bound given those counts;
+    the flag says an array had no shape (each of its items then counts the full request).
+
+    A volume with at least one plane per split has its planes cut by the fractions; one with fewer puts each plane
+    in one split with probability `fraction` (the registry's and the harness's draw), so the cap applies before the
+    fraction. The planner counts t × z planes while the harness counts z only."""
     samples: dict[str, int] = rule["samples"]
     footprint = rule["patch"] * max(rule["levels"])
     split = row.split or {}
+    fractions: dict[str, float] = split.get("fractions", {})
+    held_out = split.get("policy") == "holdout"
     planned = dict.fromkeys(samples, 0)
     planned_bytes, unknown = 0, False
     for array in f.raw_arrays:
         if array.extent_y and array.extent_x:
             tiles = (array.extent_y // footprint) * (array.extent_x // footprint)
-            three_d = (f.dims or "").startswith("3D")
-            planes = f.n_items * (array.planes if three_d else _depth_2d(f, array))  # as positions() folds n_items
-            if split.get("policy") == "holdout":
-                share = {name: (1.0 if name == "test" else 0.0) for name in samples}
-            else:
-                share = {name: split.get("fractions", {}).get(name, 0.0) for name in samples}
-            # 1e-9: 0.7 × 10 is 6.999…, an expectation of 7
-            counts = {
-                name: min(wanted, math.floor(tiles * planes * share[name] + 1e-9)) for name, wanted in samples.items()
-            }
+            planes = array.planes if (f.dims or "").startswith("3D") else _depth_2d(f, array)  # per item
+            per_item: dict[str, float] = {}
+            for name, wanted in samples.items():
+                fraction = fractions.get(name, 0.0)
+                if held_out:
+                    per_item[name] = min(wanted, tiles * planes) if name == "test" else 0
+                elif planes >= len(fractions):
+                    per_item[name] = min(wanted, tiles * planes * fraction)
+                else:
+                    per_item[name] = fraction * min(wanted, tiles * planes)
         else:
-            counts, unknown = dict(samples), True
+            per_item, unknown = dict(samples), True
+        # 1e-9: 0.7 × 10 is 6.999…, an expectation of 7
+        counts = {name: math.floor(f.n_items * value + 1e-9) for name, value in per_item.items()}
         itemsize = ITEMSIZE.get(array.dtype or "", DEFAULT_ITEMSIZE)
         # up to 4 chunks per sample per level, each patch² × channels × itemsize
         planned_bytes += (

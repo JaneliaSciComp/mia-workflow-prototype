@@ -44,6 +44,7 @@ def _merge(base: dict, edit: dict) -> dict:
         ({"select": {"where": {"sample_type": {"in": ["tissue"]}}}}, "sample_type"),
         ({"sampling": {"patch": {"2D": {"y": 256, "xx": 256}}}}, "xx"),
         ({"sampling": {"patch": {"2D": {"y": 0, "x": 256}}}}, "y"),
+        ({"sampling": {"patch": {"2D": {"y": 128, "x": 256}}}}, r"patch must be square \(y == x\)"),
     ],
 )
 def test_refused(tmp_path, edit, needle):

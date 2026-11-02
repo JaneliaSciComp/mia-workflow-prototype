@@ -312,15 +312,16 @@ def test_planned_counts_are_capped_by_capacity_and_reported(plan_2d):
     row = next(r for r in plan_2d.rows if r.in_pool)
     assert row.plan_rule is not None
     assert all(row.planned[s] <= row.plan_rule["samples"][s] for s in row.planned) and row.planned_bytes > 0
-    # BCSS: 151 one-plane images of 2467×3394, 1024 px coarsest footprint → 2×3 tiles; 906 × 0.8 / 0.1 / 0.1
-    assert plan_2d.rows_by_id[BCSS].planned == {"train": 724, "val": 20, "test": 20}
+    # BCSS: 151 one-plane images of 2467×3394, 1024 px coarsest footprint → 2×3 tiles; each image lands whole in
+    # one split, so per item 6 samples × fraction: 151 × 4.8 / 0.6 / 0.6
+    assert plan_2d.rows_by_id[BCSS].planned == {"train": 724, "val": 90, "test": 90}
     # U937: 25 planes of 2048×2048 (n_items and t count the same fields) → 2×2 tiles; 100 × 0.8 / 0.1 / 0.1
     assert plan_2d.rows_by_id[U937].planned == {"train": 80, "val": 10, "test": 10}
     assert plan_2d.rows_by_id[U937].planned_bytes == 3 * 100 * 4 * 256 * 256 * 3 * 2
     md = plan_2d.render_markdown()
     assert "planned" in md and "of requested" in md
     assert "| train 80 / 1000 · val 10 / 20 · test 10 / 20 |" in md
-    assert "planned 864 of requested 2080 samples; ~" in md and "expectation over each record's items" in md
+    assert "planned 1004 of requested 2080 samples; ~" in md and "expectation over each record's items" in md
     assert plan_2d.valid
 
 
@@ -336,10 +337,18 @@ def test_raw_array_without_extents_counts_the_full_request(spec_2d):
         if record["id"] == U937:
             record["technical"]["arrays"].append({"role": "raw", "axes": "t", "shape": [5]})
     row = build_plan(spec_2d, "h", None, with_odd_array).rows_by_id[U937]
-    assert row.planned == {"train": 1080, "val": 30, "test": 30} and UNKNOWN_SHAPE_NOTE in row.notes
+    # the odd array is a volume per item with no shape: each of the 25 counts the full request
+    assert row.planned == {"train": 80 + 25 * 1000, "val": 10 + 25 * 20, "test": 10 + 25 * 20}
+    assert UNKNOWN_SHAPE_NOTE in row.notes
 
 
 def test_holdout_only_pool_cannot_supply_train(spec_2d):
     plan = build_plan(spec_with(spec_2d, **{"splits.holdout_ids": [U937, BCSS]}), "h", None, records())
-    assert plan.rows_by_id[U937].planned == {"train": 0, "val": 0, "test": 20}
+    assert plan.rows_by_id[U937].planned == {"train": 0, "val": 0, "test": 25 * 4}  # 25 items × min(20, 4 tiles)
     assert any(e.startswith("split 'train': no record can supply it") for e in plan.errors)
+
+
+def test_planned_caps_each_volume_like_the_harness(spec):
+    # hemibrain: one 3D item of 41394 z planes; 38×33 tiles of 1024 px per plane, far over every request
+    plan = build_plan(spec_with(spec, **{"select.where.dims": {"in": ["3D"]}}), "h", None, records())
+    assert plan.rows_by_id[HEMIBRAIN].planned == {"train": 1000, "val": 20, "test": 20}

@@ -106,6 +106,12 @@ class PatchSize(_Strict):
     z: PositiveInt | None = None
     t: PositiveInt | None = None
 
+    @model_validator(mode="after")
+    def _square(self) -> PatchSize:
+        if self.y != self.x:
+            raise ValueError("patch must be square (y == x); the harness chunks by one edge")
+        return self
+
 
 class Patch(_Strict):
     """Patch sizes per dimensionality; `c` is the channel policy (a channel count per crop, default 1, or all)."""
