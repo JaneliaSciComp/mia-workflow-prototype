@@ -39,6 +39,8 @@ sampling:
     3D+t: {t: 12, z: 32, y: 256, x: 256}
     c: all                              # all | int | [channel names]
   levels: [1, 2, 4]                     # pyramid levels per crop (MuViT); y and x only
+  plan:                                 # planned samples per volume per split; placeholder until the planner\'s estimates on the real pool set it
+    samples: {train: 1000, val: 20, test: 20}
   output_axes: tczyx                    # canonical order; see missing_axes
   missing_axes: singleton               # singleton | drop
   label_axis: l                         # prepended only when the record has annotations
