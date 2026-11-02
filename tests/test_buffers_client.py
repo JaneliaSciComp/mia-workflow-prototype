@@ -186,3 +186,17 @@ def test_dataset_refuses_a_checkout_at_another_commit(buffer_server, monkeypatch
 def test_dataset_without_a_recipe_is_accepted(buffer_server, monkeypatch):
     monkeypatch.setenv("MIA_HARNESS_COMMIT", "b" * 40)
     assert "harness_commit" not in BufferDataset(buffer_server, "b", n_samples=2, tensorizers=SNAP)[0]["meta"]
+
+
+def test_not_staged_propagates(buffer_server, monkeypatch):
+    """A tensorizer's NotStaged (a LookupError) reaches the training loop; the dataset does not swallow it."""
+
+    class NotStaged(LookupError): ...
+
+    def refuse(*args, **kwargs):
+        raise NotStaged("c/0/0/0")
+
+    dataset = BufferDataset(buffer_server, "b", "train", n_samples=1, tensorizers=SNAP, prefetch=1)
+    monkeypatch.setattr(client_module, "tensorize", refuse)  # after construction: its sanity check draws sample 0
+    with pytest.raises(LookupError, match="c/0/0/0"):
+        dataset[0]
