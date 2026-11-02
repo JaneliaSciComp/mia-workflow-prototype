@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ def _cell(text: object) -> str:
 
 
 CONTENT_HASH_WARNING = "dedup.by content_hash is not available; doi used"
+UNKNOWN_SHAPE_NOTE = "unknown shape: planned counts assume the full request"
+ITEMSIZE = {"uint8": 1, "int8": 1, "uint16": 2, "int16": 2, "float16": 2, "bfloat16": 2, "uint32": 4, "int32": 4}
+ITEMSIZE |= {"float32": 4, "uint64": 8, "int64": 8, "float64": 8}
+DEFAULT_ITEMSIZE = 2
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,12 @@ class Row:
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
     channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
     bytes: int | None = None  # the record's size_bytes: what fetching it adds to the raw cache
+    # The record-local rule the harness derives this record's samples from, and its sha256; pool rows only.
+    # Named plan_rule because `rule` is the selection rule above.
+    plan_rule: dict | None = None
+    plan_digest: str = ""
+    planned: dict[str, int] = field(default_factory=dict)  # estimated samples per split over the raw arrays
+    planned_bytes: int = 0  # upper bound on the staged chunk bytes the planned samples touch
 
     @property
     def in_pool(self) -> bool:
@@ -113,8 +124,9 @@ class Plan:
         pool = [row for row in self.rows if row.in_pool]
         lines += [f"## Records ({len(pool)} in the pool, {self.n_seen} seen)", ""]
         lines += [
-            "| id | decision | rule | dims | modality | channels | voxel nm | positions | weight | split preview |",
-            "|---|---|---|---|---|---|---|---|---|---|",
+            "| id | decision | rule | dims | modality | channels | voxel nm | positions | weight | split preview "
+            "| planned | est. bytes |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in self.rows:
             rule = row.rule if row.fit is None else f"{row.rule}; {row.fit.reason}"
@@ -135,8 +147,15 @@ class Plan:
                 row.positions or "",
                 weight,
                 splits,
+                _planned_cell(row),
+                _human_bytes(row.planned_bytes) if row.in_pool else "",
             ]
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
+        if pool:
+            planned = sum(sum(row.planned.values()) for row in pool)
+            requested = sum(sum((row.plan_rule or {}).get("samples", {}).values()) for row in pool)
+            total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
+            lines += ["", f"planned {planned} of requested {requested} samples; ~{total_bytes} uncompressed"]
         if self.excluded:
             lines += [
                 "",
@@ -162,6 +181,23 @@ def _voxel_cell(row: Row) -> str:
         return ""
     sizes = "×".join(f"{row.voxel_size_nm[a]:g}" for a in ("z", "y", "x") if row.voxel_size_nm.get(a) is not None)
     return f"{sizes} (assumed)" if row.assumed else sizes
+
+
+def _planned_cell(row: Row) -> str:
+    """`train 10 / 1000 · val 3 / 20 · …`: planned against requested samples per split."""
+    if not row.in_pool or row.plan_rule is None:
+        return ""
+    samples = row.plan_rule["samples"]
+    return " · ".join(f"{name} {row.planned.get(name, 0)} / {samples[name]}" for name in samples)
+
+
+def _human_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1000:
+            return f"{value:.0f} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1000
+    return f"{value:.1f} TB"
 
 
 def fit(f: Facts, spec: Spec) -> Fit:
@@ -265,6 +301,52 @@ def split_counts(n: int, fractions: dict[str, float]) -> dict[str, int]:
     return counts
 
 
+def plan_rule(row: Row, spec: Spec) -> dict:
+    """The record-local rule the harness's `PlanRule` mirrors: same keys and value types, never a weight or total."""
+    patch = spec.patch_for(row.dims or "") or {}
+    return {
+        "seed": spec.sampling.seed,
+        "patch": int(patch.get("y", 0)),
+        "levels": [int(level) for level in spec.sampling.levels],
+        "samples": dict(spec.sampling.plan.samples),
+        "split": row.split,
+        "channel_recipe": row.channel_recipe,
+    }
+
+
+def plan_digest(rule: dict) -> str:
+    """sha256 of the rule's canonical JSON; the harness's `PlanRule.digest()` hashes the same text."""
+    return hashlib.sha256(json.dumps(rule, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]:
+    """Estimated samples per split over the record's raw arrays, the byte upper bound, and whether a shape was
+    missing (that array then counts the full request)."""
+    samples: dict[str, int] = rule["samples"]
+    footprint = rule["patch"] * max(rule["levels"])
+    split = row.split or {}
+    planned = dict.fromkeys(samples, 0)
+    planned_bytes, unknown = 0, False
+    for array in f.raw_arrays:
+        if array.extent_y and array.extent_x:
+            tiles = (array.extent_y // footprint) * (array.extent_x // footprint)
+            if split.get("policy") == "holdout":
+                planes = {name: (array.planes if name == "test" else 0) for name in samples}
+            else:
+                planes = split_counts(array.planes, split.get("fractions", {}))
+            counts = {name: min(wanted, tiles * planes.get(name, 0)) for name, wanted in samples.items()}
+        else:
+            counts, unknown = dict(samples), True
+        itemsize = ITEMSIZE.get(array.dtype or "", DEFAULT_ITEMSIZE)
+        # up to 4 chunks per sample per level, each patch² × channels × itemsize
+        planned_bytes += (
+            len(rule["levels"]) * sum(counts.values()) * 4 * rule["patch"] ** 2 * (row.channels or 1) * itemsize
+        )
+        for name, count in counts.items():
+            planned[name] += count
+    return planned, planned_bytes, unknown
+
+
 def _some(ids: list[str], limit: int = 5) -> list[str]:
     """The first few ids with a count of the rest, so an error stays one readable line."""
     return ids if len(ids) <= limit else [*ids[:limit], f"… {len(ids) - limit} more"]
@@ -290,6 +372,11 @@ def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
         if short:
             errors.append(
                 f"patch.c: {channel_policy} needs at least {channel_policy} channels; {_some(short)} have fewer"
+            )
+    for name in spec.splits.fractions:
+        if all(row.planned.get(name, 0) == 0 for row in pool):
+            errors.append(
+                f"split {name!r}: no record can supply it (planes); the buffer would serve an empty {name} set"
             )
     return errors
 
@@ -335,6 +422,7 @@ def build_plan(
         except Exception as error:  # one malformed record is a row with a reason, never a failed plan
             rows.append(_unreadable_row(path, record, f"{type(error).__name__}: {error}"))
     decisions: list[Decision] = decide_all(all_facts, spec.select)
+    facts_by_id = {f.id: f for f in all_facts}
     excluded: Counter[str] = Counter()
     for f, decision in zip(all_facts, decisions, strict=True):
         if not decision.admitted:  # a catalog of thousands against a spec naming a few: a count per rule, not a row
@@ -369,9 +457,6 @@ def build_plan(
         rows.append(row)
     rows.sort(key=lambda row: row.path)
     pool = [row for row in rows if row.in_pool]
-    errors = _policy_errors(pool, spec)
-    if spec.splits.stratify_by:
-        errors.append("splits.stratify_by is not implemented; remove it")
     if pool:
         weighting = spec.sampling.weighting
         temperature = {"uniform_over": 0.0, "proportional": 1.0}.get(weighting.scheme, weighting.temperature)
@@ -389,6 +474,14 @@ def build_plan(
                 row.splits = {name: (row.n_items if name == "test" else 0) for name in spec.splits.fractions}
             else:
                 row.splits = split_counts(row.n_items, spec.splits.fractions)
+            row.plan_rule = plan_rule(row, spec)
+            row.plan_digest = plan_digest(row.plan_rule)
+            row.planned, row.planned_bytes, unknown = _planned(row, facts_by_id[row.id], row.plan_rule)
+            if unknown:
+                row.notes.append(UNKNOWN_SHAPE_NOTE)
+    errors = _policy_errors(pool, spec)
+    if spec.splits.stratify_by:
+        errors.append("splits.stratify_by is not implemented; remove it")
     warnings = list(spec.warnings)
     if "content_hash" in spec.select.dedup.by:
         warnings.append(CONTENT_HASH_WARNING)

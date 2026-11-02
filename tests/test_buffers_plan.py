@@ -1,10 +1,22 @@
 import copy
+import hashlib
 from pathlib import Path
 
 import pytest
 import yaml
 
-from mia_buffers.plan import NOT_PREPARED, Fit, Plan, build_plan, fit, positions, split_counts, weights
+from mia_buffers.plan import (
+    NOT_PREPARED,
+    UNKNOWN_SHAPE_NOTE,
+    Fit,
+    Plan,
+    build_plan,
+    fit,
+    plan_digest,
+    positions,
+    split_counts,
+    weights,
+)
 from mia_buffers.spec import Spec, load_spec
 from mia_buffers.specmap import Facts, facts
 
@@ -252,3 +264,74 @@ def test_rows_carry_the_split_policy(spec_2d):
 def test_stratify_by_is_a_plan_error(spec_2d):
     plan = build_plan(spec_with(spec_2d, **{"splits.stratify_by": ["modality"]}), "h", None, records())
     assert "splits.stratify_by is not implemented; remove it" in plan.errors
+
+
+@pytest.fixture
+def plan_2d(spec_2d) -> Plan:
+    return build_plan(spec_2d, "h", None, records())
+
+
+@pytest.fixture
+def records_single_plane() -> list[tuple[str, dict]]:
+    """The catalog with every raw array cut to one plane (t and z of 1), so `fractions` put each in train."""
+    single = records()
+    for _, record in single:
+        for array in (record.get("technical") or {}).get("arrays") or []:
+            if array.get("role") == "raw" and array.get("axes") and array.get("shape"):
+                sizes = zip(array["axes"], array["shape"], strict=True)
+                array["shape"] = [1 if axis in "tz" else size for axis, size in sizes]
+    return single
+
+
+def test_rows_carry_a_record_local_rule_and_digest(plan_2d, spec_2d):
+    row = next(r for r in plan_2d.rows if r.in_pool)
+    assert row.plan_rule is not None
+    assert set(row.plan_rule) == {"seed", "patch", "levels", "samples", "split", "channel_recipe"}
+    assert row.plan_rule["samples"] == spec_2d.sampling.plan.samples and "weight" not in row.plan_rule
+    assert row.plan_digest == plan_digest(row.plan_rule) and len(row.plan_digest) == 64
+    other = next(r for r in plan_2d.rows if r.in_pool and r.id != row.id)
+    assert (row.plan_digest == other.plan_digest) == (row.plan_rule == other.plan_rule)
+    assert row.rule == "admitted"  # the selection rule stays a string beside the sample rule
+
+
+def test_rule_json_matches_the_harness_dump(plan_2d):
+    row = plan_2d.rows_by_id[U937]
+    assert (
+        row.plan_digest
+        == hashlib.sha256(
+            b'{"channel_recipe":null,"levels":[1,2,4],"patch":256,'
+            b'"samples":{"test":20,"train":1000,"val":20},'
+            b'"seed":0,"split":{"fractions":{"test":0.1,"train":0.8,"val":0.1},"policy":"fractions","seed":0}}'
+        ).hexdigest()
+    )
+
+
+def test_planned_counts_are_capped_by_capacity_and_reported(plan_2d):
+    row = next(r for r in plan_2d.rows if r.in_pool)
+    assert row.plan_rule is not None
+    assert all(row.planned[s] <= row.plan_rule["samples"][s] for s in row.planned) and row.planned_bytes > 0
+    # BCSS: one 2467×3394 plane, 1024 px coarsest footprint → 2×3 tiles, all in train
+    assert plan_2d.rows_by_id[BCSS].planned == {"train": 6, "val": 0, "test": 0}
+    # U937: 25 planes of 2048×2048 → 2×2 tiles per plane; split_counts(25) = 20/3/2
+    assert plan_2d.rows_by_id[U937].planned == {"train": 80, "val": 12, "test": 8}
+    assert plan_2d.rows_by_id[U937].planned_bytes == 3 * 100 * 4 * 256 * 256 * 3 * 2
+    md = plan_2d.render_markdown()
+    assert "planned" in md and "of requested" in md
+    assert "| train 80 / 1000 · val 12 / 20 · test 8 / 20 |" in md
+    assert "planned 106 of requested 2080 samples; ~" in md
+    assert plan_2d.valid
+
+
+def test_split_unsupplied_by_every_record_is_an_error(spec_2d, records_single_plane):
+    plan = build_plan(spec_2d, "h", None, records_single_plane)  # every record: one plane, fractions put all in train
+    assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
+    assert not any(e.startswith("split 'train'") for e in plan.errors)
+
+
+def test_raw_array_without_extents_counts_the_full_request(spec_2d):
+    with_odd_array = records()
+    for _, record in with_odd_array:
+        if record["id"] == U937:
+            record["technical"]["arrays"].append({"role": "raw", "axes": "t", "shape": [5]})
+    row = build_plan(spec_2d, "h", None, with_odd_array).rows_by_id[U937]
+    assert row.planned == {"train": 1080, "val": 32, "test": 28} and UNKNOWN_SHAPE_NOTE in row.notes
