@@ -45,6 +45,7 @@ from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
 
 from .api import BufferConfig
+from .assume import VOXEL_NM
 from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
@@ -136,7 +137,12 @@ def voxel_size_json(row: dict) -> dict[str, dict]:
         if value is None:
             continue
         if axis in row.get("assumed", []):
-            basis = f"({row['family']}, {row['modality_group']}) catalog median"
+            family, modality = row.get("family") or "other", row.get("modality_group") or ""
+            basis = (
+                f"({family}, {modality}) catalog median"
+                if (family, modality) in VOXEL_NM
+                else f"{family} family median"
+            )
             sizes[axis] = {"nm": float(value), "source": "assumed", "basis": basis}
         else:
             sizes[axis] = {"nm": float(value), "source": "record"}
@@ -873,8 +879,8 @@ class Activities:
         block = report.get("artifact")
         found, expected = block.get("id") if isinstance(block, dict) else None, self._artifact(round_id, record)
         if found != expected:
-            error = f"stage.json artifact id {found!r} is not the expected {expected!r}"
-            return {**report, "ok": False, "errors": [*texts(report.get("errors")), error]}
+            error = f"stage.json artifact id {text(found, 64)!r} is not the expected {expected!r}"
+            return {**report, "ok": False, "errors": [error, *texts(report.get("errors"))]}  # first: texts() caps
         if replace and final.exists():  # for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
         try:

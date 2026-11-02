@@ -139,6 +139,15 @@ def check_volume(volume: object) -> str | None:
                 level[key]
     except (KeyError, TypeError) as error:
         return f"missing or malformed field: {type(error).__name__}: {error}"
+    samples = volume.get("samples", {})
+    if not (
+        isinstance(samples, dict)
+        and all(
+            isinstance(candidates, list) and all(isinstance(candidate, dict) for candidate in candidates)
+            for candidates in samples.values()
+        )
+    ):
+        return "samples is not {split: [descriptor]}"
     return None
 
 
@@ -222,6 +231,7 @@ def volume_bodies(
                     "voxel_size_nm": {k: v for k, v in (volume.get("voxel_size_nm") or {}).items() if v is not None},
                     "normalize": bounds,
                     "artifact": artifact or staged.name,
+                    "samples": volume.get("samples") or {},  # a sparse artifact's planned crops, the only ones staged
                 },
             )
         )

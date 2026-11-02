@@ -38,6 +38,7 @@ from mia_buffers.plan import load_records, plan_hash
 from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment, render_ready, render_staged
 from mia_core.registry import Registry, RegistryError
+from mia_core.untrusted import texts
 from mia_data.catalog import dataset_folder
 from mia_data.models import LockTaken
 from mia_data.publish import reindex
@@ -559,6 +560,10 @@ def test_voxel_size_json_names_each_axis_source():
     }
     three_d = {"dims": "3D", "family": "em", "modality_group": "FIB-SEM", "voxel_size_nm": {"z": 8, "y": 4, "x": None}}
     assert voxel_size_json(three_d) == {"z": {"nm": 8.0, "source": "record"}, "y": {"nm": 4.0, "source": "record"}}
+    unknown = {"dims": "2D", "family": None, "modality_group": None, "voxel_size_nm": {"y": 300, "x": 300}}
+    assert voxel_size_json({**unknown, "assumed": ["y", "x"]})["y"]["basis"] == "other family median"
+    lm_other = {**unknown, "family": "lm", "modality_group": "holography"}  # a modality the table has no row for
+    assert voxel_size_json({**lm_other, "assumed": ["y"]})["y"]["basis"] == "lm family median"
 
 
 async def test_read_stage_reduces_report(acts, server):  # read_stage registers what it read
@@ -1276,6 +1281,19 @@ async def test_read_stage_refuses_a_foreign_artifact_id(acts, server):
     ]
     assert (building / "stage.json").is_file() and not final.exists()
     assert acts.registry.asset("staged", final.name)["state"] == "partial"
+
+
+async def test_publish_refusal_survives_the_error_caps(acts, server):
+    """The refusal leads the errors and its id is cut short, so `texts()`' 20-item and 500-char caps keep it."""
+    await planned_and_bound(acts)
+    building, final = acts._building_dir(ROUND, U937), staged_dir(acts, U937)
+    report = {"ok": True, "errors": [f"e{i}" for i in range(30)], "artifact": {"id": "f" * 1000}}
+    out = acts._publish(ROUND, U937, report, building, final)
+    assert (
+        out["ok"] is False
+        and out["errors"][0] == f"stage.json artifact id {'f' * 64!r} is not the expected {final.name!r}"
+    )
+    assert texts(out["errors"])[0] == out["errors"][0]
 
 
 async def test_publish_does_not_rewrite_stage_json(acts, server):

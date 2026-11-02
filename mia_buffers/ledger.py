@@ -82,6 +82,7 @@ def _volume_from(data: dict) -> Volume:
     data["levels"] = tuple(Level(**{**level, "shape": tuple(level["shape"])}) for level in data["levels"])
     data["shape"] = tuple(data["shape"])
     data["split_planes"] = {split: tuple(planes) for split, planes in data["split_planes"].items()}
+    data["samples"] = {split: tuple(candidates) for split, candidates in data.get("samples", {}).items()}
     return Volume(**data)
 
 
