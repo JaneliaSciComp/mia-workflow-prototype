@@ -2,7 +2,7 @@
 
 This sets up a personal autodev instance that acts as you, on your own repo or a test repo. It's for developing and
 testing autodev. For the shared service account, see "Run it as the group service" in
-[`notes/autodev-runbook.md`](../notes/autodev-runbook.md). Back to the [README](../README.md).
+[`docs/autodev-runbook.md`](autodev-runbook.md). Back to the [README](../README.md).
 
 ## What you're starting
 

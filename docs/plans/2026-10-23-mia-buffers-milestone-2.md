@@ -18,7 +18,7 @@ checkout), pydantic for request bodies, httpx for the client and the API tests, 
 under the harness pixi env (`<harness.dir>/harness/.pixi/envs/default`, which has numpy, zarr, pydantic, httpx,
 yaml) with `PYTHONPATH` pointing at this repository.
 
-**Spec:** `notes/specs/2026-10-21-training-buffers.md` v0.5 §2 (serving-time rules: weights, uniform plane and
+**Spec:** `docs/specs/2026-10-21-training-buffers.md` v0.5 §2 (serving-time rules: weights, uniform plane and
 centre, split keys, train stream, frozen val/test), §4 (descriptor, `tensorize`), §5 (the service table and the
 client), §7 (consumers are untrusted), §10 milestone 2. mia-snippets `harness/src/mia_harness/tensorize.py`
 (`tensorize(pyramid_dir, descriptor, snapshot, name, params) -> Sample`) and `stage.py` (`stage.json` layout).
@@ -474,7 +474,7 @@ def test_worker_reregisters_on_pid_change(buffer_server, monkeypatch):
 
 **Files:**
 - Modify: `docs/development.md` (mia_buffers section: serve, register, BufferDataset, the notebook cell),
-  `AGENTS.md` (one-line package description), `notes/specs/2026-10-21-training-buffers.md` §10 milestone 2 row
+  `AGENTS.md` (one-line package description), `docs/specs/2026-10-21-training-buffers.md` §10 milestone 2 row
   ("done when" annotated with what was verified), `mia_buffers/cli.py` module docstring.
 
 - [ ] **Step 1: Serve and register U937.** In the scratchpad: `mia-buffers plan` with the gray example spec over

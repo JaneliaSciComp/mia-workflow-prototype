@@ -156,7 +156,7 @@ For each dataset in the data pool, three independent activities run under the on
    with a **Dropped** list. The one buffer-level timeout (`sourcing.dataset_timeout_days`) drops every dataset still
    waiting on a human or on mia-data, then announces ready if the remaining groups allow it, else needs-human.
    *As built (2026-11-02):* staging now writes sparse OME-Zarr 0.6 holding only the planned samples, which register as
-   candidates; see `notes/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md`.
+   candidates; see `docs/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md`.
 2. **Download.** A plain job fetches the binding's files into `raw_root/<record-id>/` with the harness `io` (hosts
    limited to the dataset's, validators recorded, CRCs checked, resumable per file). The job writes
    `files.json`: url, path, size, validators. Large datasets stream to the cache over several jobs under

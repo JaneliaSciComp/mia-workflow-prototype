@@ -8,7 +8,7 @@ in §14: every set is reviewed, `data:reject` sends the reviewer's comments to t
 in §13: one crop set per round, validated, then prepared (no production phase). v0.3 is the amendment in
 §12: the data pipeline stops judging eligibility (no `ineligible` state, no size or licence verdict; §1.14), after
 the first live preparation request declared a dataset unusable for everyone by one consumer's patch size. v0.2 took the architecture review of
-`ae37969` (`mia-client-test/notes/2026-10-25-training-buffers-architecture-review.md`): immutable staged
+`ae37969` (`mia-client-test/docs/2026-10-25-training-buffers-architecture-review.md`): immutable staged
 artifacts (§1.10, §5.2), the service's state on host-local disk (§1.11, §3), a worker token on mutating routes
 (§1.12, §7), "the plan decides, registration applies" (§1.13, §5.7), recipe pins in the buffer config (§5.7), a
 `mia_core` package for what both applications share (§8), and cache coordination by lock files in a host-local
@@ -963,7 +963,7 @@ survives for PR heads only; `crops.per_round` is the size of the set a human (or
 | `mia_data/workflows.py` | `_round`: the trusted crop step uses `per_round`; on approve, `_publish_reviewed()` (read_verify on the round's workspaces, `publish_crops`, totals comment, `done`) replaces `_produce`; PR-head tests unchanged. Behind `workflow.patched("one-crop-set")`: a run whose history holds a production phase (every dataset at `done` today) replays the old branch |
 | `mia_data/config.py`, `models.py` | `STAGES` loses `cropping`; `RoundLimits.test_n` stays for PR heads, `per_round` is the set size; no new fields |
 | `mia_data/activities.py` | `publish_gallery` accepts no `production` kind; `publish_crops` unchanged |
-| docs | `mia-data-workflow.md` steps 5 and 6 become one step; the crops spec (`notes/mia-crops-spec.md`, v0.9) gets a status line saying steps 3–4 and §7.5 are superseded by this section |
+| docs | `mia-data-workflow.md` steps 5 and 6 become one step; the crops spec (`docs/mia-crops-spec.md`, v0.9) gets a status line saying steps 3–4 and §7.5 are superseded by this section |
 | GitHub | the `data:cropping` label is deleted by hand after the deploy, like §12's |
 
 **Live rounds.** mia-workflow-data#214 and #215 sit at `data:review` with a 4-crop set from before the deploy.

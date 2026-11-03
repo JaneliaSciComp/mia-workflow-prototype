@@ -14,7 +14,7 @@ registry already keeps unprepared records out of the pool), behind `workflow.pat
 
 **Tech Stack:** as D.
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.1, §4.1, §4.3 (the `evaluate.enabled` switch
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.1, §4.1, §4.3 (the `evaluate.enabled` switch
 only), §4.4, §9 rows `workflows.py` (`MiaPrep`), `activities.py` (`nudge_dataset` moves to `MiaPrep`'s use; `poll`
 drops the binding watch, adds `prep:go`), `mia_data/config.py` (`evaluate.enabled`); §10 row E.
 

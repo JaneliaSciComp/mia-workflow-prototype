@@ -18,7 +18,7 @@ The dataset cache (`MIA_HARNESS_CACHE_DIR`) is the raw cache for this milestone.
 zarr 3.4 (zarr v3 stores, NGFF 0.5 metadata written by hand as group attributes), tifffile via the existing
 `tiff-zip-member` snippet, pytest. No torch: the MuViT shape contract is mirrored in `check_sample`.
 
-**Spec:** `notes/specs/2026-10-21-training-buffers.md` v0.4 §2 (reading, snippets), §3 step 3 (staging layout),
+**Spec:** `docs/specs/2026-10-21-training-buffers.md` v0.4 §2 (reading, snippets), §3 step 3 (staging layout),
 §4 (harnesses, descriptor, Sample), §6.3, §10 milestone 1, §11. mia-snippets `SPEC.md` §2, §4, §5, §7.
 Consumer contract: weigertlab/muvit `MuViTDataset._sanity_check` and the demo notebook's `__getitem__`.
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, pydantic v2, PyYAML, argparse, subprocess (tmux, the `temporal` CLI, `tail`), pytest with a monkeypatched `subprocess.run`.
 
-**Spec:** `notes/specs/2026-10-14-mia-services-cli.md`
+**Spec:** `docs/specs/2026-10-14-mia-services-cli.md`
 
 ## Global Constraints
 
@@ -1253,7 +1253,7 @@ git commit -m "Remove the up-scripts and the per-app up/down/ps/logs commands; m
 ### Task 6: Docs
 
 **Files:**
-- Modify: `README.md:74-77`, `docs/autodev-local-setup.md:7-25,76-123`, `docs/github-app.md:85,92,96,106,128`, `docs/mia-data-workflow.md:81,158-166`, `notes/autodev-runbook.md:39-47,66,75-76,100,108-120`, `notes/mia-data-handoff.md:21,48-60,118`, `autodev.yaml.example:9`
+- Modify: `README.md:74-77`, `docs/autodev-local-setup.md:7-25,76-123`, `docs/github-app.md:85,92,96,106,128`, `docs/mia-data-workflow.md:81,158-166`, `docs/autodev-runbook.md:39-47,66,75-76,100,108-120`, `docs/mia-data-handoff.md:21,48-60,118`, `autodev.yaml.example:9`
 - Rule for every file: `pixi run autodev X`, `pixi run ad X` and `pixi run md X` become `pixi run mia exec <service> X` (`autodev` or `mia-data` as the service, matching `mia.yaml.example`); a bare `md check` in prose becomes `mia exec mia-data check`.
 - Not tracked but on your host: the header comment of `autodev-snippets.yaml` (line 2) says `AUTODEV_CONFIG=autodev-snippets.yaml pixi run ad up`; change it to `pixi run mia up snippets` locally.
 
@@ -1336,7 +1336,7 @@ mia-data-workflow.md line 81: `pixi run md seed` -> `pixi run mia exec mia-data 
 
 autodev.yaml.example line 9: `scripts/autodev-up.sh needs it` -> `` `mia up` needs it ``.
 
-- [ ] **Step 4: `notes/autodev-runbook.md`**
+- [ ] **Step 4: `docs/autodev-runbook.md`**
 
 Lines 39 and 43: `pixi run autodev check` -> `pixi run mia exec autodev check`. Line 41: `pixi run autodev init-labels` -> `pixi run mia exec autodev init-labels`, and `then `scripts/autodev-up.sh`. It starts, in tmux, a Temporal dev server and` -> `then `pixi run mia up`. It starts, in tmux, a Temporal dev server (session `temporal`) and`.
 Line 44: `watch `tmux attach -t autodev-<you>`` -> `watch `pixi run mia attach <service>``.
@@ -1357,17 +1357,17 @@ Lines 111-118 become:
    with no service stops everything, Temporal last; naming a service never touches Temporal.
 ```
 
-- [ ] **Step 5: `notes/mia-data-handoff.md`**
+- [ ] **Step 5: `docs/mia-data-handoff.md`**
 
 Line 21: `` CLI (`pixi run md …`) `` -> `` CLI (`pixi run mia exec mia-data …`) ``. Lines 48, 52 and 118: `pixi run md check` / `md check` -> `pixi run mia exec mia-data check` / `mia exec mia-data check`. Lines 54-57 become: `5. **Bring up.** `pixi run mia up` (Temporal if `mia.yaml` manages it, then every service: broker, sandboxed worker, poll schedule; without that schedule labels are never read). Then `mia ps`, `mia logs mia-data -f`, `mia down mia-data`, `mia restart mia-data`. `pixi run mia exec mia-data init-labels`; `pixi run mia exec mia-data seed --dry-run`; `pixi run mia exec mia-data seed`.` Line 60: `pixi run md test-pr` -> `pixi run mia exec mia-data test-pr`.
 
 - [ ] **Step 6: Check and commit**
 
-Run: `grep -rn "up\.sh\|pixi run ad\b\|pixi run md\b\|pixi run autodev\|\`ad \|\`md \|\$SANDBOX" README.md docs notes/autodev-runbook.md notes/mia-data-handoff.md autodev.yaml.example mia_data.yaml.example; true`
+Run: `grep -rn "up\.sh\|pixi run ad\b\|pixi run md\b\|pixi run autodev\|\`ad \|\`md \|\$SANDBOX" README.md docs docs/autodev-runbook.md docs/mia-data-handoff.md autodev.yaml.example mia_data.yaml.example; true`
 Expected: no output. Then:
 
 ```bash
-git add README.md docs notes/autodev-runbook.md notes/mia-data-handoff.md autodev.yaml.example
+git add README.md docs docs/autodev-runbook.md docs/mia-data-handoff.md autodev.yaml.example
 git commit -m "Docs: pixi run mia replaces the up-scripts and the ad/md tasks" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 

@@ -12,7 +12,7 @@ acts as its own bot account, `<app-slug>[bot]`:
 
 You need to be an owner of the JaneliaSciComp org, or an org owner has to make you a GitHub App manager, to create
 the App and install it. Everything else is done as the account that runs autodev. Back to the
-[README](../README.md). The service-account checklist is in [`notes/autodev-runbook.md`](../notes/autodev-runbook.md).
+[README](../README.md). The service-account checklist is in [`docs/autodev-runbook.md`](autodev-runbook.md).
 
 ## 1. Create the App
 

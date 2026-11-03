@@ -3,7 +3,7 @@
 How the services run outside a developer's tmux: Temporal in Kubernetes, the workers and csub brokers on a
 cluster-attached host as a service account, under systemd. This page is the plan; the parts marked **todo** are
 not built yet. Developer setup is [`autodev-local-setup.md`](autodev-local-setup.md); the service-account checklist
-(GitHub App, branch protection, broker policy) is in [`notes/autodev-runbook.md`](../notes/autodev-runbook.md).
+(GitHub App, branch protection, broker policy) is in [`docs/autodev-runbook.md`](autodev-runbook.md).
 Back to the [README](../README.md).
 
 ## The split

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, temporalio, pydantic, httpx, PyYAML; the mia-snippets harness (zarr, numpy) for the stage job. Tests: pytest with Temporal's time-skipping test server (as `tests/test_mia_workflows.py`).
 
-**Spec:** `notes/specs/2026-10-21-training-buffers.md` v0.5 (§1 lifecycle, §3 sourcing, §5 service calls, §6.4, §10 milestone 3). mia-snippets `SPEC.md` for the harness.
+**Spec:** `docs/specs/2026-10-21-training-buffers.md` v0.5 (§1 lifecycle, §3 sourcing, §5 service calls, §6.4, §10 milestone 3). mia-snippets `SPEC.md` for the harness.
 
 ## Global Constraints
 
@@ -51,7 +51,7 @@
 | `mia_ops/manifest.py`, `mia_ops/services.py` | app kind `mia-buffers` |
 | mia-snippets `harness/src/mia_harness/io.py`, `cache.py`, `SPEC.md` | `files.json` manifest, range reads from a cached whole file, `manual://` |
 | tests | `test_buffers_config.py`, `test_buffers_jobspec.py`, `test_buffers_drop.py`, `test_buffers_activities.py`, `test_buffers_workflows.py` (+ `tests/fixtures/buffers/buffer_history.json`), additions to `test_buffers_spec.py`, `test_buffers_cli.py`, `test_mia_ops_services.py`, `test_mia_ops_manifest.py`; harness `tests/test_io.py` |
-| docs | `docs/development.md`, `notes/specs/2026-10-21-training-buffers.md` → v0.6, `mia_buffers.yaml.example`, `.gitignore` |
+| docs | `docs/development.md`, `docs/specs/2026-10-21-training-buffers.md` → v0.6, `mia_buffers.yaml.example`, `.gitignore` |
 
 Fixed values used throughout: labels `buffer:<stage>`; stages `new planning plan-review sourcing ready idle retired needs-human`; human labels `go approve`; workflow id `mia-buffers/<buffers repo>/issue-<n>`; marker `<!-- mia-buffers: ... -->`; round id `i<issue>-e<event id>`; buffer id = round id; raw cache `raw_root/<record id>/` (files keyed by sha256, `incoming/` for drops, `files.json` manifest); staged pyramids `staged_root/<levels key>/<record id>/` with `levels_key(256, [1,2,4]) == "p256-l1-2-4"`; job key `buf-<issue>-<round>-stage-<record[:40]>-<sha256(record)[:8]>`.
 
@@ -465,7 +465,7 @@ git commit -m "mia-buffers: MiaBuffer workflow (go → plan → approve → sour
 ### Task 6: CLI, docs, spec v0.6
 
 **Files:**
-- Modify: `mia_buffers/cli.py` (`worker`, `schedule apply`, `init-labels`), `docs/development.md` (layout row; new section "Running a buffer from an issue (milestone 3)"), `AGENTS.md` (package line mentions the workflow), `notes/specs/2026-10-21-training-buffers.md`
+- Modify: `mia_buffers/cli.py` (`worker`, `schedule apply`, `init-labels`), `docs/development.md` (layout row; new section "Running a buffer from an issue (milestone 3)"), `AGENTS.md` (package line mentions the workflow), `docs/specs/2026-10-21-training-buffers.md`
 - Test: `tests/test_buffers_cli.py`
 
 **Interfaces:**
@@ -492,7 +492,7 @@ Spec → v0.6, dated today: status line; §1 note that `ready.min_fraction` and 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add mia_buffers/cli.py docs/development.md AGENTS.md notes/specs/2026-10-21-training-buffers.md tests/test_buffers_cli.py
+git add mia_buffers/cli.py docs/development.md AGENTS.md docs/specs/2026-10-21-training-buffers.md tests/test_buffers_cli.py
 git commit -m "mia-buffers: worker, schedule and init-labels commands; milestone 3 docs; spec v0.6"
 ```
 
@@ -504,13 +504,13 @@ Not TDD: a scripted run against the real catalog, raw cache and buffer-api, with
 
 - [ ] **Step 1: Labels on the real repo.** Write the real `mia_buffers.yaml` (git-ignored) from the example: `buffers_repo: JaneliaSciComp/mia-buffers`, mia-data's `storage_root` and `harness.dir`, `raw_root` = mia-data's `<work_root>/_cache` (shares the U937 download), `staged_root` = `<work_root>/_buffers/staged`, `service.url: http://127.0.0.1:8765`, `github.auth: token` with `GITHUB_TOKEN` from `gh auth token` for this step only (the App installation does not cover the new repo yet). Run `mia-buffers init-labels`. Expected: ten `created buffer:*` lines; `gh label list -R JaneliaSciComp/mia-buffers` shows them.
 - [ ] **Step 2: Bindings in place.** Compute `catalog.dataset_folder` for U937 and BCSS; copy the milestone 1 U937 binding to `<storage_root>/<folder>/binding.yaml`; write a BCSS binding with `manual://github-bcss-breast-cancer-semantic-segmentation/bcss-0.25mpp.zip::rgbs_colorNormalized/<file>.png` URLs for a png reader snippet name that does not exist yet (`png-pairs`) so the drop path is exercised up to the stage job. Expected: both files exist.
-- [ ] **Step 3: Activities on real data (scratchpad script, root env, `-I`).** Build `Activities` with real GitHub clients (token) and `jobs=None`: `admit` on a body holding `notes/specs/buffer-2d-gray.example.yaml` (issue #1 created in the repo with that body: `gh issue create`), `plan` (expect the pool of 421 and `plan.md` in the round workspace), `read_binding` for U937 (`found`, hosts `zenodo.org`) and BCSS (`manual` list of names), `prepare_stage` for U937. Record: pool size, plan time.
+- [ ] **Step 3: Activities on real data (scratchpad script, root env, `-I`).** Build `Activities` with real GitHub clients (token) and `jobs=None`: `admit` on a body holding `docs/specs/buffer-2d-gray.example.yaml` (issue #1 created in the repo with that body: `gh issue create`), `plan` (expect the pool of 421 and `plan.md` in the round workspace), `read_binding` for U937 (`found`, hosts `zenodo.org`) and BCSS (`manual` list of names), `prepare_stage` for U937. Record: pool size, plan time.
 - [ ] **Step 4: Stage job command, run locally.** `stage_job(cfg, args, snapshot)` → take `spec.command`'s `harness stage ...` line and run it under the harness env with the job's env vars (as milestone 1 did), out = `staged_root/p256-l1-2-4/<U937 record>`. Expected: `stage.json` ok, 1 volume, `files.json` now in the raw cache with the four U937 URLs as `download` entries (the harness wrote them on HEAD), bytes fetched 0 (cache hit). Record wall time.
 - [ ] **Step 5: Offline re-run.** Same command with `MIA_HARNESS_ALLOWED_HOSTS=` empty. Expected: `stage.json` ok again (manifest served the validators, no HEAD).
 - [ ] **Step 6: Register and consume.** `mia-buffers serve --state-dir <scratch>/state3` in the background; `create_buffer` + `register_dataset` through the activities → 1 volume registered; `consume.py` from milestone 2 against the new buffer id → 16 train samples, `status` shows the volume. Record samples/s.
 - [ ] **Step 7: Manual drop on BCSS.** Drop a small zip (two real BCSS sample files from the record's `technical.sample.urls` if reachable, else a stub) into `raw_root/<bcss>/incoming/bcss-0.25mpp.zip`; `verify_drop` → ok, file keyed, `files.json` has a `manual` entry; `read_stage` after a stage attempt reports the missing `png-pairs` snippet (expected: the dataset fails for want of a reader snippet, which is milestone 4's `data:go`). Record it.
 - [ ] **Step 8: Worker and poller (if a Temporal dev server is reachable).** Try `mia_ops` with `app: mia-buffers` only if `mia up` works for the existing `mia-data` service in this session; otherwise record "worker not run here: no Temporal server or csub broker on this host; the workflow is covered by the time-skipping tests and the recorded history". Do not install or start infrastructure beyond `mia up`.
-- [ ] **Step 9: Ledger and spec row.** Write the numbers into the ledger and §10 milestone 3 row; `git diff | grep -n 'rokickik\|/nrs/'` empty; commit `notes/specs/...` as "mia-buffers: milestone 3 verification notes".
+- [ ] **Step 9: Ledger and spec row.** Write the numbers into the ledger and §10 milestone 3 row; `git diff | grep -n 'rokickik\|/nrs/'` empty; commit `docs/specs/...` as "mia-buffers: milestone 3 verification notes".
 
 ---
 

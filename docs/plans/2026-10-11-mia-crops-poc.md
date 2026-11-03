@@ -32,7 +32,7 @@ by a human whenever no existing snippet can read the dataset.
 - Harness: numpy, tifffile, imagecodecs, mrcfile, h5py, pypng
 - pytest, pytest-asyncio, respx
 
-**Spec:** [`notes/mia-crops-spec.md`](../mia-crops-spec.md) v0.8. Section numbers like §7.6 below refer to it.
+**Spec:** [`docs/mia-crops-spec.md`](../mia-crops-spec.md) v0.8. Section numbers like §7.6 below refer to it.
 The spec already holds every planning decision, so there is no spec-editing task (Task 0).
 
 ## Before you start (prerequisites, not tasks)
@@ -180,7 +180,7 @@ snippets/mrc-http/…         (Task 11)
 
 ### Task 0: Spec
 
-No task. `notes/mia-crops-spec.md` v0.8 already contains every decision this plan relies on: separate verify
+No task. `docs/mia-crops-spec.md` v0.8 already contains every decision this plan relies on: separate verify
 jobs, `mia-data/crops` as a commit status, the pinned harness checkout, autodev `required_checks`,
 `tiff-zip-member` and `mrc-http`, the `data:approve` gate, the dataset cache, the percentile stretch, the
 galleries branch, licence exclusion and the csub host rules. If implementation forces a change, edit the spec
@@ -1100,7 +1100,7 @@ this private repo, as they did for zarr-doctor. Then merge Task 11's PRs.
 - [ ] Check the dataset cache: the production crop job reports 0 bytes fetched for the zip member that the
   smoke job already staged.
 - [ ] Write down what happened (times, bytes fetched, rough cost) in a short section of
-  `notes/autodev-runbook.md`, or in a new `notes/mia-data-runbook.md` if the material outgrows a section.
+  `docs/autodev-runbook.md`, or in a new `docs/mia-data-runbook.md` if the material outgrows a section.
 
 **Commit:** `mia-data: runbook and milestone 3 notes`.
 

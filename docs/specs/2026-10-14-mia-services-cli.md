@@ -137,7 +137,7 @@ Then one manual run on a submit host: `mia up`, `mia ps`, `mia restart snippets`
 ## Docs to update
 
 `README.md` (layout table, `scripts/` row goes away), `docs/autodev-local-setup.md`, `docs/github-app.md`,
-`docs/mia-data-workflow.md`, `notes/autodev-runbook.md`, `notes/mia-data-handoff.md`, the header comment in
+`docs/mia-data-workflow.md`, `docs/autodev-runbook.md`, `docs/mia-data-handoff.md`, the header comment in
 `autodev-snippets.yaml`, the `token_file` comment in `autodev.yaml.example`. Every `pixi run autodev X`,
 `pixi run ad X` and `pixi run md X` becomes `pixi run mia exec <service> X`.
 

@@ -206,7 +206,7 @@ People consistently describe a "steep learning curve" caused by the durable-exec
 - Temporal released a "Temporal Developer Skill" for coding agents (Public Preview 2026-03-23), aimed at lowering the learning curve when using AI coding tools. — [Python SDK changelog](https://temporal.io/changelog/product-area/python-sdk)
 
 ### Inferences
-- Our team has already absorbed much of the learning curve: we have a working prototype, a replay script, and a guide in the repo (notes/temporal-guide.md). The remaining learning-curve risk is versioning discipline, not basic concepts.
+- Our team has already absorbed much of the learning curve: we have a working prototype, a replay script, and a guide in the repo (docs/temporal-guide.md). The remaining learning-curve risk is versioning discipline, not basic concepts.
 
 ### Gaps
 - I found no credible quantitative "time to productive" data. HN searches returned unrelated results. The "1 in 4 smooth" statistic is unverified at its primary source.

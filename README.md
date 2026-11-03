@@ -17,8 +17,8 @@ autodev squash-merges that exact commit and closes the issue. Anything it can't 
 
 Humans stay in control. Only people with write access can trigger, approve or steer it, agent commits touching
 `.github/` are refused, and branch protection on `main` is the real merge gate. Details, trust boundaries and
-known gaps: [`notes/autodev-runbook.md`](notes/autodev-runbook.md). Design rationale:
-[`notes/agentic-dev-infrastructure.md`](notes/agentic-dev-infrastructure.md).
+known gaps: [`docs/autodev-runbook.md`](docs/autodev-runbook.md). Design rationale:
+[`docs/agentic-dev-infrastructure.md`](docs/agentic-dev-infrastructure.md).
 
 ## mia-data
 
@@ -31,7 +31,7 @@ A human approves with `data:approve`, and those crops are published to shared st
 rejects with `data:reject` and comments, which go to the agent fixing the snippet (a new snippet's PR, which autodev
 writes, is merged only when its crops are approved). Every stage is a label
 and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
-step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`notes/mia-crops-spec.md`](notes/mia-crops-spec.md).
+step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/mia-crops-spec.md`](docs/mia-crops-spec.md).
 
 ## Why durable workflows
 
@@ -74,6 +74,5 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 | `autodev/` | autodev: workflows, activities, CLI; GitHub client and csub job runner shared with mia-data |
 | `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run mia exec mia-data ...`) |
 | `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data), and `mia exec <service> <cmd>` runs an app command with that service's config |
-| `docs/` | setup guides, the [mia-data workflow overview](docs/mia-data-workflow.md) and the [development guide](docs/development.md) |
-| `notes/` | design notes, runbook, specs |
+| `docs/` | setup guides, the [mia-data workflow overview](docs/mia-data-workflow.md) and the [development guide](docs/development.md); design notes, the runbook, `specs/` and `plans/` |
 | `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed. `pixi run lint` runs ruff, `pixi run typecheck` runs mypy |

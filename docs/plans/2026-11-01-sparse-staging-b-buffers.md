@@ -16,7 +16,7 @@ candidate when a volume has them; `_split` draws the frozen list without replace
 Branch `sparse-staging` in this repo. Depends on part A's file formats (`plan-rule.json`, `voxel_size.json`,
 `stage.json` keys) but not on its code: this repo's tests use hand-written `stage.json` fixtures as today.
 
-**Spec:** `notes/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md` v0.2: §2.1, §2.3 (budget), §2.5 (plan-time
+**Spec:** `docs/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md` v0.2: §2.1, §2.3 (budget), §2.5 (plan-time
 report), §4.1 (job inputs), §4.3 (`stage.json`), §4.4, §7, §8 item 3 and the deployment note.
 
 ## Global Constraints
@@ -51,7 +51,7 @@ report), §4.1 (job inputs), §4.3 (`stage.json`), §4.4, §7, §8 item 3 and th
 ### Task 1: `sampling.plan.samples` in the spec grammar
 
 **Files:**
-- Modify: `mia_buffers/spec.py` (`Sampling`), `notes/specs/buffer-2d-gray.example.yaml`, `tests/fixtures/buffers/spec.yaml`; Test: `tests/test_buffers_spec.py`
+- Modify: `mia_buffers/spec.py` (`Sampling`), `docs/specs/buffer-2d-gray.example.yaml`, `tests/fixtures/buffers/spec.yaml`; Test: `tests/test_buffers_spec.py`
 
 **Interfaces:**
 - Produces: `class SamplePlan(_Strict): samples: dict[str, PositiveInt] = {"train": 1000, "val": 20, "test": 20}`; `Sampling.plan: SamplePlan = SamplePlan()`; `Spec` validator: every key of `sampling.plan.samples` is a key of `splits.fractions` and vice versa (error text `sampling.plan.samples must name exactly the splits {…}`).
@@ -254,7 +254,7 @@ def test_split_planes_golden():
 ### Task 6: Client, docs, example spec, final checks
 
 **Files:**
-- Modify: `mia_buffers/client.py` (one test that `NotStaged` propagates out of `__getitem__`; no catch added), `docs/development.md` (the buffers walkthrough: `harness stage --plan … --voxel-size …`, candidates, `exhausted`), `notes/specs/2026-10-21-training-buffers.md` §3 (one "as built" paragraph pointing at the new spec); Test: `tests/test_buffers_client.py`
+- Modify: `mia_buffers/client.py` (one test that `NotStaged` propagates out of `__getitem__`; no catch added), `docs/development.md` (the buffers walkthrough: `harness stage --plan … --voxel-size …`, candidates, `exhausted`), `docs/specs/2026-10-21-training-buffers.md` §3 (one "as built" paragraph pointing at the new spec); Test: `tests/test_buffers_client.py`
 
 - [ ] **Step 1: Write the failing test**
 
