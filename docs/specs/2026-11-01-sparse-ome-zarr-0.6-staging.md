@@ -375,7 +375,7 @@ The worker's `read_stage` publishes (rename) only when `ok`, as today.
    **Deployment note:** a round pins its harness commit, and an old harness does not know `--plan`; deploy PR B
    with no round in sourcing (the same rule as the milestone-B restart), or the worker must pass the new flags
    only when the pinned harness is new enough.
-4. `docs/ome-zarr-0.6-frictions.md`: what 0.6 could not say (first entries: no slot for an *estimated* transform
+4. `notes/ome-zarr-0.6-frictions.md` (local, untracked): what 0.6 could not say (first entries: no slot for an *estimated* transform
    value; none for verification records; none for derivation from non-Zarr sources; no way to say "this chunk is
    intentionally absent" as opposed to "fill"; `labels` and the `raw/` sub-group both being multiscales over the
    same arrays; `(L−1)/2` is a note, not a MUST; no place to say what bytes a non-Zarr source had, so ids stay

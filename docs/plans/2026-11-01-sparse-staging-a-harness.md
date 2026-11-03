@@ -515,7 +515,7 @@ def test_check_stage_imports_no_snippet_code():
 
 **Files:**
 - Modify: `SPEC.md` §7 (the `stage` line and a `check-stage` line), §8 (a paragraph: a Stack comes from a sparse 0.6 artifact; `NotStaged`), `harness/README.md` if it lists commands.
-- Create (this repo, not mia-snippets): `docs/ome-zarr-0.6-frictions.md` with the entries of spec §8 item 4 as a bulleted list, one line each, plus anything Tasks 4–7 ran into.
+- Create (this repo, not mia-snippets): `notes/ome-zarr-0.6-frictions.md` (local, untracked) with the entries of spec §8 item 4 as a bulleted list, one line each, plus anything Tasks 4–7 ran into.
 
 - [ ] **Step 1: Update SPEC.md §7**
 
@@ -527,7 +527,7 @@ harness stage   <binding.yaml> --snippets <dir> --record <record.yaml> --plan pl
 harness check-stage DIR                                               # 0.6 schemas, coverage, digests; no snippet code
 ```
 
-- [ ] **Step 2: Write `docs/ome-zarr-0.6-frictions.md`** (this repo) from spec §8.4 plus findings.
+- [ ] **Step 2: Write `notes/ome-zarr-0.6-frictions.md` (local, untracked)** (this repo) from spec §8.4 plus findings.
 
 - [ ] **Step 3: Run the full harness suite and the CI checker's tests**
 
