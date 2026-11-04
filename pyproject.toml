@@ -85,7 +85,7 @@ mia = "mia"
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["notes"]
+extend-exclude = ["notes", "docs"]  # plan files quote code that ruff would reformat
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
