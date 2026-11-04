@@ -20,7 +20,7 @@ runs the syncs, evicts, and fixes stale builds. Nothing in the service deletes; 
 pytest, ruff, mypy via pixi. The harness change lives in the mia-snippets checkout (`harness.dir` of `mia.yaml`,
 branch `training-buffers`, its own `pixi run test`).
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.6, §1.7, §1.10, §3 (`assets`), §3.1
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.6, §1.7, §1.10, §3 (`assets`), §3.1
 (`PUT /assets`, `GET /assets`, `GET /locks`, `POST /sync/assets`), §5.2 steps 2–3, §5.4, §5.5, §5.6, §8 (`quota`,
 `limits.fetch_*`), §9 rows `mia-snippets harness`, `mia_core/`, `mia_data/activities.py, workflows.py`,
 `mia_data/jobspec.py`, `mia_buffers/ledger.py, api.py`, `mia_buffers/workflows.py`, `mia_buffers/activities.py`,
@@ -786,7 +786,7 @@ def test_stale_builds():
   the operator note that hand-run harness commands bypass the lock and must stay off records a round is touching);
   `AGENTS.md` (two bullets under "Rules that will bite you": no job writes a record's raw cache unless its worker
   holds `<local_root>/locks/raw/<record>`; only the buffers worker's keeper deletes under the roots, the service
-  never does); `docs/mia-data-workflow.md` (if Task 5 left anything out); `notes/specs/2026-10-25-prep-and-buffering.md`
+  never does); `docs/mia-data-workflow.md` (if Task 5 left anything out); `docs/specs/2026-10-25-prep-and-buffering.md`
   (a short "Built in C" note under §10 row C listing this plan's deviations by one line each);
   `mia.yaml.example` (comments on `quota:` if Task 1 left them thin).
 

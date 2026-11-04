@@ -1,8 +1,8 @@
 # The mia-data workflow
 
 How a dataset in the MIA catalog becomes a set of verified, published image crops, and which component does
-each step. The authoritative design is [`notes/mia-crops-spec.md`](../notes/mia-crops-spec.md); the setup
-checklist is the mia-data section of [`notes/autodev-runbook.md`](../notes/autodev-runbook.md).
+each step. The authoritative design is [`docs/mia-crops-spec.md`](mia-crops-spec.md); the setup
+checklist is the mia-data section of [`docs/autodev-runbook.md`](autodev-runbook.md).
 
 ```mermaid
 flowchart TD

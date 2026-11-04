@@ -15,7 +15,7 @@ quotas), `GET /usage/<buffer>` (daily draws, distinct consumers, empty responses
 
 **Tech Stack:** as E; `importlib.resources` for the page; vanilla JS, SVG charts (the explorer's `hbars`).
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.3, §1.8, §3 (`usage`), §3.1 (`GET /usage`,
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.3, §1.8, §3 (`usage`), §3.1 (`GET /usage`,
 `GET /` and `/ui/*`), §5.3 (`health.max_empty_fraction` reported), §6, §7, §9 rows `ledger.py, api.py` (daily
 usage rollup, static page), `mia_buffers/ui/`; §10 row F.
 
@@ -125,7 +125,7 @@ Deviations from the spec, decided here so no task re-decides them:
 ### Task 2: the page
 
 **Files:**
-- Create: `mia_buffers/ui/index.html` (one file; the explorer `notes/pool-explorer.html` is the base for layout,
+- Create: `mia_buffers/ui/index.html` (one file; the explorer `docs/pool-explorer.html` is the base for layout,
   tokens, `el`/`svgEl`/`hbars`/tooltip helpers and the table; its embedded `R` data, `ruleFor`/`positions`/
   `evaluate`/`weigh` planner, the sweep chart and the "findings" section are dropped)
 - Test: none in pytest beyond Task 3's coverage test; the implementer verifies by running `mia-buffers serve`

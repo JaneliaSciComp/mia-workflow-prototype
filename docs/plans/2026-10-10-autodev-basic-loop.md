@@ -16,7 +16,7 @@
 - csub client library; Claude Code CLI inside csub jobs; agentic-sandbox (`sandbox-run.sh`) for the worker
 - pytest, pytest-asyncio, respx
 
-**Spec:** [`notes/agentic-dev-infrastructure.md`](../agentic-dev-infrastructure.md) gives the design context: why Temporal, the trust boundaries, and what is borrowed from where. The "Design decisions" section below is the spec for this basic loop.
+**Spec:** [`docs/agentic-dev-infrastructure.md`](../agentic-dev-infrastructure.md) gives the design context: why Temporal, the trust boundaries, and what is borrowed from where. The "Design decisions" section below is the spec for this basic loop.
 
 ## Design decisions (the spec for this plan)
 
@@ -110,7 +110,7 @@
 | `autodev/cli.py` | `autodev check / init-labels / worker / schedule apply` |
 | `autodev.yaml.example` | annotated config |
 | `scripts/autodev-up.sh` | tmux: Temporal dev server, host-side csub broker, worker inside `sandbox-run.sh` |
-| `notes/autodev-runbook.md` | running as yourself, service-account setup, how humans drive it |
+| `docs/autodev-runbook.md` | running as yourself, service-account setup, how humans drive it |
 | `tests/autodev_helpers.py` | `make_cfg`, `make_origin`, `agent_commit`, `fake_gh`, constants |
 
 ---
@@ -2870,7 +2870,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 10: Runbook and an end-to-end run as yourself
 
 **Files:**
-- Create: `notes/autodev-runbook.md`
+- Create: `docs/autodev-runbook.md`
 - Modify: `README.md` (add one line linking the runbook under a new "autodev" heading)
 
 **Interfaces:**
@@ -2878,7 +2878,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the runbook**
 
-`notes/autodev-runbook.md`:
+`docs/autodev-runbook.md`:
 ````markdown
 # autodev runbook
 
@@ -2943,7 +2943,7 @@ comment `/approve <first 7+ chars of the head sha>` instead.
 ## autodev
 
 An agentic issue → PR → approval → merge loop built on the same Temporal stack: see
-[`notes/autodev-runbook.md`](notes/autodev-runbook.md).
+[`docs/autodev-runbook.md`](docs/autodev-runbook.md).
 ```
 
 - [ ] **Step 2: Run the full suite**
@@ -2974,7 +2974,7 @@ If the worker can't reach Temporal from inside the sandbox (the `localhost` CONN
 - [ ] **Step 4: Commit**
 
 ```bash
-git add notes/autodev-runbook.md README.md
+git add docs/autodev-runbook.md README.md
 git commit -m "autodev: runbook (personal and service-account setup) and README pointer
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

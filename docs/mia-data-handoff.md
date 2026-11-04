@@ -1,8 +1,8 @@
 # mia-data handoff: what was built on 2026-10-11/12 and what you need to do to try it
 
 Branch `mia-crops-poc` in this repo (26 commits after `42c1c19`), and a new local repo at
-`<harness.dir>` (your mia-snippets checkout) (`main`, 24 commits, **not on GitHub**). Everything follows `notes/mia-crops-spec.md`
-(now v0.9) and `notes/plans/2026-10-11-mia-crops-poc.md`. Nothing was pushed, no GitHub repos were created, and
+`<harness.dir>` (your mia-snippets checkout) (`main`, 24 commits, **not on GitHub**). Everything follows `docs/mia-crops-spec.md`
+(now v0.9) and `docs/plans/2026-10-11-mia-crops-poc.md`. Nothing was pushed, no GitHub repos were created, and
 no broker policy was edited. Each task was implemented by one agent and reviewed by another; every Important
 finding was fixed and re-reviewed; both repos then had a whole-branch review and one fix wave. The rulings I made
 on your behalf are listed at the end: read them, they are the decisions you did not get to make.
@@ -20,7 +20,7 @@ on your behalf are listed at the end: read them, they are the decisions you did 
   `crop_test.py` (shared judging), CLI.
 - CLI (`pixi run mia exec mia-data …`): `check`, `init-labels`, `seed [--dry-run]`, `worker`, `schedule apply`,
   `test-pr <pr> --binding <file> --record <id>`, `crops-by-snippet <name>`, `reindex [dataset]`.
-- `mia_ops/` (`pixi run mia`, which replaced the up-scripts), `mia_data.yaml.example`, and a "mia-data" section in `notes/autodev-runbook.md`.
+- `mia_ops/` (`pixi run mia`, which replaced the up-scripts), `mia_data.yaml.example`, and a "mia-data" section in `docs/autodev-runbook.md`.
 
 **`<harness.dir>` (your mia-snippets checkout)** (`cd harness && pixi run test`: 122; `pixi run ci-test`: 14)
 - `SPEC.md`, `harness/` (`smoke`, `crop`, `verify`, `preview`; `io` with range reads, dataset cache, byte cap,

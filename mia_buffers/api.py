@@ -331,8 +331,12 @@ class BufferService:
         if reason:
             raise HttpError(422, reason)
         staged = parsed.artifact or str(PurePosixPath(parsed.path).parent)  # the artifact, else its directory
+        # a rebuild under a new artifact (or new candidates) invalidates every frozen row: they index candidates
+        previous = next((known for known in self.ledger.volumes(buffer) if known.id == volume_id), None)
+        changed = previous is not None and (previous.artifact, previous.samples) != (volume.artifact, volume.samples)
         self.ledger.put_volume(buffer, volume, refs=[("staged", staged), ("raw", parsed.record)])
-        return 200, {"buffer": buffer, "volume": volume_id}, {}
+        cleared = self.ledger.clear_frozen(buffer) if changed else 0
+        return 200, {"buffer": buffer, "volume": volume_id, "frozen_cleared": cleared}, {}
 
     # --- the registry: what exists on disk, and which buffers use it -----------------------------
 

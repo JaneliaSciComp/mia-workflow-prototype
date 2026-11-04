@@ -43,10 +43,9 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 | `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the worker-side client of buffer-api's registry (`registry.py`), the untrusted-output helpers (`untrusted.py`). Imports no application package; every package may import it |
 | `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
-| `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `notes/specs/2026-10-21-training-buffers.md`; walkthroughs below |
+| `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `docs/specs/2026-10-21-training-buffers.md`; walkthroughs below |
 | `tests/` | one `test_<package>_<module>.py` per module; `autodev_helpers.py` and `mia_helpers.py` build configs and fake repos; `fixtures/` holds recorded workflow histories and sample catalog data |
-| `docs/` | setup guides, the mia-data workflow overview, this page |
-| `notes/` | design: `mia-crops-spec.md` (the mia-data spec), `autodev-runbook.md` (operations and known gaps), `agentic-dev-infrastructure.md` (why), `specs/` and `plans/` (dated, historical; they describe the code as it was when written) |
+| `docs/` | setup guides, the mia-data workflow overview, this page; design: `mia-crops-spec.md` (the mia-data spec), `autodev-runbook.md` (operations and known gaps), `agentic-dev-infrastructure.md` (why), `specs/` and `plans/` (dated, historical; they describe the code as it was when written) |
 | `mia_ops/` | `pixi run mia`: the services manifest (`mia.yaml`), the Temporal and app-service recipes under tmux and agentic-sandbox, and `mia exec` for app commands |
 
 Within each package the split is the same: `workflows.py` (deterministic Temporal code, no I/O), `activities.py`
@@ -113,7 +112,7 @@ them on deploy. The autodev bot opens PRs here too; review them like any other.
 
 Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the same steps from a buffer issue.
 
-1. **Plan.** `mia-buffers plan notes/specs/buffer-2d-gray.example.yaml --catalog-dir <catalog checkout> --json plan.json`
+1. **Plan.** `mia-buffers plan docs/specs/buffer-2d-gray.example.yaml --catalog-dir <catalog checkout> --json plan.json`
    writes the data pool with a weight, a voxel size (documented or assumed) and a channel recipe per record.
 2. **Stage** each dataset you want to serve with the mia-snippets harness (see that repo's `SPEC.md` §7):
    `harness stage binding.yaml --snippets <snippets dir> --record record.yaml --plan plan-rule.json

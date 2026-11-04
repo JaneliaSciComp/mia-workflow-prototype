@@ -18,7 +18,7 @@ per-dataset backoff timers with one ticker task per round behind `workflow.patch
 **Tech Stack:** as C (Python 3.12 stdlib, httpx, pydantic 2, Temporal, csub; pytest/ruff/mypy via pixi); `gzip`
 for the draws archive.
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.10, §1.13, §3 (`refs`, `buffer_datasets`,
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.10, §1.13, §3 (`refs`, `buffer_datasets`,
 `buffer_events`, draws archive), §3.1 (`GET /records`, `PUT/GET /buffers/<id>/datasets`, `POST/GET
 /buffers/<id>/events`, `DELETE /buffers/<id>/refs`, `GET /buffers`, `status` stats pyramids), §5.1, §5.2 steps 3–4,
 §5.3, §5.7, §9 rows `plan.py, select.py`, `register.py, client.py`, `workflows.py`, `activities.py`, `spec.py`,
@@ -376,7 +376,7 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, server, monkeypatch
   and the `.building-*` name, the recipe pin and `allow_recipe_mismatch`, idle/keep/retire with the labels and the
   archive, degraded, the ticker; the "Serving a buffer" section's `register` step gains `--plan-hash` and the
   recipe note), `AGENTS.md` (one bullet: a staged artifact is published by the worker's rename and never written
-  again), `notes/specs/2026-10-25-prep-and-buffering.md` (a "**Built in D (date).**" paragraph listing this plan's
+  again), `docs/specs/2026-10-25-prep-and-buffering.md` (a "**Built in D (date).**" paragraph listing this plan's
   deviations one line each), `mia.yaml.example` if any key changed (none expected).
 - [ ] Write, `pixi run lint`, real-path grep, commit — `docs: the buffer after ready — board, events, recipe, idle/retire, degraded`.
 

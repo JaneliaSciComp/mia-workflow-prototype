@@ -64,15 +64,17 @@ def catalog_snapshot(cfg: Config, ref: str, tokens: Callable[[], str | None] = l
 
 
 def stage_job(cfg: Config, args: StageJobArgs, snapshot: Path) -> JobSpec:
-    """`harness stage` on the workspace's binding: hosts exactly as given (none for a dropped dataset or an
-    offline stage), the raw cache read-write unless `args.cache_writable` is False, the staged directory
-    read-write."""
+    """`harness stage` on the workspace's binding, then `harness check-stage` on its output (spec §6: one job, one
+    lock, one read_stage; a failed check leaves stage.json `ok: false` and fails the job): hosts exactly as given
+    (none for a dropped dataset or an offline stage), the raw cache read-write unless `args.cache_writable` is
+    False, the staged directory read-write."""
     if not args.out:
         raise ValueError("StageJobArgs.out is empty: the submit activity sets it to the staged directory")
     # args.levels/patch/voxel_size_nm stay on StageJobArgs for recorded histories; the plan and voxel files carry them.
     body = (
         f"harness stage {BINDING_FILE} --snippets {quote(str(snapshot))} --record {RECORD_FILE} "
-        f"--plan {PLAN_FILE} --voxel-size {VOXEL_FILE} --out {quote(args.out)}"
+        f"--plan {PLAN_FILE} --voxel-size {VOXEL_FILE} --out {quote(args.out)} && "
+        f"harness check-stage {quote(args.out)}"
     )
     spec = _spec(cfg, "stage", Path(args.workspace), args.pins, body, list(args.hosts), [snapshot])
     cache = str(cfg.paths.raw_root / args.record)

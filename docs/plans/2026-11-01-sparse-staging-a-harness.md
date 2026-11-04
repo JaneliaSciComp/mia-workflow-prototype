@@ -19,7 +19,7 @@ pydantic 2, `jsonschema` + `referencing` (new, conda-forge), pytest. Repo: mia-s
 `pixi run test`). Develop in a fresh clone (`~/dev/mia-snippets`, branch `sparse-staging`), **never on a branch of
 the live `harness.dir` checkout**: the worker pins `git rev-parse HEAD` of that directory.
 
-**Spec:** `notes/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md` v0.2 (this repo): §2 (plan), §3 (geometry),
+**Spec:** `docs/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md` v0.2 (this repo): §2 (plan), §3 (geometry),
 §4.1–4.3, §5 (provenance), §6 (verification), §7 (tests), §8 item 2 and 4. Part B (this repo's `mia_buffers`) is
 `2026-11-01-sparse-staging-b-buffers.md` and consumes the file formats fixed here.
 
@@ -515,7 +515,7 @@ def test_check_stage_imports_no_snippet_code():
 
 **Files:**
 - Modify: `SPEC.md` §7 (the `stage` line and a `check-stage` line), §8 (a paragraph: a Stack comes from a sparse 0.6 artifact; `NotStaged`), `harness/README.md` if it lists commands.
-- Create (this repo, not mia-snippets): `notes/ome-zarr-0.6-frictions.md` with the entries of spec §8 item 4 as a bulleted list, one line each, plus anything Tasks 4–7 ran into.
+- Create (this repo, not mia-snippets): `notes/ome-zarr-0.6-frictions.md` (local, untracked) with the entries of spec §8 item 4 as a bulleted list, one line each, plus anything Tasks 4–7 ran into.
 
 - [ ] **Step 1: Update SPEC.md §7**
 
@@ -527,7 +527,7 @@ harness stage   <binding.yaml> --snippets <dir> --record <record.yaml> --plan pl
 harness check-stage DIR                                               # 0.6 schemas, coverage, digests; no snippet code
 ```
 
-- [ ] **Step 2: Write `notes/ome-zarr-0.6-frictions.md`** (this repo) from spec §8.4 plus findings.
+- [ ] **Step 2: Write `notes/ome-zarr-0.6-frictions.md` (local, untracked)** (this repo) from spec §8.4 plus findings.
 
 - [ ] **Step 3: Run the full harness suite and the CI checker's tests**
 

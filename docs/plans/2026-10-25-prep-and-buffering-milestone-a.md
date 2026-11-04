@@ -14,7 +14,7 @@ the lock directory and the token file into the workers. The old per-app files ke
 
 **Tech Stack:** Python 3.12, pydantic 2, PyYAML, stdlib (`os`, `stat`, `secrets`); pytest, ruff, mypy via pixi.
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2, §1.7, §1.11, §1.12, §8, §9, §10 row A.
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2, §1.7, §1.11, §1.12, §8, §9, §10 row A.
 Deviation from §10 row A: `mia_core/registry.py` and `mia_core/locks.py` are created by milestones B and C,
 where their first callers are; this milestone creates `config.py`, `fs.py` and `untrusted.py`.
 
@@ -899,7 +899,7 @@ git commit -m "mia_core.untrusted: read_untrusted, neutralize, write_atomic and 
 
 **Files:**
 - Modify: `AGENTS.md`, `docs/development.md`, `docs/autodev-local-setup.md`, `docs/mia-data-workflow.md`,
-  `docs/github-app.md`, `notes/autodev-runbook.md`
+  `docs/github-app.md`, `docs/autodev-runbook.md`
 
 No code. The exact changes:
 
@@ -923,14 +923,14 @@ No code. The exact changes:
 - `docs/mia-data-workflow.md` "Operating it": "Config is `mia_data.yaml` (see `mia_data.yaml.example`)" → "Config
   is the `mia-data` block of `mia.yaml` (see `mia.yaml.example`)".
 - `docs/github-app.md` line "In `autodev.yaml`:" → "In the shared `github` section of `mia.yaml`:".
-- `notes/autodev-runbook.md` steps 2 and the mia-data step 1: the same substitution; the personal-instance
+- `docs/autodev-runbook.md` steps 2 and the mia-data step 1: the same substitution; the personal-instance
   advice becomes "name the service `autodev-<you>` in `services`" (the deployment is the service name).
 
 - [ ] **Step 1: Make the edits above**
 
 - [ ] **Step 2: Verify**
 
-Run: `grep -rn 'yaml.example\|_CONFIG\b' --include='*.md' docs AGENTS.md notes/autodev-runbook.md`
+Run: `grep -rn 'yaml.example\|_CONFIG\b' --include='*.md' docs AGENTS.md docs/autodev-runbook.md`
 Expected: only `mia.yaml.example` and `MIA_CONFIG` remain.
 
 Run: `pixi run fmt && pixi run lint && pixi run typecheck && pixi run test && git diff | grep -n 'rokickik\|/nrs/'`
@@ -939,7 +939,7 @@ Expected: four clean runs; the grep prints nothing.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add AGENTS.md docs notes/autodev-runbook.md
+git add AGENTS.md docs docs/autodev-runbook.md
 git commit -m "docs: one mia.yaml, mia_core, the host-local root and the worker token"
 ```
 

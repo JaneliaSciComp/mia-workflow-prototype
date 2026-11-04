@@ -1,7 +1,7 @@
 """The buffer spec: the YAML a buffer issue carries, validated strictly (unknown keys refused).
 
 The grammar is the catalog's examples/spec-microscopy-pretrain.yaml plus `sampling.levels`, `ready` and `sourcing`. Decisions the
-architecture spec leaves open are fixed in notes/plans/2026-10-23-mia-buffers-milestone-0.md. The spec is untrusted
+architecture spec leaves open are fixed in docs/plans/2026-10-23-mia-buffers-milestone-0.md. The spec is untrusted
 text: safe-loaded, every field typed, and refused with the validator's own message.
 """
 

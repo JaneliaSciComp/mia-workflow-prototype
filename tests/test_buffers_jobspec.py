@@ -50,7 +50,7 @@ def test_stage_job_mounts_cache_and_out_rw_and_allows_hosts(tmp_path):
         tmp_path / "snap",
     )
     assert "harness stage binding.yaml" in spec.command
-    assert f"--out {out}" in spec.command
+    assert f"--out {out} && harness check-stage {out}\n" in spec.command  # the check runs only after an ok stage
     assert spec.allow_hosts == ["zenodo.org"] and spec.name == "mia-buffers-stage"
     assert str(cfg.paths.raw_root / "rec") in spec.rw_mounts and str(out) in spec.rw_mounts
     assert str(tmp_path / "snap") in spec.ro_mounts

@@ -14,7 +14,7 @@ Temporal, no GitHub: the catalog is a directory, pinned by comparing its `HEAD` 
 
 **Tech Stack:** Python 3.12, pydantic 2, PyYAML, argparse, pytest. Reuses `mia_data.catalog.FAMILIES`.
 
-**Spec:** `notes/specs/2026-10-21-training-buffers.md` v0.4 (§1 planning row, §2 "where does dataset filtering
+**Spec:** `docs/specs/2026-10-21-training-buffers.md` v0.4 (§1 planning row, §2 "where does dataset filtering
 happen", §8, §10 milestone 0, §11). Buffer spec grammar: the catalog's `examples/spec-microscopy-pretrain.yaml`.
 
 ## Global Constraints

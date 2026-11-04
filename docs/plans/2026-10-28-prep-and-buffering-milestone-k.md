@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, temporalio (patched markers, replay fixtures), httpx, SQLite ledger, the static page in `mia_buffers/ui/index.html`, pixi tasks `fmt`/`lint`/`typecheck`/`test`.
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` §15 (amendment v0.6), with §5.1–5.3 for the flow it amends. Milestone row K in §10.
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` §15 (amendment v0.6), with §5.1–5.3 for the flow it amends. Milestone row K in §10.
 
 ## Global Constraints
 
@@ -133,7 +133,7 @@ Behaviour to implement, in `_round` and `_source_all` only when `self.gate_on` (
 ### Task 6: Page, docs, diagrams, deploy notes
 
 **Files:**
-- Modify: `mia_buffers/ui/index.html:704-708` (detail notices), `docs/development.md:443-477` (walkthrough steps 1, 3, 5), `README.md` (the buffers paragraph naming the labels, if it names them), `notes/specs/2026-10-25-prep-and-buffering.md` §10 row K build note, `mia.yaml.example` (`plan.auto_approve` comment if present)
+- Modify: `mia_buffers/ui/index.html:704-708` (detail notices), `docs/development.md:443-477` (walkthrough steps 1, 3, 5), `README.md` (the buffers paragraph naming the labels, if it names them), `docs/specs/2026-10-25-prep-and-buffering.md` §10 row K build note, `mia.yaml.example` (`plan.auto_approve` comment if present)
 - Test: `tests/test_buffers_ui.py` (route scan) stays green; `python3`-side `node --check` of the page script as done in this branch.
 
 - [ ] **Step 1: Page.** In `viewBuffer`, when the latest event is `staged`, add a notice: "Staged, waiting for `buffer:approve` on the issue: approve serves what the board shows as servable, partial or not; consumers are refused until then." Reword the "Not sourced yet" notice to say "after `buffer:approve` (a `buffer:plan` round) or at once (a `buffer:go` round)". Run `node --check` on the extracted script.

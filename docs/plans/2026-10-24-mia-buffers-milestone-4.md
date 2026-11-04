@@ -8,7 +8,7 @@
 
 **Tech Stack:** as milestone 3 (Python 3.12, temporalio, pydantic, httpx, PyYAML; numpy/zarr only inside the harness).
 
-**Spec:** `notes/specs/2026-10-21-training-buffers.md` v0.6: §1 (sourcing row), §3 step 1 and the recipe paragraph, §6.1–6.2, §10 row 4. Decisions taken in the 2026-10-24 brainstorm with the user: mia-data's rules may be overridden freely (it is a demo that will be deleted); BCSS and the `png-pairs` snippet are left to a live run.
+**Spec:** `docs/specs/2026-10-21-training-buffers.md` v0.6: §1 (sourcing row), §3 step 1 and the recipe paragraph, §6.1–6.2, §10 row 4. Decisions taken in the 2026-10-24 brainstorm with the user: mia-data's rules may be overridden freely (it is a demo that will be deleted); BCSS and the `png-pairs` snippet are left to a live run.
 
 ## Global Constraints
 
@@ -427,14 +427,14 @@ git commit -m "mia-buffers: unmatched datasets go to mia-data (data:go on the da
 ### Task 6: Docs and spec v0.7
 
 **Files:**
-- Modify: `docs/development.md` (milestone 3 section: step 4 and the "Not in milestone 3" paragraph; new short section "Datasets without a binding and normalisation statistics (milestone 4)"), `notes/specs/2026-10-21-training-buffers.md` (header status/version, §1 sourcing row, §3 step 1 and the recipe paragraph with *As built in milestone 4* notes, §6.1–6.2 as built, §10 row 4 note), `mia_data` docs line in `docs/development.md` on `trusted_bots` and the mia_data.yaml entry the operator must add
+- Modify: `docs/development.md` (milestone 3 section: step 4 and the "Not in milestone 3" paragraph; new short section "Datasets without a binding and normalisation statistics (milestone 4)"), `docs/specs/2026-10-21-training-buffers.md` (header status/version, §1 sourcing row, §3 step 1 and the recipe paragraph with *As built in milestone 4* notes, §6.1–6.2 as built, §10 row 4 note), `mia_data` docs line in `docs/development.md` on `trusted_bots` and the mia_data.yaml entry the operator must add
 
 - [ ] **Step 1: Write** the docs: the operator steps (add `datasets_repo` to `mia_buffers.yaml`; add the buffer worker's bot login to `trusted_bots` in `mia_data.yaml`; both deployments on the same GitHub App); what a human sees on the dataset issue (opened by the buffer bot with the record body; `data:go`; the usual mia-data review); where the binding lands (`<storage_root>/<dataset folder>/binding.yaml`, `manifest.json.binding.sha256`); the drop rule; the statistics (`intensity_sample`, `normalize` bounds, `scope`); the re-stage requirement for older staged directories when scope is not `patch`.
 - [ ] **Step 2: Check** `git diff | grep -n 'rokickik\|/nrs/'` → Expected: empty.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/development.md notes/specs/2026-10-21-training-buffers.md
+git add docs/development.md docs/specs/2026-10-21-training-buffers.md
 git commit -m "docs: milestone 4 hand-off and statistics; spec v0.7"
 ```
 
@@ -455,7 +455,7 @@ Expected: `img` values in `[0, 1]`, `meta.normalize_scope == "volume"`, and two 
 - [ ] **Step 6: Record** the numbers in the spec's §10 row 4 note and the ledger; commit as part of Task 6's files if the spec changes.
 
 ```bash
-git add notes/specs/2026-10-21-training-buffers.md
+git add docs/specs/2026-10-21-training-buffers.md
 git commit -m "mia-buffers: milestone 4 verification notes"
 ```
 

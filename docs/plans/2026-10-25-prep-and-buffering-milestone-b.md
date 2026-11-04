@@ -18,7 +18,7 @@ keeps its shape: only the staged directory, the asset key and the registry calls
 **Tech Stack:** Python 3.12, stdlib `sqlite3` (incl. `Connection.backup`), `http.server`, `hmac`, `httpx`
 (client), pydantic 2, PyYAML; pytest with `httpx.MockTransport`, ruff, mypy via pixi.
 
-**Spec:** `notes/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.10–1.13, §3, §3.1, §4.1, §4.2, §5.7
+**Spec:** `docs/specs/2026-10-25-prep-and-buffering.md` v0.2: §1.10–1.13, §3, §3.1, §4.1, §4.2, §5.7
 (artifact on the volume), §9 rows `mia_core/`, `mia_buffers/ledger.py, api.py`, `mia_buffers/plan.py`,
 `mia_data/activities.py`, `mia_buffers/cli.py`, §10 row B.
 
@@ -454,7 +454,7 @@ manifest with another sha → None; matching → the row with `crops` and `bindi
 **Files:**
 - Modify: `mia_buffers/api.py` (`serve` signature), `mia_buffers/cli.py` (`serve` becomes a deployment
   command), `mia_ops/services.py` (the api window's command line), `docs/development.md` (the "Serve" step and
-  the ledger location), `notes/autodev-runbook.md` (ledger location paragraph)
+  the ledger location), `docs/autodev-runbook.md` (ledger location paragraph)
 - Test: `tests/test_buffers_cli.py`, `tests/test_buffers_api.py`, `tests/test_mia_ops_services.py`
 
 **Interfaces:**
@@ -669,7 +669,7 @@ def test_volume_refs_are_keyed_by_artifact(tmp_path):
 **Files:**
 - Modify: `mia_data/activities.py` (`Activities.__init__` builds `self.registry`, `set_stage` writes the row),
   `docs/mia-data-workflow.md` (registry paragraph), `docs/development.md` ("Layout" line for `mia_core/registry.py`,
-  a "The registry" subsection), `AGENTS.md` (one bullet), `notes/autodev-runbook.md` (the sync commands)
+  a "The registry" subsection), `AGENTS.md` (one bullet), `docs/autodev-runbook.md` (the sync commands)
 - Test: `tests/test_mia_activities.py`
 
 **Interfaces:**
@@ -734,7 +734,7 @@ async def test_set_stage_survives_a_down_registry(tmp_path, caplog):
   - `AGENTS.md` "Rules that will bite you": `- **Worker routes of buffer-api take the bearer token.** Every
     PUT/POST/DELETE other than the consumer routes needs \`Authorization: Bearer <service.token_file>\`; use
     \`mia_core.registry.Registry\`, never a bare httpx call.`
-  - `notes/autodev-runbook.md`: the mia-buffers section gains `mia exec mia-buffers catalog sync` and
+  - `docs/autodev-runbook.md`: the mia-buffers section gains `mia exec mia-buffers catalog sync` and
     `datasets sync` after the first `mia up`.
 - [ ] **Step 4: Run the tests and the four checks.**
 - [ ] **Step 5: Commit** — `mia-data: set_stage reports the dataset's state to the registry; docs for milestone B`.
