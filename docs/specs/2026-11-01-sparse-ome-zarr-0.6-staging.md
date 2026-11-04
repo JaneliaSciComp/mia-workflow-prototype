@@ -297,41 +297,41 @@ them and rewrites `stage.json` from the same model. The digests describe the fin
 - Planner: the `sampling.plan` block, per-row counts, `plan_digest` in `plan.json`, the byte estimate in `plan.md`.
 - The page is unchanged; it reads nothing new.
 
-## 5. Provenance under `attributes.mia`
+## 5. Provenance: the `provenance:` convention, and `attributes.mia` for the rest
 
-A pydantic model in the harness, `mia_harness.provenance`, `"schema": 1`, written in full on each multiscale
-group (raw and labels) and summarized on the volume root (`artifact`, `derived_from`, `voxel_size`, `plan`
-digest, `verification`). Field by field:
+How a node was made is the [`provenance:` Zarr convention](https://github.com/BioImageTools/zarr-convention-provenance)
+(v0.2.0), written on every multiscale group (raw and labels) and on the volume root as `zarr_conventions` plus
+`provenance:steps`:
 
-- `artifact`: `id`, `levels_key`, `binding_hash`, `plan_digest`, `harness_commit`, `env_digest` (sha256 of the
-  harness `pixi.lock`), `snippets_commit`, `record`, `record_commit`.
-- `derived_from` (**required**, the only place that says which bytes): one entry per source file:
-  `url`, `member` (path inside an archive, or null), `validators` (`etag`, `last_modified`, `size`, and
-  `sha256` when `files.json` has it: dropped files and fetched files), `snippet` `{name, commit}`, `access`
-  (`chunk | plane | file`). Lifted from `io.validators`, the binding and `files.json`, as `crop.json` does today.
-- `geometry`: `raw_shape` and `source_axes` (the raw array's own order), `axes` (stored order), `dtype`, and
-  `levels[]`: `{factor, path, origin, extent, shape, planned_planes, chunks_written, bytes_written}` with `origin`
-  and `extent` in raw index space and `shape` the array's shape in level-L indices (§2.3).
-- `voxel_size`: per axis `{nm, source: record | file | assumed | synthetic}`; for `assumed`, `basis`
-  (`"(em, FIB-SEM) median at catalog ab6a013d"` as `assume.py` knows it) and `range` when the table has one;
-  `synthetic` is the 1 nm plane spacing mia-buffers gives a 2D stack. A bare `scale` cannot say it was guessed;
-  this field can.
-- `downsampling`: `{raw: "mean", label: "nearest", edge: "clip", nearest_offset: "(L-1)//2"}`.
-- `plan`: `digest`, `rule` (the row's rule verbatim), `samples` per split (the descriptors of §2.2, each with its
-  per-level start indices in the raw level grid).
-- `statistics`: `intensity_sample` per channel (sorted, ≤4096 values) on the raw group only, drawn from
-  **planned level-0 chunks** (8 random written chunks per channel), never from arbitrary boxes that may be holes.
-- `verification`: §6's results, `harness_commit`, `time` (UTC ISO), `schemas_commit` (the vendored 0.6 tag).
+- **Staging step** (`Sparse OME-Zarr staging`): `software` the harness at its commit; `environment` the harness
+  `pixi.lock` by sha256 (`env_digest`) at that commit; `modules` the snippets loaded, each at `snippets_commit`;
+  `parameters` exactly what the command received, the binding verbatim, the plan rule verbatim and the voxel size
+  per axis with its `source` (`record | file | assumed | synthetic`, plus `basis` and `range` for an assumed value);
+  `inputs` the record (`id`) and every source file (`uri`, `name` the archive member, `checksum` sha256 when the
+  cache has it); `outputs` the artifact id; `started` and `ended`. The root's step lists every group's inputs.
+- **Check step** (`check-stage`, §6): the harness at its commit, `parameters.schemas_commit`, `status` `ok` or
+  `failed`, `started` and `ended`. A re-run replaces it.
+
+`attributes.mia` (`"schema": 2`, `mia_harness.provenance.Provenance`) keeps only what neither OME-Zarr nor the
+convention carries and the reader or checker needs:
+
+- `geometry`: `raw_shape` and `axes` (stored order), `source_axes` (the raw array's own order), so a sparse level
+  box can be placed in the raw volume. Level origins and extents are derived from the dataset transforms.
+- `plan.samples` per split (the descriptors of §2.2, each with its per-level start indices in the raw level grid);
+  its presence marks the artifact sparse.
+- `statistics.intensity_sample` per channel (sorted, ≤4096 values) on the raw group only, drawn from **planned
+  level-0 chunks** (8 random written chunks per channel), never from arbitrary boxes that may be holes.
+- `segmentation_type` on a label group.
+- `checks`: §6's results (geometry at stage; schemas, strict, coverage at check-stage). The root carries
+  `schema` and the merged geometry check.
+
+Dropped from schema 1 as duplicates: `artifact` (the id is the step's output, the rest is in `parameters` or
+stage.json), `derived_from` (`inputs` and `modules`), `voxel_size` (`parameters`; the reader takes nm from the
+level-0 scale), `plan.rule` and `digest`, `downsampling` (`multiscales[].metadata`), `kind` and `label_key`
+(OME), `geometry.levels` (the transforms and arrays), `verification` (the check step and `checks`).
+`harness add-provenance ROOT` upgrades artifacts written under schema 1 in place.
 
 Nothing may exist only in `stage.json`.
-
-Beside `mia`, every group that carries it also carries the
-[`provenance:` Zarr convention](https://github.com/BioImageTools/zarr-convention-provenance) (v0.1.0):
-`zarr_conventions` and `provenance:steps` with one step, the stage, holding what the convention defines (the
-harness as `software`, `levels_key`, `plan_digest` and voxel size as `parameters`, `derived_from` as `inputs`
-with the sha256 when known, `started`/`ended`). `mia` stays the full record; the convention is derived from it
-(`mia_harness.provenance.convention_attributes`), and `harness add-provenance ROOT` adds it in place to
-artifacts staged before it existed.
 
 ## 6. Verification
 
