@@ -325,6 +325,14 @@ digest, `verification`). Field by field:
 
 Nothing may exist only in `stage.json`.
 
+Beside `mia`, every group that carries it also carries the
+[`provenance:` Zarr convention](https://github.com/BioImageTools/zarr-convention-provenance) (v0.1.0):
+`zarr_conventions` and `provenance:steps` with one step, the stage, holding what the convention defines (the
+harness as `software`, `levels_key`, `plan_digest` and voxel size as `parameters`, `derived_from` as `inputs`
+with the sha256 when known, `started`/`ended`). `mia` stays the full record; the convention is derived from it
+(`mia_harness.provenance.convention_attributes`), and `harness add-provenance ROOT` adds it in place to
+artifacts staged before it existed.
+
 ## 6. Verification
 
 Two commands, because the geometry check needs the snippet and the schema check must not load one:
